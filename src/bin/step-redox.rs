@@ -17,6 +17,12 @@ struct Cli {
     #[arg(long)]
     no_presentation_consolidation: bool,
 
+    #[arg(
+        long,
+        help = "Experimental: instance congruent top-level solids under Z quarter-turns"
+    )]
+    experimental_instance_z90: bool,
+
     #[arg(long)]
     no_dense_ids: bool,
 
@@ -31,6 +37,7 @@ fn main() -> Result<()> {
     let options = step_redox::Options {
         intern_values: !cli.no_intern,
         consolidate_presentation: !cli.no_presentation_consolidation,
+        experimental_instance_z90: cli.experimental_instance_z90,
         dense_ids: !cli.no_dense_ids,
     };
     let cleaned = step_redox::clean_bytes(&input, &options)?;
@@ -41,7 +48,7 @@ fn main() -> Result<()> {
         eprintln!("{}", serde_json::to_string(&cleaned.stats)?);
     } else {
         eprintln!(
-            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {})",
+            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, instance groups {}, solids {}, removed {})",
             cleaned.stats.input_bytes,
             cleaned.stats.output_bytes,
             cleaned.stats.byte_ratio * 100.0,
@@ -49,6 +56,9 @@ fn main() -> Result<()> {
             cleaned.stats.output_entities,
             cleaned.stats.interned_entities,
             cleaned.stats.consolidated_entities,
+            cleaned.stats.instance_groups,
+            cleaned.stats.instanced_solids,
+            cleaned.stats.instance_entities_removed,
         );
         for (ty, n) in &cleaned.stats.interned_by_type {
             eprintln!("  intern {ty}: {n}");

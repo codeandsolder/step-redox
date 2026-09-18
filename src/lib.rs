@@ -4,10 +4,13 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
+mod instances;
+
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
+    pub experimental_instance_z90: bool,
     pub dense_ids: bool,
 }
 
@@ -16,6 +19,7 @@ impl Default for Options {
         Self {
             intern_values: true,
             consolidate_presentation: true,
+            experimental_instance_z90: false,
             dense_ids: true,
         }
     }
@@ -30,6 +34,10 @@ pub struct Stats {
     pub output_entities: usize,
     pub interned_entities: usize,
     pub consolidated_entities: usize,
+    pub instance_groups: usize,
+    pub instanced_solids: usize,
+    pub instance_entities_removed: usize,
+    pub instance_styles_replaced: usize,
     pub byte_ratio: f64,
     pub interned_by_type: BTreeMap<String, usize>,
     pub consolidated_by_type: BTreeMap<String, usize>,
@@ -78,6 +86,33 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    let mut instance_groups = 0usize;
+    let mut instanced_solids = 0usize;
+    let mut instance_entities_removed = 0usize;
+    let mut instance_styles_replaced = 0usize;
+    if options.experimental_instance_z90 {
+        for section in &mut exchange.data {
+            let pass = instances::instance_z90_solids(&mut section.entities);
+            instance_groups += pass.groups;
+            instanced_solids += pass.solids_replaced;
+            instance_entities_removed += pass.entities_removed;
+            instance_styles_replaced += pass.styles_replaced;
+        }
+
+        // The instancing pass creates a small number of placements/directions.
+        // Normalize those in the same invocation so aggressive output is a
+        // fixed point rather than requiring a second safe cleanup pass.
+        if instance_groups > 0 && options.intern_values {
+            for section in &mut exchange.data {
+                let pass = intern_section(&mut section.entities);
+                interned_entities += pass.total;
+                for (k, v) in pass.by_type {
+                    *interned_by_type.entry(k).or_insert(0) += v;
+                }
+            }
+        }
+    }
+
     if options.dense_ids {
         for section in &mut exchange.data {
             dense_renumber(&mut section.entities);
@@ -98,6 +133,10 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             output_entities,
             interned_entities,
             consolidated_entities,
+            instance_groups,
+            instanced_solids,
+            instance_entities_removed,
+            instance_styles_replaced,
             byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
             interned_by_type,
             consolidated_by_type,

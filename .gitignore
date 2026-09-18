@@ -1,3 +1,6 @@
 /target
 /results
 *.bak.*
+
+__pycache__/
+*.pyc

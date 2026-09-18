@@ -64,14 +64,32 @@ The 132,381,990-byte largest connector in the current corpus cleans to
 
 ## Experimental mapped-item work
 
-A second tier is being developed for repeated rigidly transformed solids. STEP's
-REPRESENTATION_MAP + MAPPED_ITEM mechanism can represent one canonical advanced
-B-rep and place it repeatedly.
+`--experimental-instance-z90` instances repeated top-level `MANIFOLD_SOLID_BREP` objects using standard STEP `REPRESENTATION_MAP` + `MAPPED_ITEM`.
 
-The QFN-14 prototype detects 14 congruent lead shells plus body and exposed pad.
-A mapped-item + reachability-GC prototype reduces that file further to 446,784
-bytes (25.15% of the original), but this pass is not enabled in the library until
-it has independent OpenCascade validation for geometry and appearance.
+It is deliberately conservative. A candidate group must have matching topological counts, matching vertex geometry under a proven Z-axis quarter-turn + translation, matching shell/face/bound/loop/edge connectivity, matching recursively normalized supporting curve/surface geometry, and one uniform explicit face style per solid.
+
+Each source-to-target transform is proven directly; it is not inferred from canonical-orientation bookkeeping. The map origin is global zero and each target placement encodes the direct rigid transform `p' = R*p + d`.
+
+Current corpus examples:
+
+| model | original | safe output | aggressive output | aggressive ratio |
+|---|---:|---:|---:|---:|
+| QFN-14 | 1,776,783 | 576,652 | 496,998 | 27.97% |
+| SOP-4 | 1,750,016 | 604,036 | 429,156 | 24.52% |
+
+The current strict detector instances 12 solids across 4 proven groups in the QFN and 6 solids across 2 groups in the SOP sample. Some geometrically equivalent objects are intentionally left expanded when the STEP-level proof is ambiguous.
+
+The aggressive output is byte-idempotent under a second cleanup pass.
+
+### OpenCascade validation
+
+The mapped-item path is independently tested with OpenCascade 8 via the scripts under `tools/`.
+
+For both QFN and SOP examples, STEP import succeeds; solid count and topology counts are preserved; individual solid volume, surface area, center of mass, and bounding box match; matched-solid boolean overlap is complete to floating-point noise; and bidirectional boolean cuts leave no measurable residual geometry.
+
+Worst observed missing intersection volume is about `3.5e-18 mm^3` for QFN and `1.7e-16 mm^3` for SOP.
+
+This validation caught two real implementation errors during development: accidentally putting mapping-target placements in the parent representation, and incorrect mapping-origin/target transform construction. It remains part of the acceptance criteria for expanding the aggressive rewrite set.
 
 ## Validation philosophy
 
