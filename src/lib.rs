@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 mod instances;
+mod spherical_caps;
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
     pub experimental_instance_z90: bool,
+    pub experimental_instance_spherical_caps: bool,
     pub dense_ids: bool,
 }
 
@@ -20,6 +22,7 @@ impl Default for Options {
             intern_values: true,
             consolidate_presentation: true,
             experimental_instance_z90: false,
+            experimental_instance_spherical_caps: false,
             dense_ids: true,
         }
     }
@@ -38,6 +41,10 @@ pub struct Stats {
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
     pub instance_styles_replaced: usize,
+    pub spherical_cap_arrays: usize,
+    pub spherical_cap_instances: usize,
+    pub spherical_cap_entities_removed: usize,
+    pub spherical_cap_styles_replaced: usize,
     pub byte_ratio: f64,
     pub interned_by_type: BTreeMap<String, usize>,
     pub consolidated_by_type: BTreeMap<String, usize>,
@@ -50,8 +57,12 @@ pub struct CleanOutput {
 
 pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let (input_text, input_encoding) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
 
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
@@ -98,17 +109,31 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             instance_entities_removed += pass.entities_removed;
             instance_styles_replaced += pass.styles_replaced;
         }
+    }
 
-        // The instancing pass creates a small number of placements/directions.
-        // Normalize those in the same invocation so aggressive output is a
-        // fixed point rather than requiring a second safe cleanup pass.
-        if instance_groups > 0 && options.intern_values {
-            for section in &mut exchange.data {
-                let pass = intern_section(&mut section.entities);
-                interned_entities += pass.total;
-                for (k, v) in pass.by_type {
-                    *interned_by_type.entry(k).or_insert(0) += v;
-                }
+    let mut spherical_cap_arrays = 0usize;
+    let mut spherical_cap_instances = 0usize;
+    let mut spherical_cap_entities_removed = 0usize;
+    let mut spherical_cap_styles_replaced = 0usize;
+    if options.experimental_instance_spherical_caps {
+        for section in &mut exchange.data {
+            let pass = spherical_caps::instance_planar_spherical_caps(&mut section.entities);
+            spherical_cap_arrays += pass.arrays;
+            spherical_cap_instances += pass.instances;
+            spherical_cap_entities_removed += pass.entities_removed;
+            spherical_cap_styles_replaced += pass.styles_replaced;
+        }
+    }
+
+    // Experimental passes create placements/directions and other support
+    // values. Normalize them in the same invocation so aggressive output is a
+    // fixed point rather than requiring a second safe cleanup pass.
+    if (instance_groups > 0 || spherical_cap_arrays > 0) && options.intern_values {
+        for section in &mut exchange.data {
+            let pass = intern_section(&mut section.entities);
+            interned_entities += pass.total;
+            for (k, v) in pass.by_type {
+                *interned_by_type.entry(k).or_insert(0) += v;
             }
         }
     }
@@ -137,6 +162,10 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             instanced_solids,
             instance_entities_removed,
             instance_styles_replaced,
+            spherical_cap_arrays,
+            spherical_cap_instances,
+            spherical_cap_entities_removed,
+            spherical_cap_styles_replaced,
             byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
             interned_by_type,
             consolidated_by_type,
@@ -697,6 +726,154 @@ fn write_param(param: &Parameter, out: &mut String) {
     }
 }
 
+const EMPTY_AGGREGATE_MARKER: &str = "STEPREDOXEMPTYAGGREGATE";
+
+fn prepare_parser_input(input: &str) -> Result<(std::borrow::Cow<'_, str>, bool)> {
+    // ruststep 0.4 documents aggregate contents as optional, but its
+    // comma_separated() parser currently requires at least one parameter. A
+    // few valid AP214 exporters emit empty aggregates such as
+    // SHAPE_REPRESENTATION('',(),#ctx). Encode those with an impossible
+    // enumeration sentinel for parsing, then restore them in the AST.
+    let Some(data_start) = input.find("DATA;") else {
+        return Ok((std::borrow::Cow::Borrowed(input), false));
+    };
+    let scan_start = data_start + "DATA;".len();
+    let suffix = &input[scan_start..];
+    if !suffix.as_bytes().windows(2).any(|w| w == b"()")
+        && !suffix.contains("( ")
+        && !suffix.contains("(\t")
+        && !suffix.contains("(\r")
+        && !suffix.contains("(\n")
+    {
+        return Ok((std::borrow::Cow::Borrowed(input), false));
+    }
+    let marker = format!(".{EMPTY_AGGREGATE_MARKER}.");
+    if input.contains(&marker) {
+        bail!("STEP input collides with step-redox empty-aggregate parser marker");
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len() + 64);
+    out.push_str(&input[..scan_start]);
+
+    let mut i = scan_start;
+    let mut last = scan_start;
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut replaced = false;
+
+    while i < bytes.len() {
+        if in_comment {
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                in_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if bytes[i] == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_string = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_comment = true;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'(' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b')' {
+                out.push_str(&input[last..i]);
+                out.push('(');
+                out.push_str(&marker);
+                out.push(')');
+                i = j + 1;
+                last = i;
+                replaced = true;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if !replaced {
+        return Ok((std::borrow::Cow::Borrowed(input), false));
+    }
+    out.push_str(&input[last..]);
+    Ok((std::borrow::Cow::Owned(out), true))
+}
+
+fn restore_empty_aggregates(exchange: &mut Exchange) -> Result<()> {
+    for section in &mut exchange.data {
+        for entity in &mut section.entities {
+            match entity {
+                EntityInstance::Simple { record, .. } => {
+                    restore_empty_aggregate_param(&mut record.parameter)?;
+                }
+                EntityInstance::Complex { subsuper, .. } => {
+                    for record in &mut subsuper.0 {
+                        restore_empty_aggregate_param(&mut record.parameter)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_empty_aggregate_param(parameter: &mut Parameter) -> Result<()> {
+    match parameter {
+        Parameter::List(items) => {
+            if items.len() == 1
+                && matches!(
+                    &items[0],
+                    Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER
+                )
+            {
+                items.clear();
+                return Ok(());
+            }
+            for item in items {
+                restore_empty_aggregate_param(item)?;
+            }
+        }
+        Parameter::Typed { parameter, .. } => {
+            if matches!(
+                parameter.as_ref(),
+                Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER
+            ) {
+                bail!("unsupported empty typed-parameter aggregate in STEP input");
+            }
+            restore_empty_aggregate_param(parameter)?;
+        }
+        Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER => {
+            bail!("empty-aggregate parser marker escaped its aggregate");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static str)> {
     if let Ok(s) = std::str::from_utf8(input) {
         return Ok((std::borrow::Cow::Borrowed(s), "utf-8"));
@@ -819,6 +996,30 @@ mod tests {
         );
         let out = clean_bytes(&src, &Options::default()).unwrap();
         assert_eq!(out.stats.consolidated_entities, 0);
+    }
+
+    #[test]
+    fn legal_empty_aggregates_roundtrip_through_ruststep_compatibility_shim() {
+        let src = wrap("#8=SHAPE_REPRESENTATION('',(),#6);\n#6=CARTESIAN_POINT('',(0.0,0.0,0.0));");
+        let once = clean_bytes(&src, &Options::default()).unwrap();
+        let text = std::str::from_utf8(&once.bytes).unwrap();
+        assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
+        assert!(!text.contains(EMPTY_AGGREGATE_MARKER));
+
+        let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
+        assert_eq!(once.bytes, twice.bytes);
+    }
+
+    #[test]
+    fn empty_aggregate_shim_ignores_parentheses_inside_strings_and_comments() {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('literal ()', (0.0,0.0,0.0));\n/* () */\n#2=SHAPE_REPRESENTATION('',( ),#1);",
+        );
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert!(text.contains("literal ()"));
+        assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
+        assert!(!text.contains(EMPTY_AGGREGATE_MARKER));
     }
 
     #[test]

@@ -324,12 +324,12 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
 }
 
 #[derive(Debug, Clone)]
-struct StyleRef {
-    id: u64,
-    assignments: Vec<u64>,
+pub(crate) struct StyleRef {
+    pub(crate) id: u64,
+    pub(crate) assignments: Vec<u64>,
 }
 
-fn collect_styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<StyleRef>> {
+pub(crate) fn collect_styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<StyleRef>> {
     let mut out: HashMap<u64, Vec<StyleRef>> = HashMap::new();
     for entity in entities {
         let EntityInstance::Simple { id, record } = entity else {
@@ -498,7 +498,7 @@ fn solid_topology_signature(
     Some(format!("SHELL[{}]", faces.join("|")))
 }
 
-fn face_topology_signature(
+pub(crate) fn face_topology_signature(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -983,7 +983,7 @@ fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
     [center[0] / n, center[1] / n, center[2] / n]
 }
 
-fn cartesian_point(
+pub(crate) fn cartesian_point(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1009,7 +1009,7 @@ fn cartesian_point(
     ])
 }
 
-fn number(param: &Parameter) -> Option<f64> {
+pub(crate) fn number(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Real(value) => Some(*value),
         Parameter::Integer(value) => Some(*value as f64),
@@ -1017,21 +1017,21 @@ fn number(param: &Parameter) -> Option<f64> {
     }
 }
 
-fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
+pub(crate) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     let Parameter::List(params) = parameter else {
         return None;
     };
     entity_ref_value(params.get(idx)?)
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+pub(crate) fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
     }
 }
 
-fn closure_from(
+pub(crate) fn closure_from(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1054,7 +1054,7 @@ fn closure_from(
     seen
 }
 
-fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
+pub(crate) fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
     let record = simple_record(entity)?;
     let Parameter::List(params) = &record.parameter else {
         return None;
@@ -1089,7 +1089,11 @@ fn replace_representation_items(entity: &mut EntityInstance, replacements: &Hash
     }
 }
 
-fn patch_presentation_lists(entities: &mut [EntityInstance], remove: &HashSet<u64>, add: &[u64]) {
+pub(crate) fn patch_presentation_lists(
+    entities: &mut [EntityInstance],
+    remove: &HashSet<u64>,
+    add: &[u64],
+) {
     for entity in entities {
         let Some(record) = simple_record_mut(entity) else {
             continue;
@@ -1117,7 +1121,7 @@ fn patch_presentation_lists(entities: &mut [EntityInstance], remove: &HashSet<u6
     }
 }
 
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
+pub(crate) fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     entities
         .iter()
         .map(|entity| {
@@ -1128,7 +1132,7 @@ fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
         .collect()
 }
 
-fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
+pub(crate) fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
     let mut inbound: HashMap<u64, HashSet<u64>> = HashMap::new();
     for (&parent, children) in refs {
         for &child in children {
@@ -1138,7 +1142,7 @@ fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
     inbound
 }
 
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
+pub(crate) fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
     entities
         .iter()
         .enumerate()
@@ -1146,25 +1150,29 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
+pub(crate) fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
     entities.iter().position(|entity| entity_id(entity) == id)
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+pub(crate) fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+pub(crate) fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64; 3]) -> u64 {
+pub(crate) fn push_point(
+    entities: &mut Vec<EntityInstance>,
+    next_id: &mut u64,
+    point: [f64; 3],
+) -> u64 {
     push_simple(
         entities,
         next_id,
@@ -1176,7 +1184,7 @@ fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64
     )
 }
 
-fn push_simple(
+pub(crate) fn push_simple(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
     name: &str,
@@ -1194,17 +1202,17 @@ fn push_simple(
     id
 }
 
-fn entity_ref(id: u64) -> Parameter {
+pub(crate) fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+pub(crate) fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
+pub(crate) fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
     match entity {
         EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
         EntityInstance::Complex { subsuper, .. } => {

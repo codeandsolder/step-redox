@@ -31,6 +31,8 @@ Useful switches:
 
     --no-intern
     --no-presentation-consolidation
+    --experimental-instance-z90
+    --experimental-instance-spherical-caps
     --no-dense-ids
     --json
 
@@ -62,6 +64,10 @@ Representative files:
 The 132,381,990-byte largest connector in the current corpus cleans to
 56,269,340 bytes (42.51%) with the same safe passes.
 
+A later random 1,000-model scan parsed and cleaned **1000 / 1000** files after adding compatibility for legal empty STEP aggregates such as `SHAPE_REPRESENTATION('',(),#ctx)`. The parser shim exists because ruststep 0.4's aggregate grammar currently requires one-or-more parameters despite the Part 21 grammar allowing zero.
+
+With `--experimental-instance-z90`, 263 / 1000 models (26.3%) contained at least one strictly proven repeated-solid group. Those triggered models shrank from 361,325,878 safe-tier bytes to 265,374,780 bytes: an additional **26.6%** reduction after the safe cleanup, saving 95,951,098 bytes in the sample.
+
 ## Experimental mapped-item work
 
 `--experimental-instance-z90` instances repeated top-level `MANIFOLD_SOLID_BREP` objects using standard STEP `REPRESENTATION_MAP` + `MAPPED_ITEM`.
@@ -90,6 +96,28 @@ For both QFN and SOP examples, STEP import succeeds; solid count and topology co
 Worst observed missing intersection volume is about `3.5e-18 mm^3` for QFN and `1.7e-16 mm^3` for SOP.
 
 This validation caught two real implementation errors during development: accidentally putting mapping-target placements in the parent representation, and incorrect mapping-origin/target transform construction. It remains part of the acceptance criteria for expanding the aggressive rewrite set.
+
+## Experimental planar spherical-cap arrays
+
+`--experimental-instance-spherical-caps` targets a different exporter pathology: large arrays of identical spherical-cap features fused into one substrate solid.
+
+The pass is intentionally narrow. It requires two matching spherical faces per feature, an exact two-edge circular interface to one shared planar face, a one-to-one matching `FACE_BOUND` hole in that plane, identical normalized B-rep topology and style across the feature array, and identical sphere centers modulo translation.
+
+It removes the circular holes from the substrate plane, keeps one feature as a canonical closed solid by adding a planar interface disk, and maps that solid to all feature locations with `REPRESENTATION_MAP` / `MAPPED_ITEM`. This changes solid decomposition and introduces hidden coincident interface faces, so it is kept separate from the topology-preserving safe tier.
+
+On the BGA-636 corpus example:
+
+- original EasyEDA STEP: **5,628,709 bytes**
+- safe cleanup: **1,652,726 bytes**
+- spherical-cap instancing: **569,223 bytes**
+- final size: **10.11% of the original**
+- 636 spherical-cap instances
+- 24,133 additional entities removed
+- byte-idempotent under a second cleanup
+
+OpenCascade validates both source and compact shapes. Their bounding boxes are identical and their whole-shape volumes differ only by about `5e-12 mm^3`. More decisively, boolean `source - compact` and `compact - source` both produce exactly `0.0` residual volume. Surface area intentionally increases because the compact representation contains 636 hidden closure disks at the former fused interfaces.
+
+A lexical survey of 891 downloaded BGA/FCBGA/UFBGA/NFBGA/CSPBGA/WLCSP-family models found 484 with at least 100 spherical-surface records, 160 with at least 500, and 47 with at least 1000. The worst sampled model contains 4,346 spherical surfaces, so this optimization is not specific to one BGA.
 
 ## Validation philosophy
 
