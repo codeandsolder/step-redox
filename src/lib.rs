@@ -1,0 +1,806 @@
+use anyhow::{Context, Result, bail};
+use ruststep::ast::{EntityInstance, Exchange, Name, Parameter, Record};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub intern_values: bool,
+    pub consolidate_presentation: bool,
+    pub dense_ids: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            intern_values: true,
+            consolidate_presentation: true,
+            dense_ids: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Stats {
+    pub input_encoding: String,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub input_entities: usize,
+    pub output_entities: usize,
+    pub interned_entities: usize,
+    pub consolidated_entities: usize,
+    pub byte_ratio: f64,
+    pub interned_by_type: BTreeMap<String, usize>,
+    pub consolidated_by_type: BTreeMap<String, usize>,
+}
+
+pub struct CleanOutput {
+    pub bytes: Vec<u8>,
+    pub stats: Stats,
+}
+
+pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
+    let (input_text, input_encoding) = decode_input(input)?;
+    let mut exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    let input_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
+    let mut interned_by_type = BTreeMap::new();
+    let mut interned_entities = 0usize;
+
+    if options.intern_values {
+        for section in &mut exchange.data {
+            let pass = intern_section(&mut section.entities);
+            interned_entities += pass.total;
+            for (k, v) in pass.by_type {
+                *interned_by_type.entry(k).or_insert(0) += v;
+            }
+        }
+    }
+
+    let mut consolidated_by_type = BTreeMap::new();
+    let mut consolidated_entities = 0usize;
+    if options.consolidate_presentation {
+        for section in &mut exchange.data {
+            let pass = consolidate_presentation(&mut section.entities);
+            consolidated_entities += pass.total;
+            for (k, v) in pass.by_type {
+                *consolidated_by_type.entry(k).or_insert(0) += v;
+            }
+        }
+    }
+
+    if options.dense_ids {
+        for section in &mut exchange.data {
+            dense_renumber(&mut section.entities);
+        }
+    }
+
+    let output = write_exchange(&exchange)?;
+    let output_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
+    let output_bytes = output.len();
+
+    Ok(CleanOutput {
+        bytes: output.into_bytes(),
+        stats: Stats {
+            input_encoding: input_encoding.to_string(),
+            input_bytes: input.len(),
+            output_bytes,
+            input_entities,
+            output_entities,
+            interned_entities,
+            consolidated_entities,
+            byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
+            interned_by_type,
+            consolidated_by_type,
+        },
+    })
+}
+
+#[derive(Default)]
+struct ConsolidateStats {
+    total: usize,
+    by_type: BTreeMap<String, usize>,
+}
+
+fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
+    use std::collections::{HashMap, HashSet};
+
+    let mut refcounts: HashMap<u64, usize> = HashMap::new();
+    for entity in entities.iter() {
+        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
+    }
+
+    #[derive(Clone)]
+    struct Merge {
+        into: usize,
+        from: usize,
+        items: Vec<Parameter>,
+        ty: &'static str,
+    }
+
+    let mut groups: HashMap<String, usize> = HashMap::new();
+    let mut merges = Vec::new();
+
+    for (idx, entity) in entities.iter().enumerate() {
+        let EntityInstance::Simple { id, record } = entity else {
+            continue;
+        };
+        if refcounts.get(id).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+
+        let (ty, key, items) = match record.name.as_str() {
+            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" if params.len() == 3 => {
+                let Parameter::List(items) = &params[1] else {
+                    continue;
+                };
+                let key = format!(
+                    "MDGPR|{}|{}",
+                    standalone_param_key(&params[0]),
+                    standalone_param_key(&params[2])
+                );
+                (
+                    "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+                    key,
+                    items.clone(),
+                )
+            }
+            "PRESENTATION_LAYER_ASSIGNMENT" if params.len() == 3 => {
+                let Parameter::List(items) = &params[2] else {
+                    continue;
+                };
+                let key = format!(
+                    "PLA|{}|{}",
+                    standalone_param_key(&params[0]),
+                    standalone_param_key(&params[1])
+                );
+                ("PRESENTATION_LAYER_ASSIGNMENT", key, items.clone())
+            }
+            _ => continue,
+        };
+
+        if let Some(&into) = groups.get(&key) {
+            merges.push(Merge {
+                into,
+                from: idx,
+                items,
+                ty,
+            });
+        } else {
+            groups.insert(key, idx);
+        }
+    }
+
+    let mut additions: HashMap<usize, Vec<Parameter>> = HashMap::new();
+    let mut remove = HashSet::new();
+    let mut stats = ConsolidateStats::default();
+    for merge in merges {
+        additions.entry(merge.into).or_default().extend(merge.items);
+        remove.insert(merge.from);
+        stats.total += 1;
+        *stats.by_type.entry(merge.ty.to_string()).or_insert(0) += 1;
+    }
+
+    for (idx, items) in additions {
+        let EntityInstance::Simple { record, .. } = &mut entities[idx] else {
+            unreachable!();
+        };
+        let Parameter::List(params) = &mut record.parameter else {
+            unreachable!();
+        };
+        let target_idx = if record.name == "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
+        {
+            1
+        } else {
+            2
+        };
+        let Parameter::List(existing) = &mut params[target_idx] else {
+            unreachable!();
+        };
+        existing.extend(items);
+    }
+
+    let mut i = 0usize;
+    entities.retain(|_| {
+        let keep = !remove.contains(&i);
+        i += 1;
+        keep
+    });
+    stats
+}
+
+fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
+    match entity {
+        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
+        EntityInstance::Complex { subsuper, .. } => {
+            for record in &subsuper.0 {
+                visit_param_refs(&record.parameter, f);
+            }
+        }
+    }
+}
+
+fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
+    match param {
+        Parameter::Ref(Name::Entity(id)) => f(*id),
+        Parameter::List(items) => {
+            for item in items {
+                visit_param_refs(item, f);
+            }
+        }
+        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
+        _ => {}
+    }
+}
+
+fn standalone_param_key(param: &Parameter) -> String {
+    let mut out = String::new();
+    write_param_key(param, &HashMap::new(), &mut out);
+    out
+}
+
+#[derive(Default)]
+struct InternStats {
+    total: usize,
+    by_type: BTreeMap<String, usize>,
+}
+
+fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
+    // Store redirects only. An identity map for a million-entity STEP file is
+    // a surprisingly expensive way of spelling "most things survive".
+    let mut alias: HashMap<u64, u64> = HashMap::new();
+
+    // Value DAGs in the EasyEDA/SolidWorks corpus settle in a handful of
+    // rounds (units -> uncertainty/context, colour -> style chains, geometry
+    // primitives -> placements/surfaces). Updates are applied at the end of a
+    // round so keys within that round see a stable alias map.
+    for _ in 0..16 {
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut pending: Vec<(u64, u64)> = Vec::new();
+
+        for entity in entities.iter() {
+            if !is_internable(entity) {
+                continue;
+            }
+            let id = entity_id(entity);
+            if alias.contains_key(&id) {
+                continue;
+            }
+
+            let key = entity_key(entity, &alias);
+            if let Some(&canonical) = seen.get(&key) {
+                let canonical = resolve_alias(&alias, canonical);
+                if canonical != id {
+                    pending.push((id, canonical));
+                }
+            } else {
+                seen.insert(key, id);
+            }
+        }
+
+        if pending.is_empty() {
+            break;
+        }
+        for (id, canonical) in pending {
+            alias.insert(id, canonical);
+        }
+        compress_aliases(&mut alias);
+    }
+    compress_aliases(&mut alias);
+
+    let mut stats = InternStats::default();
+    let original = std::mem::take(entities);
+    entities.reserve(original.len().saturating_sub(alias.len()));
+    for mut entity in original {
+        let id = entity_id(&entity);
+        let root = resolve_alias(&alias, id);
+        if root != id {
+            stats.total += 1;
+            *stats.by_type.entry(entity_type_label(&entity)).or_insert(0) += 1;
+            continue;
+        }
+        rewrite_entity_refs(&mut entity, &alias);
+        entities.push(entity);
+    }
+    stats
+}
+
+fn compress_aliases(alias: &mut HashMap<u64, u64>) {
+    let keys: Vec<u64> = alias.keys().copied().collect();
+    for id in keys {
+        let root = resolve_alias(alias, id);
+        if root != id {
+            alias.insert(id, root);
+        }
+    }
+}
+
+fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
+    for _ in 0..64 {
+        let Some(&next) = alias.get(&id) else {
+            return id;
+        };
+        if next == id {
+            return id;
+        }
+        id = next;
+    }
+    id
+}
+
+fn dense_renumber(entities: &mut [EntityInstance]) {
+    let id_map: HashMap<u64, u64> = entities
+        .iter()
+        .enumerate()
+        .map(|(idx, e)| (entity_id(e), idx as u64 + 1))
+        .collect();
+
+    for entity in entities.iter_mut() {
+        let old = entity_id(entity);
+        let new = id_map[&old];
+        set_entity_id(entity, new);
+        rewrite_entity_refs(entity, &id_map);
+    }
+}
+
+fn entity_id(entity: &EntityInstance) -> u64 {
+    match entity {
+        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
+    }
+}
+
+fn set_entity_id(entity: &mut EntityInstance, new_id: u64) {
+    match entity {
+        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id = new_id,
+    }
+}
+
+fn entity_type_label(entity: &EntityInstance) -> String {
+    match entity {
+        EntityInstance::Simple { record, .. } => record.name.clone(),
+        EntityInstance::Complex { subsuper, .. } => subsuper
+            .0
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>()
+            .join("+"),
+    }
+}
+
+fn rewrite_entity_refs(entity: &mut EntityInstance, map: &HashMap<u64, u64>) {
+    match entity {
+        EntityInstance::Simple { record, .. } => rewrite_param_refs(&mut record.parameter, map),
+        EntityInstance::Complex { subsuper, .. } => {
+            for record in &mut subsuper.0 {
+                rewrite_param_refs(&mut record.parameter, map);
+            }
+        }
+    }
+}
+
+fn rewrite_param_refs(param: &mut Parameter, map: &HashMap<u64, u64>) {
+    match param {
+        Parameter::Ref(Name::Entity(id)) => {
+            if let Some(&new) = map.get(id) {
+                *id = new;
+            }
+        }
+        Parameter::List(items) => {
+            for item in items {
+                rewrite_param_refs(item, map);
+            }
+        }
+        Parameter::Typed { parameter, .. } => rewrite_param_refs(parameter, map),
+        _ => {}
+    }
+}
+
+fn is_internable(entity: &EntityInstance) -> bool {
+    match entity {
+        EntityInstance::Simple { record, .. } => internable_record(&record.name),
+        EntityInstance::Complex { subsuper, .. } => {
+            !subsuper.0.is_empty() && subsuper.0.iter().all(|r| internable_record(&r.name))
+        }
+    }
+}
+
+// Deliberately excludes topological identity objects: VERTEX_POINT, EDGE_CURVE,
+// ORIENTED_EDGE, EDGE_LOOP, FACE_*, ADVANCED_FACE, shells, and solids.
+//
+// Sharing these value/geometry-support objects does not merge topology. It only
+// makes multiple topological objects point at the same equal geometry/style/unit
+// value, which is the redundancy SolidWorks explodes in these EasyEDA files.
+fn internable_record(name: &str) -> bool {
+    matches!(
+        name,
+        // Geometry values / support geometry
+        "CARTESIAN_POINT"
+            | "DIRECTION"
+            | "VECTOR"
+            | "AXIS1_PLACEMENT"
+            | "AXIS2_PLACEMENT_2D"
+            | "AXIS2_PLACEMENT_3D"
+            | "LINE"
+            | "CIRCLE"
+            | "ELLIPSE"
+            | "PLANE"
+            | "CYLINDRICAL_SURFACE"
+            | "CONICAL_SURFACE"
+            | "SPHERICAL_SURFACE"
+            | "TOROIDAL_SURFACE"
+            | "SURFACE_OF_LINEAR_EXTRUSION"
+            | "SURFACE_OF_REVOLUTION"
+            | "B_SPLINE_CURVE"
+            | "B_SPLINE_CURVE_WITH_KNOTS"
+            | "RATIONAL_B_SPLINE_CURVE"
+            | "B_SPLINE_SURFACE"
+            | "B_SPLINE_SURFACE_WITH_KNOTS"
+            | "RATIONAL_B_SPLINE_SURFACE"
+            // Presentation/style values
+            | "COLOUR_RGB"
+            | "DRAUGHTING_PRE_DEFINED_COLOUR"
+            | "DRAUGHTING_PRE_DEFINED_CURVE_FONT"
+            | "CURVE_STYLE"
+            | "POINT_STYLE"
+            | "FILL_AREA_STYLE_COLOUR"
+            | "FILL_AREA_STYLE"
+            | "SURFACE_STYLE_FILL_AREA"
+            | "SURFACE_SIDE_STYLE"
+            | "SURFACE_STYLE_USAGE"
+            | "PRESENTATION_STYLE_ASSIGNMENT"
+            // Units / contexts / uncertainty values
+            | "NAMED_UNIT"
+            | "SI_UNIT"
+            | "LENGTH_UNIT"
+            | "PLANE_ANGLE_UNIT"
+            | "SOLID_ANGLE_UNIT"
+            | "CONVERSION_BASED_UNIT"
+            | "MEASURE_WITH_UNIT"
+            | "UNCERTAINTY_MEASURE_WITH_UNIT"
+            | "REPRESENTATION_CONTEXT"
+            | "GEOMETRIC_REPRESENTATION_CONTEXT"
+            | "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT"
+            | "GLOBAL_UNIT_ASSIGNED_CONTEXT"
+    )
+}
+
+fn entity_key(entity: &EntityInstance, alias: &HashMap<u64, u64>) -> String {
+    let mut out = String::new();
+    match entity {
+        EntityInstance::Simple { record, .. } => write_record_key(record, alias, &mut out),
+        EntityInstance::Complex { subsuper, .. } => {
+            out.push('(');
+            for record in &subsuper.0 {
+                write_record_key(record, alias, &mut out);
+            }
+            out.push(')');
+        }
+    }
+    out
+}
+
+fn write_record_key(record: &Record, alias: &HashMap<u64, u64>, out: &mut String) {
+    out.push_str(&record.name);
+    write_param_key(&record.parameter, alias, out);
+}
+
+fn write_param_key(param: &Parameter, alias: &HashMap<u64, u64>, out: &mut String) {
+    match param {
+        Parameter::Typed { keyword, parameter } => {
+            out.push_str(keyword);
+            out.push('(');
+            write_param_key(parameter, alias, out);
+            out.push(')');
+        }
+        Parameter::Integer(v) => {
+            let _ = write!(out, "{v}");
+        }
+        Parameter::Real(v) => out.push_str(&format_real(*v)),
+        Parameter::String(s) => write_step_string(s, out),
+        Parameter::Enumeration(s) => {
+            out.push('.');
+            out.push_str(s);
+            out.push('.');
+        }
+        Parameter::List(items) => {
+            out.push('(');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_param_key(item, alias, out);
+            }
+            out.push(')');
+        }
+        Parameter::Ref(Name::Entity(id)) => {
+            let _ = write!(out, "#{}", resolve_alias(alias, *id));
+        }
+        Parameter::Ref(Name::Value(id)) => {
+            let _ = write!(out, "@{id}");
+        }
+        Parameter::Ref(Name::ConstantEntity(s)) => {
+            out.push('#');
+            out.push_str(s);
+        }
+        Parameter::Ref(Name::ConstantValue(s)) => {
+            out.push('@');
+            out.push_str(s);
+        }
+        Parameter::NotProvided => out.push('$'),
+        Parameter::Omitted => out.push('*'),
+    }
+}
+
+pub fn write_exchange(exchange: &Exchange) -> Result<String> {
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("optional STEP sections are not supported by writer");
+    }
+
+    let mut out = String::with_capacity(
+        exchange
+            .data
+            .iter()
+            .map(|d| d.entities.len())
+            .sum::<usize>()
+            * 48,
+    );
+    out.push_str("ISO-10303-21;\nHEADER;\n");
+    for record in &exchange.header {
+        write_record(record, &mut out);
+        out.push_str(";\n");
+    }
+    out.push_str("ENDSEC;\n");
+
+    for section in &exchange.data {
+        if section.meta.is_empty() {
+            out.push_str("DATA;\n");
+        } else {
+            out.push_str("DATA(");
+            for (i, param) in section.meta.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_param(param, &mut out);
+            }
+            out.push_str(");\n");
+        }
+        for entity in &section.entities {
+            write_entity(entity, &mut out);
+            out.push('\n');
+        }
+        out.push_str("ENDSEC;\n");
+    }
+    out.push_str("END-ISO-10303-21;\n");
+    Ok(out)
+}
+
+fn write_entity(entity: &EntityInstance, out: &mut String) {
+    match entity {
+        EntityInstance::Simple { id, record } => {
+            let _ = write!(out, "#{id}=");
+            write_record(record, out);
+            out.push(';');
+        }
+        EntityInstance::Complex { id, subsuper } => {
+            let _ = write!(out, "#{id}=(");
+            for record in &subsuper.0 {
+                write_record(record, out);
+            }
+            out.push_str(");");
+        }
+    }
+}
+
+fn write_record(record: &Record, out: &mut String) {
+    out.push_str(&record.name);
+    write_param(&record.parameter, out);
+}
+
+fn write_param(param: &Parameter, out: &mut String) {
+    match param {
+        Parameter::Typed { keyword, parameter } => {
+            out.push_str(keyword);
+            out.push('(');
+            write_param(parameter, out);
+            out.push(')');
+        }
+        Parameter::Integer(v) => {
+            let _ = write!(out, "{v}");
+        }
+        Parameter::Real(v) => out.push_str(&format_real(*v)),
+        Parameter::String(s) => write_step_string(s, out),
+        Parameter::Enumeration(s) => {
+            out.push('.');
+            out.push_str(s);
+            out.push('.');
+        }
+        Parameter::List(items) => {
+            out.push('(');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_param(item, out);
+            }
+            out.push(')');
+        }
+        Parameter::Ref(Name::Entity(id)) => {
+            let _ = write!(out, "#{id}");
+        }
+        Parameter::Ref(Name::Value(id)) => {
+            let _ = write!(out, "@{id}");
+        }
+        Parameter::Ref(Name::ConstantEntity(s)) => {
+            out.push('#');
+            out.push_str(s);
+        }
+        Parameter::Ref(Name::ConstantValue(s)) => {
+            out.push('@');
+            out.push_str(s);
+        }
+        Parameter::NotProvided => out.push('$'),
+        Parameter::Omitted => out.push('*'),
+    }
+}
+
+fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static str)> {
+    if let Ok(s) = std::str::from_utf8(input) {
+        return Ok((std::borrow::Cow::Borrowed(s), "utf-8"));
+    }
+
+    let (decoded, _used_encoding, had_errors) = encoding_rs::GBK.decode(input);
+    if had_errors {
+        bail!("STEP input is neither valid UTF-8 nor valid GBK");
+    }
+    Ok((decoded, "gbk"))
+}
+
+fn write_step_string(s: &str, out: &mut String) {
+    out.push('\'');
+
+    let flush_non_ascii = |buf: &mut String, out: &mut String| {
+        if buf.is_empty() {
+            return;
+        }
+        out.push_str("\\X2\\");
+        for unit in buf.encode_utf16() {
+            let _ = write!(out, "{unit:04X}");
+        }
+        out.push_str("\\X0\\");
+        buf.clear();
+    };
+
+    let mut non_ascii = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii() && ch != '\'' {
+            flush_non_ascii(&mut non_ascii, out);
+            out.push(ch);
+        } else {
+            // Encode apostrophes too; this stays valid Part 21 and avoids
+            // depending on ruststep's incomplete doubled-apostrophe parser.
+            non_ascii.push(ch);
+        }
+    }
+    flush_non_ascii(&mut non_ascii, out);
+    out.push('\'');
+}
+
+fn format_real(v: f64) -> String {
+    let mut s = v.to_string();
+    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+        s.push('.');
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrap(data: &str) -> Vec<u8> {
+        format!(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{data}\nENDSEC;\nEND-ISO-10303-21;\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn writer_roundtrips_basic_exchange() {
+        let src = wrap(
+            "#9=CARTESIAN_POINT('NONE',(1.000000000000000000,2.500000000000000000,0.000000000000000000));\n#20=CARTESIAN_POINT('NONE',(1.0,2.5,0.0));\n#21=VERTEX_POINT('NONE',#20);",
+        );
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert!(out.stats.output_bytes < out.stats.input_bytes);
+        assert_eq!(out.stats.interned_entities, 1);
+        ruststep::parser::parse(std::str::from_utf8(&out.bytes).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn equal_geometry_values_share_but_topology_identity_survives() {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('',(1.0,2.0,3.0));\n#2=CARTESIAN_POINT('',(1.000000000000000000,2.0,3.0));\n#3=VERTEX_POINT('',#1);\n#4=VERTEX_POINT('',#2);",
+        );
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert_eq!(out.stats.interned_entities, 1);
+        assert_eq!(out.stats.output_entities, 3);
+
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert_eq!(text.matches("VERTEX_POINT").count(), 2);
+        assert_eq!(text.matches("CARTESIAN_POINT").count(), 1);
+    }
+
+    #[test]
+    fn consolidates_only_unreferenced_presentation_roots() {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #8=DIRECTION('',(1.0,0.0,0.0));\n\
+             #2=STYLED_ITEM('',(#8),#1);\n\
+             #3=STYLED_ITEM('',(#8),#1);\n\
+             #4=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#2),#1);\n\
+             #5=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#3),#1);\n\
+             #6=PRESENTATION_LAYER_ASSIGNMENT('','',(#2));\n\
+             #7=PRESENTATION_LAYER_ASSIGNMENT('','',(#3));",
+        );
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert_eq!(out.stats.consolidated_entities, 2);
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert_eq!(
+            text.matches("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION")
+                .count(),
+            1
+        );
+        assert_eq!(text.matches("PRESENTATION_LAYER_ASSIGNMENT").count(), 1);
+    }
+
+    #[test]
+    fn referenced_presentation_records_are_not_consolidated() {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #8=DIRECTION('',(1.0,0.0,0.0));\n\
+             #2=STYLED_ITEM('',(#8),#1);\n\
+             #3=STYLED_ITEM('',(#8),#1);\n\
+             #4=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#2),#1);\n\
+             #5=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#3),#1);\n\
+             #6=REPRESENTATION_RELATIONSHIP('','',#4,#5);",
+        );
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert_eq!(out.stats.consolidated_entities, 0);
+    }
+
+    #[test]
+    fn gbk_strings_become_standard_x2_unicode_escapes() {
+        let mut src = b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('".to_vec();
+        src.extend_from_slice(&[0xC8, 0xCE, 0xBA, 0xCE]); // 任何 in GBK
+        src.extend_from_slice(b"',(0.0,0.0,0.0));\nENDSEC;\nEND-ISO-10303-21;\n");
+
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert_eq!(out.stats.input_encoding, "gbk");
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert!(text.contains("\\X2\\4EFB4F55\\X0\\"));
+    }
+
+    #[test]
+    fn cleaning_is_byte_idempotent() {
+        let src = wrap(
+            "#10=DIRECTION('',(1.000000000000000000,0.0,0.0));\n#20=DIRECTION('',(1.0,0.0,0.0));\n#30=VECTOR('',#20,1000.000000000000000000);",
+        );
+        let once = clean_bytes(&src, &Options::default()).unwrap();
+        let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
+        assert_eq!(once.bytes, twice.bytes);
+    }
+}
