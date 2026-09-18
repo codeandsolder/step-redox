@@ -13,6 +13,7 @@ pub struct Options {
     pub consolidate_presentation: bool,
     pub experimental_instance_z90: bool,
     pub experimental_instance_spherical_caps: bool,
+    pub minify_placeholder_names: bool,
     pub dense_ids: bool,
 }
 
@@ -23,6 +24,7 @@ impl Default for Options {
             consolidate_presentation: true,
             experimental_instance_z90: false,
             experimental_instance_spherical_caps: false,
+            minify_placeholder_names: false,
             dense_ids: true,
         }
     }
@@ -45,6 +47,7 @@ pub struct Stats {
     pub spherical_cap_instances: usize,
     pub spherical_cap_entities_removed: usize,
     pub spherical_cap_styles_replaced: usize,
+    pub placeholder_names_minified: usize,
     pub byte_ratio: f64,
     pub interned_by_type: BTreeMap<String, usize>,
     pub consolidated_by_type: BTreeMap<String, usize>,
@@ -72,6 +75,14 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     }
 
     let input_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
+
+    let mut placeholder_names_minified = 0usize;
+    if options.minify_placeholder_names {
+        for section in &mut exchange.data {
+            placeholder_names_minified += minify_placeholder_names(&mut section.entities);
+        }
+    }
+
     let mut interned_by_type = BTreeMap::new();
     let mut interned_entities = 0usize;
 
@@ -125,6 +136,15 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    // Experimental passes can create new placeholder-labelled entities.
+    // Minify those before the post-rewrite intern pass so name normalization
+    // cannot create fresh duplicates that only disappear on a second run.
+    if options.minify_placeholder_names {
+        for section in &mut exchange.data {
+            placeholder_names_minified += minify_placeholder_names(&mut section.entities);
+        }
+    }
+
     // Experimental passes create placements/directions and other support
     // values. Normalize them in the same invocation so aggressive output is a
     // fixed point rather than requiring a second safe cleanup pass.
@@ -166,6 +186,7 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             spherical_cap_instances,
             spherical_cap_entities_removed,
             spherical_cap_styles_replaced,
+            placeholder_names_minified,
             byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
             interned_by_type,
             consolidated_by_type,
@@ -611,6 +632,66 @@ fn write_param_key(param: &Parameter, alias: &HashMap<u64, u64>, out: &mut Strin
     }
 }
 
+const PLACEHOLDER_NAME_TYPES: &[&str] = &[
+    "ADVANCED_FACE",
+    "AXIS2_PLACEMENT_3D",
+    "B_SPLINE_CURVE_WITH_KNOTS",
+    "B_SPLINE_SURFACE_WITH_KNOTS",
+    "CARTESIAN_POINT",
+    "CIRCLE",
+    "CLOSED_SHELL",
+    "CONICAL_SURFACE",
+    "CYLINDRICAL_SURFACE",
+    "DIRECTION",
+    "EDGE_CURVE",
+    "EDGE_LOOP",
+    "FACE_BOUND",
+    "FACE_OUTER_BOUND",
+    "LINE",
+    "MANIFOLD_SOLID_BREP",
+    "ORIENTED_EDGE",
+    "PLANE",
+    "SPHERICAL_SURFACE",
+    "STYLED_ITEM",
+    "TOROIDAL_SURFACE",
+    "VECTOR",
+    "VERTEX_POINT",
+];
+
+fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
+    let mut changed = 0usize;
+    for entity in entities {
+        match entity {
+            EntityInstance::Simple { record, .. } => {
+                changed += minify_placeholder_record_name(record);
+            }
+            EntityInstance::Complex { subsuper, .. } => {
+                for record in &mut subsuper.0 {
+                    changed += minify_placeholder_record_name(record);
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn minify_placeholder_record_name(record: &mut Record) -> usize {
+    if !PLACEHOLDER_NAME_TYPES.contains(&record.name.as_str()) {
+        return 0;
+    }
+    let Parameter::List(params) = &mut record.parameter else {
+        return 0;
+    };
+    let Some(Parameter::String(name)) = params.first_mut() else {
+        return 0;
+    };
+    if name != "NONE" {
+        return 0;
+    }
+    name.clear();
+    1
+}
+
 pub fn write_exchange(exchange: &Exchange) -> Result<String> {
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
@@ -1020,6 +1101,21 @@ mod tests {
         assert!(text.contains("literal ()"));
         assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
         assert!(!text.contains(EMPTY_AGGREGATE_MARKER));
+    }
+
+    #[test]
+    fn optional_placeholder_name_minification_only_touches_allowlisted_name_fields() {
+        let src =
+            wrap("#1=CARTESIAN_POINT('NONE',(0.0,0.0,0.0));\n#2=PRODUCT('NONE','NONE','NONE',());");
+        let options = Options {
+            minify_placeholder_names: true,
+            ..Options::default()
+        };
+        let out = clean_bytes(&src, &options).unwrap();
+        let text = std::str::from_utf8(&out.bytes).unwrap();
+        assert!(text.contains("CARTESIAN_POINT('',"));
+        assert!(text.contains("PRODUCT('NONE','NONE','NONE',())"));
+        assert_eq!(out.stats.placeholder_names_minified, 1);
     }
 
     #[test]

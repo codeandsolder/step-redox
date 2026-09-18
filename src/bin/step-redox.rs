@@ -29,6 +29,12 @@ struct Cli {
     )]
     experimental_instance_spherical_caps: bool,
 
+    #[arg(
+        long,
+        help = "Minify exact 'NONE' placeholder names on geometry/topology entities"
+    )]
+    minify_placeholder_names: bool,
+
     #[arg(long)]
     no_dense_ids: bool,
 
@@ -45,6 +51,7 @@ fn main() -> Result<()> {
         consolidate_presentation: !cli.no_presentation_consolidation,
         experimental_instance_z90: cli.experimental_instance_z90,
         experimental_instance_spherical_caps: cli.experimental_instance_spherical_caps,
+        minify_placeholder_names: cli.minify_placeholder_names,
         dense_ids: !cli.no_dense_ids,
     };
     let cleaned = step_redox::clean_bytes(&input, &options)?;
@@ -55,7 +62,7 @@ fn main() -> Result<()> {
         eprintln!("{}", serde_json::to_string(&cleaned.stats)?);
     } else {
         eprintln!(
-            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, instance groups {}, solids {}, removed {}, spherical arrays {}, instances {}, removed {})",
+            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, instance groups {}, solids {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
             cleaned.stats.input_bytes,
             cleaned.stats.output_bytes,
             cleaned.stats.byte_ratio * 100.0,
@@ -69,6 +76,7 @@ fn main() -> Result<()> {
             cleaned.stats.spherical_cap_arrays,
             cleaned.stats.spherical_cap_instances,
             cleaned.stats.spherical_cap_entities_removed,
+            cleaned.stats.placeholder_names_minified,
         );
         for (ty, n) in &cleaned.stats.interned_by_type {
             eprintln!("  intern {ty}: {n}");

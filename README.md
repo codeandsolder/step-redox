@@ -33,6 +33,7 @@ Useful switches:
     --no-presentation-consolidation
     --experimental-instance-z90
     --experimental-instance-spherical-caps
+    --minify-placeholder-names
     --no-dense-ids
     --json
 
@@ -118,6 +119,18 @@ On the BGA-636 corpus example:
 OpenCascade validates both source and compact shapes. Their bounding boxes are identical and their whole-shape volumes differ only by about `5e-12 mm^3`. More decisively, boolean `source - compact` and `compact - source` both produce exactly `0.0` residual volume. Surface area intentionally increases because the compact representation contains 636 hidden closure disks at the former fused interfaces.
 
 A lexical survey of 891 downloaded BGA/FCBGA/UFBGA/NFBGA/CSPBGA/WLCSP-family models found 484 with at least 100 spherical-surface records, 160 with at least 500, and 47 with at least 1000. The worst sampled model contains 4,346 spherical surfaces, so this optimization is not specific to one BGA.
+
+## Optional placeholder-name minification
+
+`--minify-placeholder-names` changes exact `NONE` placeholder names to empty strings only on an explicit allowlist of geometry/topology/presentation entity types. It does not touch product IDs, descriptions, or arbitrary string fields.
+
+This is metadata-minifying rather than metadata-preserving, so it is not enabled by default. On representative cleaned files it saves another roughly 6-7%:
+
+- QFN safe: 576,652 -> 534,484 bytes
+- SOP safe: 604,036 -> 561,636 bytes
+- BGA-636 after spherical-cap instancing: 569,223 -> 534,130 bytes
+
+The minified output is byte-idempotent. OpenCascade geometry comparison remains exact within the established tolerances, and XDE import of the SOP preserves all 484 face colors with the same color histogram.
 
 ## Validation philosophy
 
