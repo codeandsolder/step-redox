@@ -25,6 +25,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Experimental: recover exact parameter-order-preserving rational B-spline V sweeps as SURFACE_OF_LINEAR_EXTRUSION"
+    )]
+    experimental_recover_rational_v_extrusions: bool,
+
+    #[arg(
+        long,
         help = "Experimental: instance congruent top-level solids under Z quarter-turns"
     )]
     experimental_instance_z90: bool,
@@ -63,6 +69,7 @@ fn main() -> Result<()> {
         consolidate_presentation: !cli.no_presentation_consolidation,
         experimental_recover_straight_bspline_lines: cli
             .experimental_recover_straight_bspline_lines,
+        experimental_recover_rational_v_extrusions: cli.experimental_recover_rational_v_extrusions,
         experimental_instance_z90: cli.experimental_instance_z90,
         experimental_instance_planar_positive_features: cli
             .experimental_instance_planar_positive_features,
@@ -78,7 +85,7 @@ fn main() -> Result<()> {
         eprintln!("{}", serde_json::to_string(&cleaned.stats)?);
     } else {
         eprintln!(
-            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, straight B-splines {}, direction groups {}, points removed {}, instance groups {}, solids {}, removed {}, planar arrays {}, families {}, instances {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
+            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, straight B-splines {}, direction groups {}, points removed {}, rational V extrusions {}, profile curves {}, points removed {}, instance groups {}, solids {}, removed {}, planar arrays {}, families {}, instances {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
             cleaned.stats.input_bytes,
             cleaned.stats.output_bytes,
             cleaned.stats.byte_ratio * 100.0,
@@ -89,6 +96,9 @@ fn main() -> Result<()> {
             cleaned.stats.straight_bspline_lines_recovered,
             cleaned.stats.straight_bspline_direction_groups,
             cleaned.stats.straight_bspline_points_removed,
+            cleaned.stats.rational_v_extrusion_surfaces_recovered,
+            cleaned.stats.rational_v_extrusion_profile_curves_created,
+            cleaned.stats.rational_v_extrusion_points_removed,
             cleaned.stats.instance_groups,
             cleaned.stats.instanced_solids,
             cleaned.stats.instance_entities_removed,

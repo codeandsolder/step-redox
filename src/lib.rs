@@ -9,12 +9,14 @@ mod instances;
 mod line_recovery;
 mod planar_features;
 mod spherical_caps;
+mod surface_recovery;
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
     pub experimental_recover_straight_bspline_lines: bool,
+    pub experimental_recover_rational_v_extrusions: bool,
     pub experimental_instance_z90: bool,
     pub experimental_instance_planar_positive_features: bool,
     pub experimental_instance_spherical_caps: bool,
@@ -28,6 +30,7 @@ impl Default for Options {
             intern_values: true,
             consolidate_presentation: true,
             experimental_recover_straight_bspline_lines: false,
+            experimental_recover_rational_v_extrusions: false,
             experimental_instance_z90: false,
             experimental_instance_planar_positive_features: false,
             experimental_instance_spherical_caps: false,
@@ -49,6 +52,9 @@ pub struct Stats {
     pub straight_bspline_lines_recovered: usize,
     pub straight_bspline_direction_groups: usize,
     pub straight_bspline_points_removed: usize,
+    pub rational_v_extrusion_surfaces_recovered: usize,
+    pub rational_v_extrusion_profile_curves_created: usize,
+    pub rational_v_extrusion_points_removed: usize,
     pub instance_groups: usize,
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
@@ -135,6 +141,19 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    let mut rational_v_extrusion_surfaces_recovered = 0usize;
+    let mut rational_v_extrusion_profile_curves_created = 0usize;
+    let mut rational_v_extrusion_points_removed = 0usize;
+    if options.experimental_recover_rational_v_extrusions {
+        for section in &mut exchange.data {
+            let pass =
+                surface_recovery::recover_rational_v_extrusion_surfaces(&mut section.entities);
+            rational_v_extrusion_surfaces_recovered += pass.surfaces_recovered;
+            rational_v_extrusion_profile_curves_created += pass.profile_curves_created;
+            rational_v_extrusion_points_removed += pass.orphan_points_removed;
+        }
+    }
+
     let mut instance_groups = 0usize;
     let mut instanced_solids = 0usize;
     let mut instance_entities_removed = 0usize;
@@ -192,6 +211,7 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     // values. Normalize them in the same invocation so aggressive output is a
     // fixed point rather than requiring a second safe cleanup pass.
     if (straight_bspline_lines_recovered > 0
+        || rational_v_extrusion_surfaces_recovered > 0
         || instance_groups > 0
         || planar_feature_arrays > 0
         || spherical_cap_arrays > 0)
@@ -229,6 +249,9 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             straight_bspline_lines_recovered,
             straight_bspline_direction_groups,
             straight_bspline_points_removed,
+            rational_v_extrusion_surfaces_recovered,
+            rational_v_extrusion_profile_curves_created,
+            rational_v_extrusion_points_removed,
             instance_groups,
             instanced_solids,
             instance_entities_removed,
