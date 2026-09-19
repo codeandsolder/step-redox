@@ -7,6 +7,7 @@ from OCP.BRepGProp import BRepGProp
 from OCP.GProp import GProp_GProps
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX, TopAbs_SOLID, TopAbs_SHELL
 from OCP.TopExp import TopExp_Explorer
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
@@ -72,6 +73,8 @@ def analyze(path):
     BRepGProp.VolumeProperties_s(shape, vol)
     surf = GProp_GProps()
     BRepGProp.SurfaceProperties_s(shape, surf)
+    linear = GProp_GProps()
+    BRepGProp.LinearProperties_s(shape, linear)
     box = Bnd_Box()
     BRepBndLib.Add_s(shape, box, True)
     bbox = [box.GetXMin(), box.GetYMin(), box.GetZMin(), box.GetXMax(), box.GetYMax(), box.GetZMax()]
@@ -83,6 +86,7 @@ def analyze(path):
         "transferred": transferred,
         "volume": vol.Mass(),
         "area": surf.Mass(),
+        "edge_length": linear.Mass(),
         "bbox": bbox,
         "faces": count(shape, TopAbs_FACE),
         "edges": count(shape, TopAbs_EDGE),
@@ -91,6 +95,7 @@ def analyze(path):
         "shells": count(shape, TopAbs_SHELL),
         "triangles": ntri,
         "mesh_hash": mh,
+        "brep_valid": bool(BRepCheck_Analyzer(shape).IsValid()),
     }
 
 

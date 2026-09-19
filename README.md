@@ -31,6 +31,7 @@ Useful switches:
 
     --no-intern
     --no-presentation-consolidation
+    --experimental-recover-straight-bspline-lines
     --experimental-instance-z90
     --experimental-instance-spherical-caps
     --minify-placeholder-names
@@ -97,6 +98,36 @@ For both QFN and SOP examples, STEP import succeeds; solid count and topology co
 Worst observed missing intersection volume is about `3.5e-18 mm^3` for QFN and `1.7e-16 mm^3` for SOP.
 
 This validation caught two real implementation errors during development: accidentally putting mapping-target placements in the parent representation, and incorrect mapping-origin/target transform construction. It remains part of the acceptance criteria for expanding the aggressive rewrite set.
+
+## Experimental straight B-spline recovery
+
+`--experimental-recover-straight-bspline-lines` replaces exporter-generated
+`B_SPLINE_CURVE_WITH_KNOTS` edge supports with native STEP `LINE` geometry
+when the equivalence can be proved from the STEP topology and control polygon.
+
+The pass is intentionally stricter than a collinearity test. A candidate must
+be a finite, clamped, non-closed, non-self-intersecting B-spline; its control
+points must be collinear and monotonic without endpoint overshoot; it must have
+exactly one inbound use, as the support curve of one `EDGE_CURVE`; and that
+edge's two `VERTEX_POINT` coordinates must match the first/last spline poles
+within `1e-12 mm` (in either orientation). Direction support is shared only
+after a second endpoint-residual proof against the representative direction.
+Only former control-point `CARTESIAN_POINT` records that become completely
+unreferenced are garbage-collected.
+
+This extra endpoint proof is necessary in real SolidWorks output. On
+`CONN-SMD_ASP-184330-01-1`, a simpler prototype found 83,489 collinear
+splines, but 35 of them were trimmed by `EDGE_CURVE` vertices that did not
+match the control-polygon endpoints. Rewriting those 35 changed reconstructed
+surface area by about `2.84 mm^2` and was rejected.
+
+The strict pass recovers **83,454** curves, removes **166,793** orphan control
+points, and uses 132 shared signed direction groups. The already-cleaned model
+shrinks from **64,532,069** to **42,884,762 bytes** (another **33.55%**).
+The output is byte-idempotent on a second cleanup. OpenCascade 8 reconstructs
+the same 35,491 faces, 200,978 edges, 401,956 vertices, and 89 shells; total
+edge length is exactly unchanged, surface-area delta is about
+`-6.9e-11 mm^2`, and bounding-box deltas are at floating-point noise.
 
 ## Experimental planar spherical-cap arrays
 

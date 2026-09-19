@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 mod instances;
+mod line_recovery;
 mod spherical_caps;
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
+    pub experimental_recover_straight_bspline_lines: bool,
     pub experimental_instance_z90: bool,
     pub experimental_instance_spherical_caps: bool,
     pub minify_placeholder_names: bool,
@@ -22,6 +24,7 @@ impl Default for Options {
         Self {
             intern_values: true,
             consolidate_presentation: true,
+            experimental_recover_straight_bspline_lines: false,
             experimental_instance_z90: false,
             experimental_instance_spherical_caps: false,
             minify_placeholder_names: false,
@@ -39,6 +42,9 @@ pub struct Stats {
     pub output_entities: usize,
     pub interned_entities: usize,
     pub consolidated_entities: usize,
+    pub straight_bspline_lines_recovered: usize,
+    pub straight_bspline_direction_groups: usize,
+    pub straight_bspline_points_removed: usize,
     pub instance_groups: usize,
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
@@ -108,6 +114,18 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    let mut straight_bspline_lines_recovered = 0usize;
+    let mut straight_bspline_direction_groups = 0usize;
+    let mut straight_bspline_points_removed = 0usize;
+    if options.experimental_recover_straight_bspline_lines {
+        for section in &mut exchange.data {
+            let pass = line_recovery::recover_straight_bspline_lines(&mut section.entities);
+            straight_bspline_lines_recovered += pass.curves_recovered;
+            straight_bspline_direction_groups += pass.direction_groups;
+            straight_bspline_points_removed += pass.orphan_points_removed;
+        }
+    }
+
     let mut instance_groups = 0usize;
     let mut instanced_solids = 0usize;
     let mut instance_entities_removed = 0usize;
@@ -148,7 +166,9 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     // Experimental passes create placements/directions and other support
     // values. Normalize them in the same invocation so aggressive output is a
     // fixed point rather than requiring a second safe cleanup pass.
-    if (instance_groups > 0 || spherical_cap_arrays > 0) && options.intern_values {
+    if (straight_bspline_lines_recovered > 0 || instance_groups > 0 || spherical_cap_arrays > 0)
+        && options.intern_values
+    {
         for section in &mut exchange.data {
             let pass = intern_section(&mut section.entities);
             interned_entities += pass.total;
@@ -178,6 +198,9 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             output_entities,
             interned_entities,
             consolidated_entities,
+            straight_bspline_lines_recovered,
+            straight_bspline_direction_groups,
+            straight_bspline_points_removed,
             instance_groups,
             instanced_solids,
             instance_entities_removed,
@@ -1137,6 +1160,29 @@ mod tests {
         );
         let once = clean_bytes(&src, &Options::default()).unwrap();
         let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
+        assert_eq!(once.bytes, twice.bytes);
+    }
+
+    #[test]
+    fn straight_bspline_recovery_is_byte_idempotent() {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));\n\
+             #2=CARTESIAN_POINT('',(1.,0.,0.));\n\
+             #3=CARTESIAN_POINT('',(2.,0.,0.));\n\
+             #4=CARTESIAN_POINT('',(3.,0.,0.));\n\
+             #5=VERTEX_POINT('',#1);\n\
+             #6=VERTEX_POINT('',#4);\n\
+             #7=B_SPLINE_CURVE_WITH_KNOTS('',3,(#1,#2,#3,#4),.UNSPECIFIED.,.F.,.F.,(4,4),(0.,1.),.UNSPECIFIED.);\n\
+             #8=EDGE_CURVE('',#5,#6,#7,.T.);",
+        );
+        let options = Options {
+            experimental_recover_straight_bspline_lines: true,
+            ..Options::default()
+        };
+        let once = clean_bytes(&src, &options).unwrap();
+        assert_eq!(once.stats.straight_bspline_lines_recovered, 1);
+        let twice = clean_bytes(&once.bytes, &options).unwrap();
+        assert_eq!(twice.stats.straight_bspline_lines_recovered, 0);
         assert_eq!(once.bytes, twice.bytes);
     }
 }

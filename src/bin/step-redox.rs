@@ -19,6 +19,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Experimental: replace strictly straight clamped B-spline edge curves with LINE"
+    )]
+    experimental_recover_straight_bspline_lines: bool,
+
+    #[arg(
+        long,
         help = "Experimental: instance congruent top-level solids under Z quarter-turns"
     )]
     experimental_instance_z90: bool,
@@ -49,6 +55,8 @@ fn main() -> Result<()> {
     let options = step_redox::Options {
         intern_values: !cli.no_intern,
         consolidate_presentation: !cli.no_presentation_consolidation,
+        experimental_recover_straight_bspline_lines: cli
+            .experimental_recover_straight_bspline_lines,
         experimental_instance_z90: cli.experimental_instance_z90,
         experimental_instance_spherical_caps: cli.experimental_instance_spherical_caps,
         minify_placeholder_names: cli.minify_placeholder_names,
@@ -62,7 +70,7 @@ fn main() -> Result<()> {
         eprintln!("{}", serde_json::to_string(&cleaned.stats)?);
     } else {
         eprintln!(
-            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, instance groups {}, solids {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
+            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, straight B-splines {}, direction groups {}, points removed {}, instance groups {}, solids {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
             cleaned.stats.input_bytes,
             cleaned.stats.output_bytes,
             cleaned.stats.byte_ratio * 100.0,
@@ -70,6 +78,9 @@ fn main() -> Result<()> {
             cleaned.stats.output_entities,
             cleaned.stats.interned_entities,
             cleaned.stats.consolidated_entities,
+            cleaned.stats.straight_bspline_lines_recovered,
+            cleaned.stats.straight_bspline_direction_groups,
+            cleaned.stats.straight_bspline_points_removed,
             cleaned.stats.instance_groups,
             cleaned.stats.instanced_solids,
             cleaned.stats.instance_entities_removed,
