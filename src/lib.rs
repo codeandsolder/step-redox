@@ -4,8 +4,10 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
+mod brep;
 mod instances;
 mod line_recovery;
+mod planar_features;
 mod spherical_caps;
 
 #[derive(Debug, Clone)]
@@ -14,6 +16,7 @@ pub struct Options {
     pub consolidate_presentation: bool,
     pub experimental_recover_straight_bspline_lines: bool,
     pub experimental_instance_z90: bool,
+    pub experimental_instance_planar_positive_features: bool,
     pub experimental_instance_spherical_caps: bool,
     pub minify_placeholder_names: bool,
     pub dense_ids: bool,
@@ -26,6 +29,7 @@ impl Default for Options {
             consolidate_presentation: true,
             experimental_recover_straight_bspline_lines: false,
             experimental_instance_z90: false,
+            experimental_instance_planar_positive_features: false,
             experimental_instance_spherical_caps: false,
             minify_placeholder_names: false,
             dense_ids: true,
@@ -49,6 +53,11 @@ pub struct Stats {
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
     pub instance_styles_replaced: usize,
+    pub planar_feature_arrays: usize,
+    pub planar_feature_families: usize,
+    pub planar_feature_instances: usize,
+    pub planar_feature_entities_removed: usize,
+    pub planar_feature_styles_replaced: usize,
     pub spherical_cap_arrays: usize,
     pub spherical_cap_instances: usize,
     pub spherical_cap_entities_removed: usize,
@@ -140,6 +149,22 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    let mut planar_feature_arrays = 0usize;
+    let mut planar_feature_families = 0usize;
+    let mut planar_feature_instances = 0usize;
+    let mut planar_feature_entities_removed = 0usize;
+    let mut planar_feature_styles_replaced = 0usize;
+    if options.experimental_instance_planar_positive_features {
+        for section in &mut exchange.data {
+            let pass = planar_features::instance_planar_positive_features(&mut section.entities);
+            planar_feature_arrays += pass.arrays;
+            planar_feature_families += pass.families;
+            planar_feature_instances += pass.instances;
+            planar_feature_entities_removed += pass.entities_removed;
+            planar_feature_styles_replaced += pass.styles_replaced;
+        }
+    }
+
     let mut spherical_cap_arrays = 0usize;
     let mut spherical_cap_instances = 0usize;
     let mut spherical_cap_entities_removed = 0usize;
@@ -166,7 +191,10 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     // Experimental passes create placements/directions and other support
     // values. Normalize them in the same invocation so aggressive output is a
     // fixed point rather than requiring a second safe cleanup pass.
-    if (straight_bspline_lines_recovered > 0 || instance_groups > 0 || spherical_cap_arrays > 0)
+    if (straight_bspline_lines_recovered > 0
+        || instance_groups > 0
+        || planar_feature_arrays > 0
+        || spherical_cap_arrays > 0)
         && options.intern_values
     {
         for section in &mut exchange.data {
@@ -205,6 +233,11 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             instanced_solids,
             instance_entities_removed,
             instance_styles_replaced,
+            planar_feature_arrays,
+            planar_feature_families,
+            planar_feature_instances,
+            planar_feature_entities_removed,
+            planar_feature_styles_replaced,
             spherical_cap_arrays,
             spherical_cap_instances,
             spherical_cap_entities_removed,

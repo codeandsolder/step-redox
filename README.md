@@ -129,9 +129,48 @@ the same 35,491 faces, 200,978 edges, 401,956 vertices, and 89 shells; total
 edge length is exactly unchanged, surface-area delta is about
 `-6.9e-11 mm^2`, and bounding-box deltas are at floating-point noise.
 
+## Experimental planar positive-feature arrays
+
+`--experimental-instance-planar-positive-features` factors repeated positive
+features that are fused into a shared closed shell through a planar host face.
+It is a geometry-changing aggressive pass: one canonical feature is closed on
+the exact host plane and reused through `REPRESENTATION_MAP` /
+`MAPPED_ITEM`, while the expanded feature faces and matching host holes are
+removed.
+
+Detection is deliberately strict. The source must be a closed shell, the host
+must be planar, every extracted feature edge must be exactly two-manifold with
+the feature or host, the complete feature/host interface must match exactly one
+host `FACE_BOUND`, all feature vertices must lie on the host's outward side,
+and normalized B-rep topology/support geometry must match under a Z
+quarter-turn. Mixed or ambiguous styling is rejected. Families smaller than
+eight are left expanded.
+
+Validated examples:
+
+- PGA1331: **23,536,653 -> 11,865,565 bytes**, 1 array / 1 family /
+  **1,331 instances**, 234,093 entities removed. OpenCascade reports both
+  B-reps valid, volume delta about `6.47e-10 mm^3`, and exact
+  `source - compact = 0.0` / `compact - source = 0.0` boolean residuals.
+- CONN-SMD_ASP-184330-01-1 after straight-line recovery:
+  **42,884,762 -> 8,732,968 bytes**, 2 arrays / 6 families /
+  **1,108 instances**, 625,853 entities removed. Independent OpenCascade
+  validation finds the source, residual body, and all mapped feature solids
+  valid, with both whole-body boolean residuals exactly `0.0`.
+- BGA-636: **1,652,726 -> 534,060 bytes**, **636 instances**. Both
+  whole-shape boolean residuals are exactly `0.0`; this is 70 bytes smaller
+  than the older dedicated spherical-cap pass.
+
+On the 40 largest raw corpus models, the strict pass triggers on only **5/40**
+models but saves **58,722,511 bytes** incrementally on those five. Combined
+with the other current aggressive passes, the top-40 processed total falls from
+**528,783,798** to **442,214,381 bytes**.
+
+The output is byte-idempotent after all applicable aggressive passes have run.
+
 ## Experimental planar spherical-cap arrays
 
-`--experimental-instance-spherical-caps` targets a different exporter pathology: large arrays of identical spherical-cap features fused into one substrate solid.
+`--experimental-instance-spherical-caps` is the older specialized implementation for large arrays of identical spherical-cap features fused into one substrate solid. The generic planar positive-feature pass now subsumes the validated BGA-636 case and produces a slightly smaller result; this flag is retained while broader corpus overlap is audited.
 
 The pass is intentionally narrow. It requires two matching spherical faces per feature, an exact two-edge circular interface to one shared planar face, a one-to-one matching `FACE_BOUND` hole in that plane, identical normalized B-rep topology and style across the feature array, and identical sphere centers modulo translation.
 

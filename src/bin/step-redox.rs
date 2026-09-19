@@ -31,6 +31,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Experimental: factor repeated positive features attached to planar closed-shell faces"
+    )]
+    experimental_instance_planar_positive_features: bool,
+
+    #[arg(
+        long,
         help = "Experimental: split planar-attached spherical-cap arrays and instance one closed feature"
     )]
     experimental_instance_spherical_caps: bool,
@@ -58,6 +64,8 @@ fn main() -> Result<()> {
         experimental_recover_straight_bspline_lines: cli
             .experimental_recover_straight_bspline_lines,
         experimental_instance_z90: cli.experimental_instance_z90,
+        experimental_instance_planar_positive_features: cli
+            .experimental_instance_planar_positive_features,
         experimental_instance_spherical_caps: cli.experimental_instance_spherical_caps,
         minify_placeholder_names: cli.minify_placeholder_names,
         dense_ids: !cli.no_dense_ids,
@@ -70,7 +78,7 @@ fn main() -> Result<()> {
         eprintln!("{}", serde_json::to_string(&cleaned.stats)?);
     } else {
         eprintln!(
-            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, straight B-splines {}, direction groups {}, points removed {}, instance groups {}, solids {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
+            "{} -> {} bytes ({:.2}%), entities {} -> {} (interned {}, consolidated {}, straight B-splines {}, direction groups {}, points removed {}, instance groups {}, solids {}, removed {}, planar arrays {}, families {}, instances {}, removed {}, spherical arrays {}, instances {}, removed {}, placeholder names {})",
             cleaned.stats.input_bytes,
             cleaned.stats.output_bytes,
             cleaned.stats.byte_ratio * 100.0,
@@ -84,6 +92,10 @@ fn main() -> Result<()> {
             cleaned.stats.instance_groups,
             cleaned.stats.instanced_solids,
             cleaned.stats.instance_entities_removed,
+            cleaned.stats.planar_feature_arrays,
+            cleaned.stats.planar_feature_families,
+            cleaned.stats.planar_feature_instances,
+            cleaned.stats.planar_feature_entities_removed,
             cleaned.stats.spherical_cap_arrays,
             cleaned.stats.spherical_cap_instances,
             cleaned.stats.spherical_cap_entities_removed,
