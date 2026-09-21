@@ -224,13 +224,12 @@ pub fn detect_periodic_chains_bytes(
         .collect())
 }
 
-/// Expand one proven read-only periodic fused-solid chain.
+/// Resize one proven periodic fused-solid chain at its positive-axis end.
 ///
-/// This first mutation path supports positive-end growth only. It re-runs the
-/// chain detector after editing and refuses to serialize a result unless the
-/// requested site count is rediscovered with the same pitch and a complete,
-/// manifold, read-only proof.
-pub fn expand_periodic_chain_bytes(
+/// The editor supports guarded growth and shrink. It re-runs the chain detector
+/// after editing and refuses to serialize a result unless the requested site
+/// count is rediscovered with the same pitch and complete manifold grammar.
+pub fn resize_periodic_chain_bytes(
     input: &[u8],
     chain_index: usize,
     new_sites: usize,
@@ -261,20 +260,19 @@ pub fn expand_periodic_chain_bytes(
     if !chain.read_only_proven {
         bail!("periodic chain {chain_index} is not sufficiently proven for editing");
     }
-    if new_sites <= chain.sites {
-        bail!(
-            "periodic-chain editing currently requires growth ({} -> {})",
-            chain.sites,
-            new_sites
-        );
+    if new_sites == chain.sites {
+        bail!("periodic-chain resize requested the existing site count {new_sites}");
     }
 
     let source_entity_count = section.entities.len();
-    let mut resize =
-        periodic_resize::expand_periodic_chain_positive(&mut section.entities, &chain, new_sites)?;
+    let mut resize = if new_sites > chain.sites {
+        periodic_resize::expand_periodic_chain_positive(&mut section.entities, &chain, new_sites)?
+    } else {
+        periodic_resize::shrink_periodic_chain_positive(&mut section.entities, &chain, new_sites)?
+    };
 
     // Compact normalization has already interned the source support geometry,
-    // but chain growth creates fresh translated PLANE/LINE/CYLINDER supports.
+    // but chain mutation creates fresh translated PLANE/LINE/CYLINDER supports.
     // Re-run the same guarded locus interning pass on the generated graph so
     // newly created supports do not survive merely because mutation happened
     // after the initial compact cleanup.
@@ -322,6 +320,25 @@ pub fn expand_periodic_chain_bytes(
         periodic_chains,
         compatibility,
     })
+}
+
+/// Backward-compatible growth-only wrapper around `resize_periodic_chain_bytes`.
+pub fn expand_periodic_chain_bytes(
+    input: &[u8],
+    chain_index: usize,
+    new_sites: usize,
+) -> Result<PeriodicChainEditOutput> {
+    let chains = detect_periodic_chains_bytes(input)?;
+    let old_sites = chains
+        .get(chain_index)
+        .map(|chain| chain.sites)
+        .ok_or_else(|| anyhow::anyhow!("periodic chain index {chain_index} not found"))?;
+    if new_sites <= old_sites {
+        bail!(
+            "periodic-chain expansion requires growth ({old_sites} -> {new_sites})"
+        );
+    }
+    resize_periodic_chain_bytes(input, chain_index, new_sites)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

@@ -771,6 +771,7 @@ pub struct PeriodicChainResizeStats {
     pub old_sites: usize,
     pub new_sites: usize,
     pub inserted_units: usize,
+    pub removed_units: usize,
     pub unit_faces: usize,
     pub tail_faces: usize,
     pub seam_edge_pairs: usize,
@@ -1257,7 +1258,410 @@ pub fn expand_periodic_chain_positive(
         old_sites,
         new_sites,
         inserted_units: extra,
+        removed_units: 0,
         unit_faces: unit_faces.len(),
+        tail_faces: tail_faces.len(),
+        seam_edge_pairs: seam_pairs.len(),
+        welded_vertices: vertex_map.len(),
+        welded_edges: edge_map.len(),
+        rebuilt_stretch_faces: stretch_faces.len(),
+        new_stretch_edges,
+        added_entities,
+        pruned_entities,
+        entity_delta,
+    })
+}
+
+/// Shrink a proven fused-solid periodic chain at its positive-axis end.
+///
+/// Shrinking keeps the negative prefix fixed, removes whole periodic units
+/// immediately before the proven positive tail, clones/translates that tail
+/// toward the negative end, welds the new site-gap seam, and rebuilds only the
+/// spanning face loops. No booleans or tessellation are used.
+pub fn shrink_periodic_chain_positive(
+    entities: &mut Vec<EntityInstance>,
+    chain: &PeriodicChainPattern,
+    new_sites: usize,
+) -> Result<PeriodicChainResizeStats> {
+    let old_sites = chain.sites;
+    if !chain.read_only_proven || !chain.complete_partition {
+        bail!("periodic chain is not fully proven");
+    }
+    if chain.nonmanifold_edges != 0 || chain.cross_site_edges != 0 {
+        bail!(
+            "periodic chain topology is not editable: nonmanifold={} cross_site={}",
+            chain.nonmanifold_edges,
+            chain.cross_site_edges
+        );
+    }
+    if !chain.fixed_middle_face_ids.is_empty() {
+        bail!("periodic chain contains fixed middle geometry");
+    }
+    if new_sites >= old_sites {
+        bail!("periodic chain shrink requires new_sites < old_sites");
+    }
+    if new_sites < 6
+        || chain.site_face_ids.len() != old_sites
+        || chain.gap_face_ids.len() + 1 != old_sites
+    {
+        bail!("periodic chain does not have the expected shrinkable 1-D site/gap structure");
+    }
+
+    let axis = normalize(chain.axis).ok_or_else(|| anyhow!("periodic chain axis is zero"))?;
+    let pitch = chain.pitch_mm;
+    if !pitch.is_finite() || pitch <= COORD_TOL_MM {
+        bail!("periodic chain pitch is invalid");
+    }
+    let removed_units = old_sites - new_sites;
+    let delta_total = scale(axis, -(removed_units as f64) * pitch);
+
+    let kept_last_site = new_sites - 3;
+    let kept_last_gap = new_sites - 4;
+    let remove_site_start = new_sites - 2;
+    let remove_gap_start = new_sites - 3;
+
+    let tail_gap0 = old_sites - 3;
+    let tail_site0 = old_sites - 2;
+    let tail_gap1 = old_sites - 2;
+    let tail_site1 = old_sites - 1;
+
+    let mut kept_sites = HashSet::<u64>::new();
+    for faces in &chain.site_face_ids[..=kept_last_site] {
+        kept_sites.extend(faces.iter().copied());
+    }
+    let mut kept_gaps = HashSet::<u64>::new();
+    for faces in &chain.gap_face_ids[..=kept_last_gap] {
+        kept_gaps.extend(faces.iter().copied());
+    }
+
+    let fixed_negative = chain
+        .fixed_negative_face_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let fixed_positive = chain
+        .fixed_positive_face_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let stretch_faces = chain
+        .stretch_face_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let kept_faces = kept_sites
+        .iter()
+        .chain(kept_gaps.iter())
+        .chain(fixed_negative.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let mut remove_faces = HashSet::<u64>::new();
+    for faces in &chain.site_face_ids[remove_site_start..tail_site0] {
+        remove_faces.extend(faces.iter().copied());
+    }
+    for faces in &chain.gap_face_ids[remove_gap_start..tail_gap0] {
+        remove_faces.extend(faces.iter().copied());
+    }
+
+    let tail_faces = chain.gap_face_ids[tail_gap0]
+        .iter()
+        .chain(chain.site_face_ids[tail_site0].iter())
+        .chain(chain.gap_face_ids[tail_gap1].iter())
+        .chain(chain.site_face_ids[tail_site1].iter())
+        .chain(fixed_positive.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let unit_faces = chain.gap_face_ids[remove_gap_start].len()
+        + chain.site_face_ids[remove_site_start].len();
+
+    if remove_faces.is_empty()
+        || kept_faces.iter().any(|face| tail_faces.contains(face))
+        || remove_faces.iter().any(|face| kept_faces.contains(face) || tail_faces.contains(face))
+    {
+        bail!("periodic chain shrink partition overlaps or removes no periodic unit");
+    }
+
+    // Reject direct presentation anywhere in geometry that is either cloned or
+    // deleted. Handling style roots during topology surgery is deliberately
+    // fail-closed until presentation cloning/removal is implemented.
+    let styles_by_target = collect_styles_by_target(entities);
+    let touched_roots = remove_faces
+        .iter()
+        .chain(tail_faces.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let touched_descendants = entity_descendant_closure(entities, &touched_roots)?;
+    let styled_touched_targets = touched_descendants
+        .iter()
+        .filter(|id| styles_by_target.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+    if !styled_touched_targets.is_empty() {
+        bail!(
+            "periodic chain has {} directly styled entities in moved/removed geometry; presentation surgery is not implemented yet",
+            styled_touched_targets.len()
+        );
+    }
+
+    let mut graph = GraphEditor::new(entities);
+    let shell = graph
+        .simple_record(chain.solid_id)
+        .and_then(|record| {
+            list_params(record).and_then(|params| {
+                params
+                    .iter()
+                    .filter_map(entity_ref_value)
+                    .find(|id| graph.entity_type(*id) == Some("CLOSED_SHELL"))
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "periodic chain solid #{} has no CLOSED_SHELL",
+                chain.solid_id
+            )
+        })?;
+    let source_shell_faces = graph.shell_faces(shell)?;
+
+    let mut all_faces = HashSet::<u64>::new();
+    for faces in &chain.site_face_ids {
+        all_faces.extend(faces.iter().copied());
+    }
+    for faces in &chain.gap_face_ids {
+        all_faces.extend(faces.iter().copied());
+    }
+    all_faces.extend(stretch_faces.iter().copied());
+    all_faces.extend(fixed_negative.iter().copied());
+    all_faces.extend(fixed_positive.iter().copied());
+    let source_edge_faces = graph.edge_faces(&all_faces)?;
+
+    let source_loops = stretch_faces
+        .iter()
+        .map(|&face| Ok((face, graph.source_loops(face)?)))
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    let tail_map = graph.clone_descendants(&tail_faces, delta_total)?;
+    let target_tail = tail_faces
+        .iter()
+        .map(|face| {
+            tail_map
+                .get(face)
+                .copied()
+                .ok_or_else(|| anyhow!("translated tail clone missing face #{face}"))
+        })
+        .collect::<Result<HashSet<_>>>()?;
+
+    let kept_site = chain.site_face_ids[kept_last_site]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_removed_gap = chain.gap_face_ids[remove_gap_start]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let last_removed_site = chain.site_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_tail_gap = chain.gap_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let source_kept_right =
+        chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_gap);
+    let source_tail_left =
+        chain_interface_edges(&source_edge_faces, &last_removed_site, &first_tail_gap);
+    if source_kept_right.len() != 7 || source_tail_left.len() != 7 {
+        bail!(
+            "unexpected periodic-chain shrink seam sizes: kept={} tail={}",
+            source_kept_right.len(),
+            source_tail_left.len()
+        );
+    }
+    for edge in source_kept_right.iter().chain(source_tail_left.iter()) {
+        if chain_edge_curve_type(&graph, *edge)? != "LINE" {
+            bail!("periodic-chain shrink seam contains non-LINE edge support");
+        }
+    }
+
+    let mapped_tail_left = source_tail_left
+        .iter()
+        .map(|edge| {
+            tail_map
+                .get(edge)
+                .copied()
+                .ok_or_else(|| anyhow!("translated tail missing left seam edge #{edge}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let seam_pairs =
+        chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
+
+    let mut prune_roots = remove_faces.clone();
+    prune_roots.extend(tail_faces.iter().copied());
+    for &(_, duplicate) in &seam_pairs {
+        prune_roots.insert(duplicate);
+    }
+    let (vertex_map, edge_map) = chain_build_weld_maps(&graph, &seam_pairs)?;
+    prune_roots.extend(vertex_map.keys().copied());
+
+    let mut target_nonstretch = kept_faces.clone();
+    target_nonstretch.extend(target_tail.iter().copied());
+    let target_faces_for_weld = target_nonstretch
+        .iter()
+        .chain(stretch_faces.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    chain_apply_weld(&mut graph, &target_faces_for_weld, &vertex_map, &edge_map)?;
+
+    let mut coord_vertices = HashMap::<[i64; 3], Vec<u64>>::new();
+    for &face in &target_nonstretch {
+        for vertex in graph.face_vertices(face)? {
+            coord_vertices
+                .entry(quantize_coord(graph.vertex_coord(vertex)?))
+                .or_default()
+                .push(*vertex_map.get(&vertex).unwrap_or(&vertex));
+        }
+    }
+    for vertices in coord_vertices.values_mut() {
+        vertices.sort_unstable();
+        vertices.dedup();
+    }
+    let find_vertex = |point: [f64; 3]| -> Result<u64> {
+        let Some(vertices) = coord_vertices.get(&quantize_coord(point)) else {
+            bail!("no target chain vertex at {point:?}");
+        };
+        if vertices.len() != 1 {
+            bail!("ambiguous target chain vertex at {point:?}: {vertices:?}");
+        }
+        Ok(vertices[0])
+    };
+
+    let mut stretch_edges = stretch_faces
+        .iter()
+        .map(|&face| (face, HashSet::<u64>::new()))
+        .collect::<HashMap<_, _>>();
+
+    let mut add_interfaces =
+        |face_set: &HashSet<u64>, mapping: Option<&HashMap<u64, u64>>| -> Result<()> {
+            for (&edge, faces) in &source_edge_faces {
+                if !faces.iter().any(|face| face_set.contains(face)) {
+                    continue;
+                }
+                let target_stretch = faces
+                    .iter()
+                    .filter(|face| stretch_faces.contains(face))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if target_stretch.is_empty() {
+                    continue;
+                }
+                let mut target_edge = mapping
+                    .and_then(|map| map.get(&edge).copied())
+                    .unwrap_or(edge);
+                target_edge = edge_map.get(&target_edge).copied().unwrap_or(target_edge);
+                for stretch in target_stretch {
+                    stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+                }
+            }
+            Ok(())
+        };
+
+    add_interfaces(&kept_faces, None)?;
+    add_interfaces(&tail_faces, Some(&tail_map))?;
+
+    let mut ss_rows = Vec::<SsRow>::new();
+    let mut ss_pairs = Vec::<(u64, [u64; 2])>::new();
+    for (&edge, faces) in &source_edge_faces {
+        if faces.len() == 2 && faces.iter().all(|face| stretch_faces.contains(face)) {
+            let mut pair = [faces[0], faces[1]];
+            pair.sort_unstable();
+            let (center, span) = graph.edge_center_span(edge, axis)?;
+            ss_rows.push(SsRow { center, span, edge });
+            ss_pairs.push((edge, pair));
+        }
+    }
+    if ss_rows.len() != 6 {
+        bail!(
+            "periodic-chain stretch grammar expected 6 stretch/stretch edges, got {}",
+            ss_rows.len()
+        );
+    }
+
+    let chain_span = old_sites.saturating_sub(1) as f64 * pitch;
+    let chain_mid = (chain.site_centers_mm[0] + chain.site_centers_mm[old_sites - 1]) * 0.5;
+    let mut new_stretch_edges = 0usize;
+    for row in ss_rows {
+        let pair = ss_pairs
+            .iter()
+            .find(|(edge, _)| *edge == row.edge)
+            .map(|(_, pair)| *pair)
+            .unwrap();
+        let [mut va, mut vb] = graph.edge_vertices(row.edge)?;
+        let mut pa = graph.vertex_coord(va)?;
+        let mut pb = graph.vertex_coord(vb)?;
+
+        let target_edge = if row.span > chain_span {
+            if dot(pa, axis) > dot(pb, axis) {
+                std::mem::swap(&mut va, &mut vb);
+                std::mem::swap(&mut pa, &mut pb);
+            }
+            let nv = find_vertex(add(pb, delta_total))?;
+            new_stretch_edges += 1;
+            graph.make_edge_like(row.edge, va, nv)?
+        } else if row.center < chain_mid {
+            row.edge
+        } else {
+            let nva = find_vertex(add(pa, delta_total))?;
+            let nvb = find_vertex(add(pb, delta_total))?;
+            new_stretch_edges += 1;
+            graph.make_edge_like(row.edge, nva, nvb)?
+        };
+        stretch_edges.get_mut(&pair[0]).unwrap().insert(target_edge);
+        stretch_edges.get_mut(&pair[1]).unwrap().insert(target_edge);
+    }
+
+    for &face in &chain.stretch_face_ids {
+        let edges = stretch_edges
+            .get(&face)
+            .ok_or_else(|| anyhow!("missing target edges for chain stretch face #{face}"))?
+            .clone();
+        let loops = source_loops
+            .get(&face)
+            .ok_or_else(|| anyhow!("missing source loops for chain stretch face #{face}"))?;
+        let replaced_bounds = graph.rebuild_face_bounds(face, &edges, loops)?;
+        prune_roots.extend(replaced_bounds);
+    }
+
+    let mut target_shell_faces = Vec::with_capacity(source_shell_faces.len());
+    for face in source_shell_faces {
+        if remove_faces.contains(&face) {
+            continue;
+        }
+        if tail_faces.contains(&face) {
+            target_shell_faces.push(
+                tail_map
+                    .get(&face)
+                    .copied()
+                    .ok_or_else(|| anyhow!("translated tail missing shell face #{face}"))?,
+            );
+        } else {
+            target_shell_faces.push(face);
+        }
+    }
+    graph.set_shell_faces(shell, &target_shell_faces)?;
+
+    let pruned_entities = graph.prune_unreachable_descendants(&prune_roots)?;
+    let added_entities = graph.entities.len().saturating_sub(graph.initial_len);
+    let entity_delta = graph.entities.len() as isize - graph.initial_len as isize;
+    Ok(PeriodicChainResizeStats {
+        old_sites,
+        new_sites,
+        inserted_units: 0,
+        removed_units,
+        unit_faces,
         tail_faces: tail_faces.len(),
         seam_edge_pairs: seam_pairs.len(),
         welded_vertices: vertex_map.len(),

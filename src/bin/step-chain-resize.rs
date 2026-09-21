@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "step-chain-resize",
-    about = "Expand one proven fused-solid periodic chain"
+    about = "Resize one proven fused-solid periodic chain"
 )]
 struct Cli {
     input: PathBuf,
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
         .bytes
     };
 
-    let edited = step_redox::expand_periodic_chain_bytes(&semantic, cli.chain, cli.sites)?;
+    let edited = step_redox::resize_periodic_chain_bytes(&semantic, cli.chain, cli.sites)?;
 
     std::fs::write(&cli.output, &edited.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;

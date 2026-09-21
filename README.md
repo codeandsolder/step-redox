@@ -38,18 +38,20 @@ A periodic-chain analyzer recovers repeated structure inside fused solids even
 when no editable `MAPPED_ITEM` row exists. On three independent first-party TE
 Connectivity siblings it proves the same 1.500 mm family grammar: 14/15/18 sites,
 70 interior site faces + 3 gap faces per added position, six stretch faces, and
-symmetric 33-face end regions. The first guarded mutation path now expands this
-proven family at the positive end without booleans or tessellation. It clones the
-generic 73-face unit, translates the proven positive tail, welds seam topology,
-rebuilds the six spanning face loops, garbage-collects only replaced/detached
-closures, and then requires the same semantic grammar to be rediscovered.
+symmetric 33-face end regions. The guarded editor now resizes this proven
+family in both directions at the positive end without booleans or tessellation.
+Growth clones the generic 73-face unit; shrink removes whole units. Both translate
+the proven positive tail, weld seam topology, rebuild the six spanning face loops,
+garbage-collect only replaced/detached closures, and then require the same semantic
+grammar to be rediscovered.
 
-The generated 14→15 and 14→18 models are regression-tested against TE's
-independently published siblings. Both have exact solid/shell/face/edge/vertex
-counts, mass-property and dimension differences at numerical noise, and pass eight
-software-rendered view comparisons. The compact generated files are 944,851 B and
-1,124,856 B respectively, within a few kilobytes of the independent sibling
-exports.
+Five generated-family regressions are checked against independently published TE
+siblings: 14→15, 14→18, 15→14, 18→15, and 18→14. All preserve exact
+solid/shell/face/edge/vertex counts, match dimensions and mass properties to
+numerical noise after placement alignment, and pass eight software-rendered view
+comparisons. Representative compact outputs are 944,851 B for 14→15, 1,124,856 B
+for 14→18, and 885,518 B for 15→14, all within a few kilobytes of the corresponding
+independent sibling exports.
 
 A browser/WASM prototype lives under `web/`, including an experimental
 "Unscrew your STEP" front end. The Rust library exposes detected patterns,
