@@ -45,7 +45,6 @@ struct LatticeCandidate {
 #[derive(Debug, Clone)]
 struct FaceInfo {
     id: u64,
-    center: [f64; 3],
     projected: f64,
     span: f64,
     key: FaceKey,
@@ -382,7 +381,6 @@ fn analyze_planar_line_face(
 
     Some(FaceInfo {
         id: face,
-        center,
         projected,
         span,
         key: FaceKey {
@@ -607,10 +605,6 @@ fn canonicalize_axis(axis: &mut [f64; 3]) {
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     norm(cross(a, b)) <= 1.0e-8
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 fn scale(v: [f64; 3], s: f64) -> [f64; 3] {

@@ -6,8 +6,11 @@ Upstream CAD files are not stored in git. The fixture manifest records public
 download URLs, SHA-256 checksums, and source notes. CI downloads a fixture only
 when it is absent from its private cache and rejects it if the checksum changes.
 
-Each case runs step-redox (or, later, a count-generator CLI) and validates the
-result with several independent signals:
+Each case runs step-redox or the semantic count-generator CLI and validates
+the result with several independent signals. The same manifest therefore covers
+ordinary optimizer roundtrips and cross-model generation: the current strongest
+case recovers the count grammar from an upstream 48-contact header, generates
+72 contacts, and compares it with an independently published 72-contact sibling.
 
 - OCCT import and BRepCheck validity
 - solid, shell, face, edge, and vertex counts
@@ -29,12 +32,13 @@ translation without permitting scaling or shape changes.
 Local invocation:
 
     python -m pip install -r validation/requirements.txt
-    cargo build --release --bin step-redox
+    cargo build --release --bin step-redox --bin step-count-resize
     python validation/harness.py run \
       --manifest validation/fixtures.json \
       --cache .cache/step-redox-validation \
       --out validation/out \
-      --step-redox target/release/step-redox
+      --step-redox target/release/step-redox \
+      --step-count-resize target/release/step-count-resize
 
 CI uploads validation/out as an artifact, including report.json, summary.md, and
 the reference/candidate/difference image triplets for every camera.

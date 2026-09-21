@@ -150,6 +150,26 @@ def inertia_matrix(props: GProp_GProps):
     return [[float(m.Value(i, j)) for j in range(1, 4)] for i in range(1, 4)]
 
 
+def bbox_values(box: Bnd_Box):
+    # cadquery-ocp bindings changed the Python surface of Bnd_Box across
+    # OpenCascade releases. Support the forms used by both our local OCP 8
+    # validator and the public OCP 7.9 wheels used in GitHub Actions.
+    scalar_names = ("GetXMin", "GetYMin", "GetZMin", "GetXMax", "GetYMax", "GetZMax")
+    if all(hasattr(box, name) for name in scalar_names):
+        return [float(getattr(box, name)()) for name in scalar_names]
+    if hasattr(box, "CornerMin") and hasattr(box, "CornerMax"):
+        lo = box.CornerMin()
+        hi = box.CornerMax()
+        return [
+            float(lo.X()), float(lo.Y()), float(lo.Z()),
+            float(hi.X()), float(hi.Y()), float(hi.Z()),
+        ]
+    if hasattr(box, "Get"):
+        values = box.Get()
+        if len(values) >= 6:
+            return [float(value) for value in values[:6]]
+    raise RuntimeError("unsupported OCP Bnd_Box binding")
+
 def analyze(path: Path):
     shape, roots, transferred = load_step(path)
     volume = GProp_GProps()
@@ -160,10 +180,7 @@ def analyze(path: Path):
     BRepGProp.LinearProperties_s(shape, linear)
     box = Bnd_Box()
     BRepBndLib.Add_s(shape, box, True)
-    bbox = [
-        float(box.GetXMin()), float(box.GetYMin()), float(box.GetZMin()),
-        float(box.GetXMax()), float(box.GetYMax()), float(box.GetZMax()),
-    ]
+    bbox = bbox_values(box)
     center = [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)]
     extent = [bbox[i + 3] - bbox[i] for i in range(3)]
     report = {
@@ -442,7 +459,13 @@ def write_summary(results, path: Path):
     path.write_text("\n".join(lines) + "\n")
 
 
-def run_manifest(manifest_path: Path, cache: Path, out: Path, step_redox: Path):
+def run_manifest(
+    manifest_path: Path,
+    cache: Path,
+    out: Path,
+    step_redox: Path,
+    step_count_resize: Path | None = None,
+):
     manifest = json.loads(manifest_path.read_text())
     fixtures = {
         name: fetch_fixture(name, spec, cache)
@@ -461,10 +484,15 @@ def run_manifest(manifest_path: Path, cache: Path, out: Path, step_redox: Path):
         output_path = case_dir / "candidate.step"
         values = {
             "step_redox": str(step_redox),
+            "step_count_resize": str(step_count_resize) if step_count_resize else "",
             "input": str(input_path),
             "reference": str(reference_path),
             "output": str(output_path),
         }
+        if any("{step_count_resize}" in part for part in case["command"]) and not step_count_resize:
+            raise RuntimeError(
+                f"case {name}: command requires --step-count-resize but none was supplied"
+            )
         command = [part.format(**values) for part in case["command"]]
         proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         result = {
@@ -526,6 +554,7 @@ def main():
     run.add_argument("--cache", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--step-redox", type=Path, required=True)
+    run.add_argument("--step-count-resize", type=Path)
     compare = sub.add_parser("compare")
     compare.add_argument("reference", type=Path)
     compare.add_argument("candidate", type=Path)
@@ -538,7 +567,15 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "run":
-        raise SystemExit(run_manifest(args.manifest, args.cache, args.out, args.step_redox))
+        raise SystemExit(
+            run_manifest(
+                args.manifest,
+                args.cache,
+                args.out,
+                args.step_redox,
+                args.step_count_resize,
+            )
+        )
 
     thresholds = {
         "topology_exact": True,

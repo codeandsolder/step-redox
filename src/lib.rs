@@ -186,6 +186,166 @@ pub struct PeriodicBodyEditOutput {
     pub resize: periodic_resize::PeriodicBodyResizeStats,
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CountResizeStats {
+    pub old_sites: usize,
+    pub new_sites: usize,
+    pub instances_per_site: usize,
+    pub body_resizes: Vec<periodic_resize::PeriodicBodyResizeStats>,
+    pub pattern_resizes: Vec<patterns::PatternResizeStats>,
+}
+
+pub struct CountEditOutput {
+    pub bytes: Vec<u8>,
+    pub resize: CountResizeStats,
+    pub patterns: Vec<patterns::InstancePattern>,
+    pub periodic_bodies: Vec<periodic_bodies::PeriodicBodyPattern>,
+    pub count_parameters: Vec<parameters::RecoveredCountParameter>,
+    pub compatibility: compatibility::CompatibilityAudit,
+}
+
+/// Expand one recovered count parameter atomically.
+///
+/// The input must already contain a proven periodic body grammar and its coupled
+/// filled 1-D instance rows. This first implementation intentionally supports
+/// growth only because the periodic-body graph mutator currently expands the
+/// positive end. Each coupled row is anchored so that it grows toward the same
+/// positive body axis regardless of the row's own basis sign.
+pub fn expand_count_parameter_bytes(
+    input: &[u8],
+    parameter_index: usize,
+    new_sites: usize,
+) -> Result<CountEditOutput> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+    if exchange.data.len() != 1 {
+        bail!("count-parameter editing currently requires exactly one DATA section");
+    }
+
+    let section = &mut exchange.data[0];
+    let detected_patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+    let detected_bodies =
+        periodic_bodies::detect_periodic_bodies(&section.entities, &detected_patterns);
+    let detected_parameters =
+        parameters::detect_count_parameters(&detected_patterns, &detected_bodies);
+    let parameter = detected_parameters
+        .get(parameter_index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("count parameter index {parameter_index} not found"))?;
+
+    if !parameter.body_grammar_proven || parameter.periodic_bodies.is_empty() {
+        bail!("count parameter {parameter_index} does not have a proven periodic body grammar");
+    }
+    if new_sites <= parameter.sites {
+        bail!(
+            "count-parameter editing currently supports growth only ({} -> {})",
+            parameter.sites,
+            new_sites
+        );
+    }
+
+    let body_specs = parameter
+        .periodic_bodies
+        .iter()
+        .map(|&index| {
+            detected_bodies
+                .get(index)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("periodic body index {index} disappeared"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let pattern_specs = parameter
+        .instance_patterns
+        .iter()
+        .map(|&index| {
+            detected_patterns
+                .get(index)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("instance pattern index {index} disappeared"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut body_resizes = Vec::with_capacity(body_specs.len());
+    for body in &body_specs {
+        body_resizes.push(periodic_resize::expand_periodic_body_positive(
+            &mut section.entities,
+            body,
+            new_sites,
+        )?);
+    }
+
+    let mut pattern_resizes = Vec::with_capacity(pattern_specs.len());
+    for pattern in &pattern_specs {
+        let basis = pattern
+            .basis
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("coupled pattern has no basis"))?;
+        let axis_dot =
+            basis[0] * parameter.axis[0] + basis[1] * parameter.axis[1] + basis[2] * parameter.axis[2];
+        let anchor = if axis_dot >= 0.0 {
+            patterns::PatternAnchor::Start
+        } else {
+            patterns::PatternAnchor::End
+        };
+        pattern_resizes.push(patterns::resize_filled_linear_pattern(
+            &mut section.entities,
+            pattern,
+            new_sites,
+            anchor,
+        )?);
+    }
+
+    let _ = intern_section(&mut section.entities);
+    for section in &mut exchange.data {
+        dense_renumber(&mut section.entities);
+    }
+
+    let (patterns, periodic_bodies, count_parameters) = detect_exchange_semantics(&exchange);
+    let verified = count_parameters.iter().any(|candidate| {
+        candidate.body_grammar_proven
+            && candidate.sites == new_sites
+            && candidate.instances_per_site == parameter.instances_per_site
+            && candidate.instance_patterns.len() == parameter.instance_patterns.len()
+            && candidate.periodic_bodies.len() == parameter.periodic_bodies.len()
+    });
+    if !verified {
+        bail!(
+            "post-edit semantic verification failed: requested {new_sites} sites were not rediscovered with the same coupled body/instance grammar"
+        );
+    }
+
+    let compatibility = audit_exchange_compatibility(&exchange);
+    let output = write_exchange(&exchange)?;
+    Ok(CountEditOutput {
+        bytes: output.into_bytes(),
+        resize: CountResizeStats {
+            old_sites: parameter.sites,
+            new_sites,
+            instances_per_site: parameter.instances_per_site,
+            body_resizes,
+            pattern_resizes,
+        },
+        patterns,
+        periodic_bodies,
+        count_parameters,
+        compatibility,
+    })
+}
+
+
 /// Expand one detected periodic body at its positive-axis end.
 pub fn expand_periodic_body_bytes(
     input: &[u8],

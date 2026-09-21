@@ -17,6 +17,17 @@ independently exported 72-contact sibling with the same solid/face/edge/vertex
 counts, bounding-box dimensions, and volume to floating-point noise. The direct
 graph rewrite produces a valid closed B-rep without booleans or tessellation.
 
+The high-level count editor composes the recovered body grammar and every coupled
+instance row atomically:
+
+    cargo run --release --bin step-count-resize -- input.step output.step --sites 36
+
+Raw input is normalized into the editable semantic representation first. The
+current body graph mutator supports growth at the positive pattern end; shrinking
+and alternate body anchors are still future work. The editor re-runs semantic
+detection after mutation and fails rather than returning a model unless the
+requested count and the same coupled body/instance grammar are recovered again.
+
 A browser/WASM prototype lives under `web/`, including an experimental
 "Unscrew your STEP" front end. The Rust library exposes detected patterns,
 periodic bodies, and higher-level recovered count parameters; positive-end
