@@ -38,6 +38,6 @@ Tessellation tolerance defaults to `0.01` STEP model units and can be changed wi
 
 ## Current scope
 
-The viewer operates on directly defined `OPEN_SHELL` / `CLOSED_SHELL` source geometry. It deliberately does not expand `MAPPED_ITEM` assembly placements yet. This is sufficient for inspecting step-redox transformations on source faces and bodies; mapped-instance world-space visualization can be added separately if needed.
+The viewer operates on directly defined `OPEN_SHELL` / `CLOSED_SHELL` source geometry. Monstertruck conversion uses its reported loader path and the viewer refuses any shell conversion that reports lost faces, wires, edges, or vertices. It deliberately does not expand `MAPPED_ITEM` assembly placements yet. This is sufficient for inspecting step-redox transformations on source faces and bodies; mapped-instance world-space visualization can be added separately if needed.
 
 The emitted HTML imports Three.js modules from jsDelivr when opened in a browser; the STEP parsing and tessellation path itself is pure Rust/Monstertruck.
