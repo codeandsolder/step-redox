@@ -20,6 +20,8 @@ jobs:
           cache-dependency-path: validation/requirements.txt
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -28,6 +30,24 @@ jobs:
 
       - name: Run Rust unit tests
         run: cargo test --lib --release
+
+      - name: Validate Monstertruck CAD backend
+        run: |
+          cargo test --lib --release --features cad-kernel-monstertruck
+          cargo clippy --lib --features cad-kernel-monstertruck -- -D warnings
+
+      - name: Validate Monstertruck tooling
+        run: |
+          cargo clippy --manifest-path tools/step-viewer/Cargo.toml -- -D warnings
+          (
+            cd experiments/kcl-monstertruck-spike
+            cargo run --quiet
+            shell_id="$(sed -nE 's/^#([0-9]+)[[:space:]]*=[[:space:]]*CLOSED_SHELL.*/\\1/p' box.step | head -n1)"
+            test -n "$shell_id"
+            cargo run --quiet --manifest-path ../../tools/step-viewer/Cargo.toml -- \
+              box.step box.step /tmp/step-redox-monstertruck-viewer-smoke.html --shell "$shell_id"
+            test -s /tmp/step-redox-monstertruck-viewer-smoke.html
+          )
 
       - name: Build step-redox
         run: cargo build --release --bin step-redox --bin step-count-resize --bin step-chain-resize
