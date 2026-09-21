@@ -999,18 +999,17 @@ pub fn expand_periodic_chain_positive(
 
     let source_unit_left = chain_interface_edges(&source_edge_faces, &unit_gap, &left_site);
     let source_unit_right = chain_interface_edges(&source_edge_faces, &unit_site, &first_tail_gap);
-    if source_unit_left.len() != 7 || source_unit_right.len() != 7 {
+    if source_unit_left.is_empty() || source_unit_right.is_empty() {
         bail!(
-            "unexpected periodic-chain seam sizes: left={} right={}",
+            "periodic-chain site/gap seam is empty: left={} right={}",
             source_unit_left.len(),
             source_unit_right.len()
         );
     }
-    for edge in source_unit_left.iter().chain(source_unit_right.iter()) {
-        if chain_edge_curve_type(&graph, *edge)? != "LINE" {
-            bail!("periodic-chain site/gap seam contains non-LINE edge support");
-        }
-    }
+    chain_require_straight_seam_edges(
+        &graph,
+        source_unit_left.iter().chain(source_unit_right.iter()).copied(),
+    )?;
 
     let mut seam_pairs = Vec::<(u64, u64)>::new();
     let first_left = source_unit_left
@@ -1474,18 +1473,17 @@ pub fn shrink_periodic_chain_positive(
         chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_gap);
     let source_tail_left =
         chain_interface_edges(&source_edge_faces, &last_removed_site, &first_tail_gap);
-    if source_kept_right.len() != 7 || source_tail_left.len() != 7 {
+    if source_kept_right.is_empty() || source_tail_left.is_empty() {
         bail!(
-            "unexpected periodic-chain shrink seam sizes: kept={} tail={}",
+            "periodic-chain shrink seam is empty: kept={} tail={}",
             source_kept_right.len(),
             source_tail_left.len()
         );
     }
-    for edge in source_kept_right.iter().chain(source_tail_left.iter()) {
-        if chain_edge_curve_type(&graph, *edge)? != "LINE" {
-            bail!("periodic-chain shrink seam contains non-LINE edge support");
-        }
-    }
+    chain_require_straight_seam_edges(
+        &graph,
+        source_kept_right.iter().chain(source_tail_left.iter()).copied(),
+    )?;
 
     let mapped_tail_left = source_tail_left
         .iter()
@@ -1701,6 +1699,21 @@ fn chain_edge_curve_type(graph: &GraphEditor<'_>, edge: u64) -> Result<String> {
         .and_then(entity_ref_value)
         .ok_or_else(|| anyhow!("chain seam edge #{edge} missing curve support"))?;
     Ok(graph.entity_type(curve).unwrap_or("<UNKNOWN>").to_string())
+}
+
+fn chain_require_straight_seam_edges(
+    graph: &GraphEditor<'_>,
+    edges: impl IntoIterator<Item = u64>,
+) -> Result<()> {
+    for edge in edges {
+        let curve_type = chain_edge_curve_type(graph, edge)?;
+        if curve_type != "LINE" {
+            bail!(
+                "periodic-chain seam edge #{edge} uses unsupported {curve_type} support; only LINE seams are currently proven"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn chain_edge_key(graph: &GraphEditor<'_>, edge: u64) -> Result<ChainEdgeKey> {
