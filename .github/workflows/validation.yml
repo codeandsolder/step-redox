@@ -42,7 +42,7 @@ jobs:
           (
             cd experiments/kcl-monstertruck-spike
             cargo run --quiet
-            shell_id="$(sed -nE 's/^#([0-9]+)[[:space:]]*=[[:space:]]*CLOSED_SHELL.*/\\1/p' box.step | head -n1)"
+            shell_id="$(sed -nE 's/^#([0-9]+)[[:space:]]*=[[:space:]]*CLOSED_SHELL.*/\1/p' box.step | head -n1)"
             test -n "$shell_id"
             cargo run --quiet --manifest-path ../../tools/step-viewer/Cargo.toml -- \
               box.step box.step /tmp/step-redox-monstertruck-viewer-smoke.html --shell "$shell_id"
