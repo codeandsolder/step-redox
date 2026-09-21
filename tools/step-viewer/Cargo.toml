@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive"] }
 ruststep = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-truck-stepio = "0.3"
-truck-meshalgo = "0.4"
-truck-polymesh = "0.6"
-truck-topology = "0.6"
+monstertruck-io = { version = "0.4.1", features = ["step"] }
+monstertruck-meshing = "0.4.1"
+monstertruck-mesh = "0.4.1"
+monstertruck-topology = "0.4.1"
