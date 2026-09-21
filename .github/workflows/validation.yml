@@ -25,6 +25,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Generate refreshed Cargo lock
+        run: cargo generate-lockfile
+
+      - name: Upload refreshed Cargo lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-refresh
+          path: Cargo.lock
+          if-no-files-found: error
+
       - name: Install validation dependencies
         run: python -m pip install -r validation/requirements.txt
 
