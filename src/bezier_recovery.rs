@@ -7,7 +7,7 @@ pub(crate) struct BezierRecoveryStats {
 }
 
 pub(crate) fn recover_exact_bezier_curves(
-    entities: &mut Vec<EntityInstance>,
+    entities: &mut [EntityInstance],
 ) -> BezierRecoveryStats {
     let mut stats = BezierRecoveryStats::default();
     if entities.is_empty() {

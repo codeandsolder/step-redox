@@ -187,11 +187,11 @@ pub fn detect_periodic_bodies(
                 if repeat_set.contains(&face) {
                     continue;
                 }
-                if let Some(info) = analyzable.get(&face) {
-                    if info.span >= min_stretch {
-                        stretch.push(face);
-                        continue;
-                    }
+                if let Some(info) = analyzable.get(&face)
+                    && info.span >= min_stretch
+                {
+                    stretch.push(face);
+                    continue;
                 }
                 fixed.push(face);
             }

@@ -144,10 +144,8 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
                 Some(expected) if expected == &current => {}
                 Some(_) => { style_ok = false; break; }
             }
-            if face != canonical {
-                if let Some(v) = styles.get(&face) {
-                    for (style, _) in v { style_delete.insert(*style); }
-                }
+            if face != canonical && let Some(v) = styles.get(&face) {
+                for (style, _) in v { style_delete.insert(*style); }
             }
         }
         if !style_ok { continue; }
@@ -290,9 +288,6 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
     }
 
     candidate.extend(style_delete.iter().copied());
-    let mut seeds = delete_faces;
-    seeds.extend(style_delete.iter().copied());
-
     // Recompute references after canonical-face/shell/presentation rewrites.
     let refs_after = entity_ref_map(entities);
     let inbound_after = inbound_map(&refs_after);
@@ -306,9 +301,7 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
             let parents = inbound_after.get(&id).cloned().unwrap_or_default();
             let detached = parents.is_empty();
             let child_of_dead = !parents.is_empty() && parents.iter().all(|p| delete.contains(p));
-            if (seeds.contains(&id) && (detached || child_of_dead))
-                || (!seeds.contains(&id) && (detached || child_of_dead))
-            {
+            if detached || child_of_dead {
                 delete.insert(id);
                 changed = true;
             }
@@ -505,10 +498,10 @@ fn rewrite_shell_faces(
         }
     }
     *faces = out;
-    if let Some(Parameter::String(name)) = params.get_mut(0) {
-        if name.is_empty() || name == "NONE" {
-            *name = "step-redox merged same-support faces".to_string();
-        }
+    if let Some(Parameter::String(name)) = params.get_mut(0)
+        && (name.is_empty() || name == "NONE")
+    {
+        *name = "step-redox merged same-support faces".to_string();
     }
     Some(())
 }

@@ -352,7 +352,11 @@ pub(crate) fn resize_filled_linear_pattern(
             };
             params[2] = entity_ref(placement);
             new_items.push(item);
-            new_styles.push(old_style_ids[site]);
+            new_styles.push(
+                *old_style_ids
+                    .get(site)
+                    .ok_or_else(|| anyhow::anyhow!("missing style for reused pattern site {site}"))?,
+            );
         } else {
             let item = push_simple(
                 entities,
@@ -423,14 +427,14 @@ pub(crate) fn resize_filled_linear_pattern(
         let mut out = Vec::with_capacity(items.len() + new_styles.len());
         let mut inserted = false;
         for item in items.iter() {
-            if let Some(id) = entity_ref_value(item) {
-                if old_style_set.contains(&id) {
-                    if !inserted {
-                        out.extend(new_styles.iter().copied().map(entity_ref));
-                        inserted = true;
-                    }
-                    continue;
+            if let Some(id) = entity_ref_value(item)
+                && old_style_set.contains(&id)
+            {
+                if !inserted {
+                    out.extend(new_styles.iter().copied().map(entity_ref));
+                    inserted = true;
                 }
+                continue;
             }
             out.push(item.clone());
         }
@@ -498,14 +502,14 @@ fn rewrite_ref_sequence(
     let mut out = Vec::with_capacity(items.len() + new_ids.len());
     let mut inserted = false;
     for item in items.iter() {
-        if let Some(id) = entity_ref_value(item) {
-            if old_set.contains(&id) {
-                if !inserted {
-                    out.extend(new_ids.iter().copied().map(entity_ref));
-                    inserted = true;
-                }
-                continue;
+        if let Some(id) = entity_ref_value(item)
+            && old_set.contains(&id)
+        {
+            if !inserted {
+                out.extend(new_ids.iter().copied().map(entity_ref));
+                inserted = true;
             }
+            continue;
         }
         out.push(item.clone());
     }
