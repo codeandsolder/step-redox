@@ -25,8 +25,7 @@ and to Monstertruck B-rep; there is no hand-maintained duplicate model descripti
 
 ## Dependency posture
 
-Use upstream Truck first. Keep all calls behind a narrow backend module and pin a
-known-good git revision so replacing the source with our fork or another backend is mechanical.
+Use released Monstertruck first and keep all calls behind the narrow backend module. Track Truck as Monstertruck's upstream/reference patch source, but do not couple recovery code to either public API so swapping or forking the backend remains mechanical.
 
 Fork triggers include:
 
@@ -53,7 +52,6 @@ crate exposes the parser/typed AST.
 
 ## Current oracle
 
-The initial 10 x 6 x 2 mm polygon extrusion produced a 7,112-byte STEP with the pinned
-Truck revision. Independent OpenCascade import reported one valid solid/shell, six faces,
+The initial 10 x 6 x 2 mm polygon extrusion produced a 7,112-byte STEP with Monstertruck 0.4.1. Independent OpenCascade import reported one valid solid/shell, six faces,
 120.0 mm^3 volume, 184.0 mm^2 area, and the expected 10 x 6 x 2 mm bounding extent
 (the OCP bounding box includes its normal 1e-7 mm tolerance).
