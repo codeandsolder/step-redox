@@ -155,13 +155,12 @@ impl StepDoc {
                 for &child in &children {
                     inbound.entry(child).or_default().push(id);
                 }
-                if matches!(ty.as_str(), "OPEN_SHELL" | "CLOSED_SHELL") {
-                    if let Some(record) = simple_record(entity) {
-                        if let Some(faces) = shell_face_refs(record) {
-                            shell_faces.insert(id, faces);
-                            shell_types.insert(id, ty.clone());
-                        }
-                    }
+                if matches!(ty.as_str(), "OPEN_SHELL" | "CLOSED_SHELL")
+                    && let Some(record) = simple_record(entity)
+                    && let Some(faces) = shell_face_refs(record)
+                {
+                    shell_faces.insert(id, faces);
+                    shell_types.insert(id, ty.clone());
                 }
                 entity_types.insert(id, ty);
             }
