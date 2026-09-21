@@ -44,7 +44,10 @@ family in both directions without booleans or tessellation, with explicit
 73-face unit; shrink removes whole units. One-sided edits translate the proven
 two-site/end-cap tail, weld seam topology, rebuild the six spanning face loops,
 garbage-collect only replaced/detached closures, and then require the same semantic
-grammar to be rediscovered. End anchoring reuses exactly the same operation on a
+grammar to be rediscovered. Seam cardinality is data-driven; supported seam curves
+are straight `LINE` edges and a narrowly proven complex form: clamped single-span
+rational B-splines keyed by degree, poles, and rational weights (knot interval
+values are ignored because they only affinely reparameterize a single span). End anchoring reuses exactly the same operation on a
 reversed semantic chain grammar; center anchoring composes equal edits at both ends.
 
 Five start-anchored generated-family regressions are checked against independently

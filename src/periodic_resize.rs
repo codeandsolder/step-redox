@@ -784,10 +784,20 @@ pub struct PeriodicChainResizeStats {
     pub entity_delta: isize,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum ChainCurveKey {
+    Line,
+    RationalSingleSpan {
+        degree: i64,
+        poles: Vec<[i64; 3]>,
+        weights: Vec<i64>,
+    },
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ChainEdgeKey {
     endpoints: [[i64; 3]; 2],
-    curve_type: String,
+    curve: ChainCurveKey,
 }
 
 /// Expand a proven fused-solid periodic chain at its positive-axis end.
@@ -795,9 +805,8 @@ struct ChainEdgeKey {
 /// The chain detector has already proved a complete manifold partition into
 /// per-site patches, inter-site gap patches, spanning faces, and symmetric
 /// fixed end regions. Growth clones one generic (gap + interior-site) unit per
-/// added site, translates the positive two-site/end-cap tail, welds the seven
-/// straight site-gap seam edges by geometric identity, and rebuilds only the
-/// spanning face loops.
+/// added site, translates the positive two-site/end-cap tail, welds supported
+/// seam edges by geometric identity, and rebuilds only the spanning face loops.
 pub fn expand_periodic_chain_positive(
     entities: &mut Vec<EntityInstance>,
     chain: &PeriodicChainPattern,
@@ -1006,7 +1015,7 @@ pub fn expand_periodic_chain_positive(
             source_unit_right.len()
         );
     }
-    chain_require_straight_seam_edges(
+    chain_require_supported_seam_edges(
         &graph,
         source_unit_left.iter().chain(source_unit_right.iter()).copied(),
     )?;
@@ -1480,7 +1489,7 @@ pub fn shrink_periodic_chain_positive(
             source_tail_left.len()
         );
     }
-    chain_require_straight_seam_edges(
+    chain_require_supported_seam_edges(
         &graph,
         source_kept_right.iter().chain(source_tail_left.iter()).copied(),
     )?;
@@ -1689,29 +1698,169 @@ fn chain_interface_edges(
     out
 }
 
-fn chain_edge_curve_type(graph: &GraphEditor<'_>, edge: u64) -> Result<String> {
+fn chain_edge_curve_id(graph: &GraphEditor<'_>, edge: u64) -> Result<u64> {
     let record = graph
         .simple_record(edge)
         .ok_or_else(|| anyhow!("missing chain seam edge #{edge}"))?;
     let params = list_params(record).ok_or_else(|| anyhow!("chain edge params invalid"))?;
-    let curve = params
+    params
         .get(3)
         .and_then(entity_ref_value)
-        .ok_or_else(|| anyhow!("chain seam edge #{edge} missing curve support"))?;
-    Ok(graph.entity_type(curve).unwrap_or("<UNKNOWN>").to_string())
+        .ok_or_else(|| anyhow!("chain seam edge #{edge} missing curve support"))
 }
 
-fn chain_require_straight_seam_edges(
+fn chain_complex_record<'a>(records: &'a [Record], name: &str) -> Result<&'a Record> {
+    let mut matches = records.iter().filter(|record| record.name == name);
+    let record = matches
+        .next()
+        .ok_or_else(|| anyhow!("complex seam curve missing {name} record"))?;
+    if matches.next().is_some() {
+        bail!("complex seam curve has duplicate {name} records");
+    }
+    Ok(record)
+}
+
+fn chain_rational_single_span_key(
+    graph: &GraphEditor<'_>,
+    curve: u64,
+    records: &[Record],
+) -> Result<ChainCurveKey> {
+    const EXPECTED: [&str; 7] = [
+        "BOUNDED_CURVE",
+        "B_SPLINE_CURVE",
+        "B_SPLINE_CURVE_WITH_KNOTS",
+        "CURVE",
+        "GEOMETRIC_REPRESENTATION_ITEM",
+        "RATIONAL_B_SPLINE_CURVE",
+        "REPRESENTATION_ITEM",
+    ];
+    let mut actual = records
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut expected = EXPECTED.to_vec();
+    expected.sort_unstable();
+    if actual != expected {
+        bail!("complex seam curve #{curve} is not the supported rational single-span form");
+    }
+
+    let bspline = chain_complex_record(records, "B_SPLINE_CURVE")?;
+    let bp = list_params(bspline).ok_or_else(|| anyhow!("B_SPLINE_CURVE params invalid"))?;
+    if bp.len() != 5 {
+        bail!("complex seam curve #{curve} has unexpected B_SPLINE_CURVE arity");
+    }
+    let degree = match bp.first() {
+        Some(Parameter::Integer(value)) if *value >= 1 => *value,
+        _ => bail!("complex seam curve #{curve} has invalid spline degree"),
+    };
+    let poles = bp
+        .get(1)
+        .and_then(entity_ref_list)
+        .ok_or_else(|| anyhow!("complex seam curve #{curve} has invalid pole list"))?;
+    if poles.len() != degree as usize + 1 {
+        bail!(
+            "complex seam curve #{curve} is not a single-span Bezier-equivalent spline"
+        );
+    }
+    if !matches!(bp.get(2), Some(Parameter::Enumeration(value)) if value == "UNSPECIFIED")
+        || !matches!(bp.get(3), Some(Parameter::Enumeration(value)) if value == "F")
+        || !matches!(bp.get(4), Some(Parameter::Enumeration(value)) if value == "F")
+    {
+        bail!("complex seam curve #{curve} uses unsupported spline flags");
+    }
+
+    let knots = chain_complex_record(records, "B_SPLINE_CURVE_WITH_KNOTS")?;
+    let kp = list_params(knots).ok_or_else(|| anyhow!("B_SPLINE_CURVE_WITH_KNOTS params invalid"))?;
+    if kp.len() != 3 {
+        bail!("complex seam curve #{curve} has unexpected knot-record arity");
+    }
+    let multiplicities = match kp.first() {
+        Some(Parameter::List(items)) => items
+            .iter()
+            .map(|item| match item {
+                Parameter::Integer(value) => Ok(*value),
+                _ => bail!("complex seam curve #{curve} has non-integer knot multiplicity"),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => bail!("complex seam curve #{curve} has invalid knot multiplicities"),
+    };
+    if multiplicities != [degree + 1, degree + 1] {
+        bail!("complex seam curve #{curve} is not clamped single-span");
+    }
+    let knot_values = match kp.get(1) {
+        Some(Parameter::List(items)) => items
+            .iter()
+            .map(|item| {
+                numeric_value(item)
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| anyhow!("complex seam curve #{curve} has invalid knot value"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => bail!("complex seam curve #{curve} has invalid knot list"),
+    };
+    if knot_values.len() != 2 || knot_values[0] == knot_values[1] {
+        bail!("complex seam curve #{curve} is not a finite single knot span");
+    }
+    if !matches!(kp.get(2), Some(Parameter::Enumeration(value)) if value == "UNSPECIFIED") {
+        bail!("complex seam curve #{curve} uses unsupported knot specification");
+    }
+
+    let rational = chain_complex_record(records, "RATIONAL_B_SPLINE_CURVE")?;
+    let rp = list_params(rational).ok_or_else(|| anyhow!("RATIONAL_B_SPLINE_CURVE params invalid"))?;
+    let weights = match rp {
+        [Parameter::List(items)] => items
+            .iter()
+            .map(|item| {
+                let value = numeric_value(item)
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .ok_or_else(|| anyhow!("complex seam curve #{curve} has invalid weight"))?;
+                Ok((value * 1.0e12).round() as i64)
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => bail!("complex seam curve #{curve} has invalid rational weights"),
+    };
+    if weights.len() != poles.len() {
+        bail!("complex seam curve #{curve} has a pole/weight count mismatch");
+    }
+
+    let poles = poles
+        .into_iter()
+        .map(|point| graph.cartesian_point(point).map(quantize_coord))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ChainCurveKey::RationalSingleSpan {
+        degree,
+        poles,
+        weights,
+    })
+}
+
+fn chain_curve_key(graph: &GraphEditor<'_>, edge: u64) -> Result<ChainCurveKey> {
+    let curve = chain_edge_curve_id(graph, edge)?;
+    match graph
+        .entity(curve)
+        .ok_or_else(|| anyhow!("missing chain seam curve #{curve}"))?
+    {
+        EntityInstance::Simple { record, .. } if record.name == "LINE" => Ok(ChainCurveKey::Line),
+        EntityInstance::Complex { subsuper, .. } => {
+            chain_rational_single_span_key(graph, curve, &subsuper.0)
+        }
+        entity => bail!(
+            "periodic-chain seam edge #{edge} uses unsupported {} curve support",
+            match entity {
+                EntityInstance::Simple { record, .. } => record.name.as_str(),
+                EntityInstance::Complex { .. } => "COMPLEX",
+            }
+        ),
+    }
+}
+
+fn chain_require_supported_seam_edges(
     graph: &GraphEditor<'_>,
     edges: impl IntoIterator<Item = u64>,
 ) -> Result<()> {
     for edge in edges {
-        let curve_type = chain_edge_curve_type(graph, edge)?;
-        if curve_type != "LINE" {
-            bail!(
-                "periodic-chain seam edge #{edge} uses unsupported {curve_type} support; only LINE seams are currently proven"
-            );
-        }
+        chain_curve_key(graph, edge)?;
     }
     Ok(())
 }
@@ -1725,7 +1874,7 @@ fn chain_edge_key(graph: &GraphEditor<'_>, edge: u64) -> Result<ChainEdgeKey> {
     endpoints.sort_unstable();
     Ok(ChainEdgeKey {
         endpoints,
-        curve_type: chain_edge_curve_type(graph, edge)?,
+        curve: chain_curve_key(graph, edge)?,
     })
 }
 
@@ -1754,7 +1903,7 @@ fn chain_pair_edges_by_geometry(
     keys.sort_by(|x, y| {
         x.endpoints
             .cmp(&y.endpoints)
-            .then_with(|| x.curve_type.cmp(&y.curve_type))
+            .then_with(|| x.curve.cmp(&y.curve))
     });
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
@@ -1977,6 +2126,10 @@ impl<'a> GraphEditor<'a> {
             EntityInstance::Simple { record, .. } => Some(record.name.as_str()),
             EntityInstance::Complex { .. } => Some("COMPLEX"),
         }
+    }
+
+    fn entity(&self, id: u64) -> Option<&EntityInstance> {
+        self.index.get(&id).map(|&idx| &self.entities[idx])
     }
 
     fn simple_record(&self, id: u64) -> Option<&Record> {
@@ -2810,6 +2963,121 @@ mod tests {
         assert_eq!(
             quantize_coord([1.0, 2.0, 3.0]),
             quantize_coord([1.0 + 1.0e-9, 2.0 - 1.0e-9, 3.0])
+        );
+    }
+
+    #[test]
+    fn rational_single_span_seam_key_ignores_parameter_interval_noise() {
+        let simple = |id, name: &str, params: Vec<Parameter>| EntityInstance::Simple {
+            id,
+            record: Record {
+                name: name.to_string(),
+                parameter: Parameter::List(params),
+            },
+        };
+        let point = |id, xyz: [f64; 3]| {
+            simple(
+                id,
+                "CARTESIAN_POINT",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(xyz.into_iter().map(Parameter::Real).collect()),
+                ],
+            )
+        };
+        let curve = |id: u64, knot0: f64, knot1: f64, inner_weight: f64| {
+            EntityInstance::Complex {
+                id,
+                subsuper: ruststep::ast::SubSuperRecord(vec![
+                    Record {
+                        name: "BOUNDED_CURVE".to_string(),
+                        parameter: Parameter::List(Vec::new()),
+                    },
+                    Record {
+                        name: "B_SPLINE_CURVE".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::Integer(3),
+                            Parameter::List(vec![
+                                entity_ref(1),
+                                entity_ref(2),
+                                entity_ref(3),
+                                entity_ref(4),
+                            ]),
+                            Parameter::Enumeration("UNSPECIFIED".to_string()),
+                            Parameter::Enumeration("F".to_string()),
+                            Parameter::Enumeration("F".to_string()),
+                        ]),
+                    },
+                    Record {
+                        name: "B_SPLINE_CURVE_WITH_KNOTS".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::List(vec![Parameter::Integer(4), Parameter::Integer(4)]),
+                            Parameter::List(vec![
+                                Parameter::Real(knot0),
+                                Parameter::Real(knot1),
+                            ]),
+                            Parameter::Enumeration("UNSPECIFIED".to_string()),
+                        ]),
+                    },
+                    Record {
+                        name: "CURVE".to_string(),
+                        parameter: Parameter::List(Vec::new()),
+                    },
+                    Record {
+                        name: "GEOMETRIC_REPRESENTATION_ITEM".to_string(),
+                        parameter: Parameter::List(Vec::new()),
+                    },
+                    Record {
+                        name: "RATIONAL_B_SPLINE_CURVE".to_string(),
+                        parameter: Parameter::List(vec![Parameter::List(vec![
+                            Parameter::Real(1.0),
+                            Parameter::Real(inner_weight),
+                            Parameter::Real(inner_weight),
+                            Parameter::Real(1.0),
+                        ])]),
+                    },
+                    Record {
+                        name: "REPRESENTATION_ITEM".to_string(),
+                        parameter: Parameter::List(vec![Parameter::String(String::new())]),
+                    },
+                ]),
+            }
+        };
+        let edge = |id, curve| {
+            simple(
+                id,
+                "EDGE_CURVE",
+                vec![
+                    Parameter::String(String::new()),
+                    entity_ref(1),
+                    entity_ref(4),
+                    entity_ref(curve),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            )
+        };
+
+        let mut entities = vec![
+            point(1, [0.0, 0.0, 0.0]),
+            point(2, [0.0, 0.2, 0.0]),
+            point(3, [0.0, 0.4, 0.1]),
+            point(4, [0.0, 0.5, 0.2]),
+            curve(10, 6.28318530714962, 7.8539816339151, 0.804737854131298),
+            curve(11, 6.28318530715069, 7.8539816339173, 0.8047378541310309),
+            curve(12, 6.28318530714962, 7.8539816339151, 0.8047378543),
+            edge(20, 10),
+            edge(21, 11),
+            edge(22, 12),
+        ];
+
+        let graph = GraphEditor::new(&mut entities);
+        assert_eq!(
+            chain_curve_key(&graph, 20).unwrap(),
+            chain_curve_key(&graph, 21).unwrap()
+        );
+        assert_ne!(
+            chain_curve_key(&graph, 20).unwrap(),
+            chain_curve_key(&graph, 22).unwrap()
         );
     }
 
