@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     std::fs::write("box.kcl", &kcl_text)?;
     std::fs::write("box.step", step)?;
     println!(
-        "ok: kcl_bytes={} truck_faces={} step_bytes={}",
+        "ok: kcl_bytes={} monstertruck_faces={} step_bytes={}",
         kcl_text.len(),
         summary.faces,
         std::fs::metadata("box.step")?.len()
