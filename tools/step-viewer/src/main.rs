@@ -364,9 +364,12 @@ fn mesh_shell_and_face(
         .shell
         .get(&shell_id)
         .with_context(|| format!("Monstertruck did not parse shell #{shell_id}"))?;
-    let compressed = table
-        .to_compressed_shell(step_shell)
+    let (compressed, load_report) = table
+        .to_compressed_shell_reported(step_shell)
         .map_err(|e| anyhow::anyhow!("convert shell #{shell_id}: {e}"))?;
+    if !load_report.is_lossless() {
+        bail!("Monstertruck conversion of shell #{shell_id} was lossy: {load_report}");
+    }
     let meshed = compressed.robust_triangulation(tolerance);
     let body_obj = polygon_to_obj(&meshed.to_polygon())?;
 
