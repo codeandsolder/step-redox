@@ -121,6 +121,13 @@ struct Cli {
 
     #[arg(long, value_name = "PATH", help = "Write recovered semantic count parameters as JSON")]
     count_parameters_json: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write read-only periodic fused-solid chain analysis as JSON"
+    )]
+    periodic_chains_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -178,6 +185,12 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&cleaned.count_parameters)?;
         std::fs::write(path, data)
             .with_context(|| format!("write count parameter report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.periodic_chains_json {
+        let chains = step_redox::detect_periodic_chains_bytes(&cleaned.bytes)?;
+        let data = serde_json::to_vec_pretty(&chains)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write periodic chain report {}", path.display()))?;
     }
 
     if cli.json {

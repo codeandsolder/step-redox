@@ -22,7 +22,21 @@
       "sha256": "e4c88f74302a2e4cf076df9b78bca605087bb33ef7efe526a4deec5be31d3904",
       "filename": "te-3-353293-4.step",
       "source_page": "https://www.te.com/en/product-3-353293-4.html",
-      "source_note": "TE Connectivity first-party Customer View Model, 14-position 1.5 mm receptacle"
+      "source_note": "TE Connectivity first-party Customer View Model, 14-position 1.5 mm receptacle",
+      "periodic_chain_expectation": {
+        "sites": 14,
+        "pitch_mm": 1.5,
+        "interior_site_face_count": 70,
+        "interior_gap_face_count": 3,
+        "stretch_faces": 6,
+        "fixed_negative_faces": 33,
+        "fixed_positive_faces": 33,
+        "read_only_proven": true,
+        "complete_partition": true,
+        "faces_without_geometry": 0,
+        "nonmanifold_edges": 0,
+        "cross_site_edges": 0
+      }
     },
     "te_3_353293_5": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5",
@@ -33,7 +47,21 @@
       "sha256": "86cfe5bd5af83cb675bb13c6764b19560b753093cfb83681a49399d25416eba8",
       "filename": "te-3-353293-5.step",
       "source_page": "https://www.te.com/en/product-3-353293-5.html",
-      "source_note": "TE Connectivity first-party Customer View Model, 15-position 1.5 mm receptacle"
+      "source_note": "TE Connectivity first-party Customer View Model, 15-position 1.5 mm receptacle",
+      "periodic_chain_expectation": {
+        "sites": 15,
+        "pitch_mm": 1.5,
+        "interior_site_face_count": 70,
+        "interior_gap_face_count": 3,
+        "stretch_faces": 6,
+        "fixed_negative_faces": 33,
+        "fixed_positive_faces": 33,
+        "read_only_proven": true,
+        "complete_partition": true,
+        "faces_without_geometry": 0,
+        "nonmanifold_edges": 0,
+        "cross_site_edges": 0
+      }
     },
     "te_3_353293_8": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8",
@@ -44,7 +72,21 @@
       "sha256": "72a7f9c144a4d0383bdf6cd4067f1f32767a6b84a64329f68d79d8d5066005f5",
       "filename": "te-3-353293-8.step",
       "source_page": "https://www.te.com/en/product-3-353293-8.html",
-      "source_note": "TE Connectivity first-party Customer View Model, same 1.5 mm receptacle family"
+      "source_note": "TE Connectivity first-party Customer View Model, same 1.5 mm receptacle family",
+      "periodic_chain_expectation": {
+        "sites": 18,
+        "pitch_mm": 1.5,
+        "interior_site_face_count": 70,
+        "interior_gap_face_count": 3,
+        "stretch_faces": 6,
+        "fixed_negative_faces": 33,
+        "fixed_positive_faces": 33,
+        "read_only_proven": true,
+        "complete_partition": true,
+        "faces_without_geometry": 0,
+        "nonmanifold_edges": 0,
+        "cross_site_edges": 0
+      }
     },
     "te_dsub_9_t2111092004_000": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000",

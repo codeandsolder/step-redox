@@ -90,6 +90,30 @@ def lattice_1d(centers, tol):
         "other_span_mm": [spans[k] for k in other],
     }
 
+def split_parallel_rows(cluster, tol, min_instances):
+    """Split one exact congruence class into parallel axis-aligned rows.
+
+    Exporters commonly reuse the same local face geometry at several Y/Z
+    offsets. Exact translation congruence correctly groups all of those faces
+    together, but that aggregate is not itself 1-D. Choose the dominant span
+    axis and partition by the two orthogonal center coordinates before fitting
+    a lattice.
+    """
+    if len(cluster) < min_instances:
+        return []
+    spans = [
+        max(x["center"][k] for x in cluster) - min(x["center"][k] for x in cluster)
+        for k in range(3)
+    ]
+    axis = max(range(3), key=lambda k: spans[k])
+    if spans[axis] <= tol:
+        return []
+    other = [k for k in range(3) if k != axis]
+    rows = collections.defaultdict(list)
+    for item in cluster:
+        rows[tuple(q(item["center"][k], tol) for k in other)].append(item)
+    return [row for row in rows.values() if len(row) >= min_instances]
+
 def analyze(path: pathlib.Path, tol: float, min_instances: int):
     db._GEOM_PAYLOAD_CACHE.clear()
     lines,raw,typ,refs,pts,inb,maxid = db.parse(path)
@@ -125,20 +149,26 @@ def analyze(path: pathlib.Path, tol: float, min_instances: int):
             if len(cluster)<min_instances:
                 singleton_exact+=len(cluster)
                 continue
-            lat=lattice_1d([x["center"] for x in cluster],tol)
-            if lat is None:
-                continue
-            families.append({
-                "instances":len(cluster),
-                "surface_type":cheap[1],
-                "edges":cheap[2],
-                "bounds":cheap[3],
-                "sense":cheap[4],
-                "size_mm":[x*tol for x in cheap[5]],
-                "lattice":lat,
-                "sample_faces":[x["face"] for x in cluster[:12]],
-                "sample_centers":[list(x["center"]) for x in cluster[:12]],
-            })
+
+            rows=[cluster]
+            if lattice_1d([x["center"] for x in cluster],tol) is None:
+                rows=split_parallel_rows(cluster,tol,min_instances)
+
+            for row in rows:
+                lat=lattice_1d([x["center"] for x in row],tol)
+                if lat is None:
+                    continue
+                families.append({
+                    "instances":len(row),
+                    "surface_type":cheap[1],
+                    "edges":cheap[2],
+                    "bounds":cheap[3],
+                    "sense":cheap[4],
+                    "size_mm":[x*tol for x in cheap[5]],
+                    "lattice":lat,
+                    "sample_faces":[x["face"] for x in row[:12]],
+                    "sample_centers":[list(x["center"]) for x in row[:12]],
+                })
 
     families.sort(key=lambda x:(-x["instances"],x["lattice"]["pitch_mm"],x["surface_type"]))
     return {

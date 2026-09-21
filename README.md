@@ -34,6 +34,14 @@ The validated 24↔36-site header regressions now pass with center anchoring und
 identity alignment in both directions: no compensating translation is permitted by
 the comparison harness.
 
+A separate read-only periodic-chain analyzer recovers repeated structure inside
+fused solids even when no editable `MAPPED_ITEM` row exists. On three independent
+first-party TE Connectivity siblings it proves the same 1.500 mm family grammar:
+14/15/18 sites, 70 interior site faces + 3 gap faces per added position, six
+stretch faces, and symmetric 33-face end regions. This matches the independently
+observed +73 faces per position across the family. The result is intentionally
+read-only; it does not authorize TE count mutation yet.
+
 A browser/WASM prototype lives under `web/`, including an experimental
 "Unscrew your STEP" front end. The Rust library exposes detected patterns,
 periodic bodies, and higher-level recovered count parameters; bidirectional

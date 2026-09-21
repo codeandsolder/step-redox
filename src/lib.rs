@@ -17,6 +17,7 @@ mod partition_recovery;
 pub mod parameters;
 pub mod patterns;
 pub mod periodic_bodies;
+pub mod periodic_chains;
 pub mod periodic_resize;
 mod spherical_caps;
 mod surface_recovery;
@@ -184,6 +185,37 @@ pub struct PatternEditOutput {
 pub struct PeriodicBodyEditOutput {
     pub bytes: Vec<u8>,
     pub resize: periodic_resize::PeriodicBodyResizeStats,
+}
+
+
+/// Detect read-only periodic chain grammars without enabling mutation.
+///
+/// This analyzer is intentionally separate from the editable PeriodicBodyPattern
+/// path. It can recover fused-solid site/gap/stretch/end structure even when no
+/// MAPPED_ITEM instance row exists, but callers must not treat that as edit
+/// permission.
+pub fn detect_periodic_chains_bytes(
+    input: &[u8],
+) -> Result<Vec<periodic_chains::PeriodicChainPattern>> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| periodic_chains::detect_periodic_chains(&section.entities))
+        .collect())
 }
 
 
