@@ -116,6 +116,13 @@ struct Cli {
     #[arg(long, value_name = "PATH", help = "Write detected regular instance patterns as JSON")]
     patterns_json: Option<PathBuf>,
 
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write canonical CAD fragments recovered from detected instance patterns as JSON"
+    )]
+    cad_fragments_json: Option<PathBuf>,
+
     #[arg(long, value_name = "PATH", help = "Write detected periodic body grammars as JSON")]
     periodic_bodies_json: Option<PathBuf>,
 
@@ -175,6 +182,13 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&cleaned.patterns)?;
         std::fs::write(path, data)
             .with_context(|| format!("write pattern report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.cad_fragments_json {
+        let fragments =
+            step_redox::cad_recovery::recover_instance_pattern_fragments(&cleaned.patterns)?;
+        let data = serde_json::to_vec_pretty(&fragments)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write CAD fragment report {}", path.display()))?;
     }
     if let Some(path) = &cli.periodic_bodies_json {
         let data = serde_json::to_vec_pretty(&cleaned.periodic_bodies)?;

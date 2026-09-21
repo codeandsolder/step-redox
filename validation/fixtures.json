@@ -5,13 +5,25 @@
       "url": "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/469ecbad11cf4237a5002b63dbad0683",
       "sha256": "8ea8569dbf2f45128374ce085e694567083335cd36463c8ffa8ea775864a4294",
       "filename": "jlc-header-2x24-2mm.step",
-      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_48P-P2.00-V-F-R2-C24-S2.00"
+      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_48P-P2.00-V-F-R2-C24-S2.00",
+      "cad_fragment_expectation": {
+        "linear_patterns": 2,
+        "instances_per_pattern": 24,
+        "step_mm": [2.0, 0.0, 0.0],
+        "max_residual_mm": 1.0e-7
+      }
     },
     "jlc_header_2x36_2mm": {
       "url": "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/7c7e5c95024e4504899bb9db9346a373",
       "sha256": "5427a07ac8237d50b062b85a920a8e74c132879f20f8b4689c9e587b5b431b06",
       "filename": "jlc-header-2x36-2mm.step",
-      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_72P-P2.00-V-F-R2-C36-S2.00"
+      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_72P-P2.00-V-F-R2-C36-S2.00",
+      "cad_fragment_expectation": {
+        "linear_patterns": 2,
+        "instances_per_pattern": 36,
+        "step_mm": [2.0, 0.0, 0.0],
+        "max_residual_mm": 1.0e-7
+      }
     },
     "te_3_353293_4": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4",

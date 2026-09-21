@@ -19,7 +19,13 @@ pub struct InstancePattern {
     pub occupancy: Vec<[i64; 2]>,
     pub grid_shape: Vec<usize>,
     pub fill_ratio: f64,
+    #[serde(default = "default_pattern_tolerance_mm")]
+    pub tolerance_mm: f64,
     pub max_residual_mm: f64,
+}
+
+fn default_pattern_tolerance_mm() -> f64 {
+    1.0e-7
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +162,7 @@ pub fn detect_instance_patterns(
             occupancy: ordered.iter().map(|(site, _)| *site).collect(),
             grid_shape: fit.grid_shape,
             fill_ratio: fit.fill_ratio,
+            tolerance_mm,
             max_residual_mm: fit.max_residual_mm,
         });
     }

@@ -65,8 +65,8 @@ impl CadModel {
         }
 
         let mut state = vec![0u8; self.nodes.len()];
-        for &root in &self.roots {
-            self.validate_acyclic(root, &mut state)?;
+        for index in 0..self.nodes.len() {
+            self.validate_acyclic(NodeId(index), &mut state)?;
         }
         Ok(())
     }

@@ -21,6 +21,7 @@ def run_probe(step_redox: Path, input_path: Path, prefix: Path):
         str(input_path),
         str(prefix.with_suffix(".compact.step")),
         "--patterns-json", str(prefix.with_suffix(".patterns.json")),
+        "--cad-fragments-json", str(prefix.with_suffix(".cad-fragments.json")),
         "--periodic-bodies-json", str(prefix.with_suffix(".bodies.json")),
         "--count-parameters-json", str(prefix.with_suffix(".counts.json")),
         "--periodic-chains-json", str(prefix.with_suffix(".chains.json")),
@@ -38,6 +39,79 @@ def run_probe(step_redox: Path, input_path: Path, prefix: Path):
 
 def close(a: float, b: float, tol: float = 1e-8) -> bool:
     return math.isfinite(a) and abs(a - b) <= tol
+
+
+def validate_cad_fragments(name: str, fragments: list[dict], expected: dict) -> dict:
+    expected_count = expected["linear_patterns"]
+    if len(fragments) != expected_count:
+        raise AssertionError(
+            f"{name}: expected {expected_count} CAD fragments, got {len(fragments)}"
+        )
+
+    expected_instances = expected["instances_per_pattern"]
+    expected_step = expected["step_mm"]
+    max_residual = expected["max_residual_mm"]
+    observed = []
+    for index, fragment in enumerate(fragments):
+        source = fragment.get("source", {})
+        if source.get("kind") != "instance_pattern":
+            raise AssertionError(f"{name}: fragment {index} is not instance_pattern source")
+
+        model = fragment["model"]
+        root = fragment["root"]
+        if model.get("roots") != [root]:
+            raise AssertionError(f"{name}: fragment {index} has unexpected roots {model.get('roots')}")
+        try:
+            root_node = model["nodes"][root]["Pattern"]
+            linear = root_node["pattern"]["Linear"]
+        except (KeyError, TypeError, IndexError) as exc:
+            raise AssertionError(f"{name}: fragment {index} root is not a linear pattern") from exc
+
+        if linear["count"] != expected_instances:
+            raise AssertionError(
+                f"{name}: fragment {index} count {linear['count']} != {expected_instances}"
+            )
+        step = linear["step_mm"]
+        if len(step) != 3 or any(not close(a, b, 1e-12) for a, b in zip(step, expected_step)):
+            raise AssertionError(
+                f"{name}: fragment {index} step {step} != canonical {expected_step}"
+            )
+
+        child = root_node["child"]
+        try:
+            fallback = model["nodes"][child]["BrepFallback"]
+        except (KeyError, TypeError, IndexError) as exc:
+            raise AssertionError(
+                f"{name}: fragment {index} child is not exact B-rep fallback"
+            ) from exc
+        if len(fallback.get("source_entity_ids", [])) != 1:
+            raise AssertionError(
+                f"{name}: fragment {index} fallback does not preserve exactly one source occurrence"
+            )
+
+        provenance = model["provenance"][str(root)]
+        if provenance["proof"] != "WithinTolerance":
+            raise AssertionError(
+                f"{name}: fragment {index} unexpectedly claims {provenance['proof']} proof"
+            )
+        residual = provenance["max_residual_mm"]
+        if not math.isfinite(residual) or residual > max_residual:
+            raise AssertionError(
+                f"{name}: fragment {index} residual {residual} exceeds {max_residual}"
+            )
+
+        observed.append({
+            "count": linear["count"],
+            "step_mm": step,
+            "max_residual_mm": residual,
+            "fallback_entity": fallback["source_entity_ids"][0],
+        })
+
+    return {
+        "fixture": name,
+        "fragments": len(fragments),
+        "patterns": observed,
+    }
 
 
 def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
@@ -100,12 +174,14 @@ def main():
     args = ap.parse_args()
 
     manifest = json.loads(args.manifest.read_text())
-    results = []
+    chain_results = []
+    cad_results = []
     args.out.mkdir(parents=True, exist_ok=True)
 
     for name, spec in manifest["fixtures"].items():
-        expected = spec.get("periodic_chain_expectation")
-        if not expected:
+        chain_expected = spec.get("periodic_chain_expectation")
+        cad_expected = spec.get("cad_fragment_expectation")
+        if not chain_expected and not cad_expected:
             continue
         input_path = fixture_path(args.cache, spec)
         if not input_path.exists():
@@ -114,29 +190,50 @@ def main():
             )
         prefix = args.out / name
         run_probe(args.step_redox, input_path, prefix)
-        chains = json.loads(prefix.with_suffix(".chains.json").read_text())
-        result = validate_chain(name, chains, expected)
-        results.append(result)
-        print(
-            f"{name}: sites={result['sites']} pitch={result['pitch_mm']:.9f} mm "
-            f"cell={result['interior_site_face_count']}+{result['interior_gap_face_count']}="
-            f"{result['faces_per_added_site']} faces "
-            f"votes={result['lattice_face_family_votes']} "
-            f"coverage={result['repeat_coverage_ratio']:.3%} proven"
+
+        if chain_expected:
+            chains = json.loads(prefix.with_suffix(".chains.json").read_text())
+            result = validate_chain(name, chains, chain_expected)
+            chain_results.append(result)
+            print(
+                f"{name}: sites={result['sites']} pitch={result['pitch_mm']:.9f} mm "
+                f"cell={result['interior_site_face_count']}+{result['interior_gap_face_count']}="
+                f"{result['faces_per_added_site']} faces "
+                f"votes={result['lattice_face_family_votes']} "
+                f"coverage={result['repeat_coverage_ratio']:.3%} proven"
+            )
+
+        if cad_expected:
+            fragments = json.loads(prefix.with_suffix(".cad-fragments.json").read_text())
+            result = validate_cad_fragments(name, fragments, cad_expected)
+            cad_results.append(result)
+            first = result["patterns"][0]
+            print(
+                f"{name}: {result['fragments']} canonical CAD linear patterns x "
+                f"{first['count']} at step={first['step_mm']} "
+                f"residual<={max(p['max_residual_mm'] for p in result['patterns']):.3g} mm"
+            )
+
+    if not chain_results and not cad_results:
+        raise RuntimeError("manifest contains no semantic expectations")
+
+    if chain_results:
+        (args.out / "periodic-chain-summary.json").write_text(
+            json.dumps(chain_results, indent=2) + "\n"
         )
 
-    if not results:
-        raise RuntimeError("manifest contains no periodic_chain_expectation fixtures")
+        # Family-level cross-check: the independently published siblings should all
+        # recover the same pitch and per-added-site topology law.
+        pitches = {round(r["pitch_mm"], 9) for r in chain_results}
+        slopes = {r["faces_per_added_site"] for r in chain_results}
+        if len(pitches) != 1 or len(slopes) != 1:
+            raise AssertionError(
+                f"periodic family is inconsistent across fixtures: pitches={pitches}, slopes={slopes}"
+            )
 
-    (args.out / "periodic-chain-summary.json").write_text(json.dumps(results, indent=2) + "\n")
-
-    # Family-level cross-check: the independently published siblings should all
-    # recover the same pitch and per-added-site topology law.
-    pitches = {round(r["pitch_mm"], 9) for r in results}
-    slopes = {r["faces_per_added_site"] for r in results}
-    if len(pitches) != 1 or len(slopes) != 1:
-        raise AssertionError(
-            f"periodic family is inconsistent across fixtures: pitches={pitches}, slopes={slopes}"
+    if cad_results:
+        (args.out / "cad-fragment-summary.json").write_text(
+            json.dumps(cad_results, indent=2) + "\n"
         )
 
 
