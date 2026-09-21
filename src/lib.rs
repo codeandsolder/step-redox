@@ -12,13 +12,13 @@ mod face_coalesce;
 mod geometric_intern;
 mod instances;
 mod line_recovery;
-mod planar_features;
-mod partition_recovery;
 pub mod parameters;
+mod partition_recovery;
 pub mod patterns;
 pub mod periodic_bodies;
 pub mod periodic_chains;
 pub mod periodic_resize;
+mod planar_features;
 mod spherical_caps;
 mod surface_recovery;
 
@@ -187,6 +187,12 @@ pub struct PeriodicBodyEditOutput {
     pub resize: periodic_resize::PeriodicBodyResizeStats,
 }
 
+pub struct PeriodicChainEditOutput {
+    pub bytes: Vec<u8>,
+    pub resize: periodic_resize::PeriodicChainResizeStats,
+    pub periodic_chains: Vec<periodic_chains::PeriodicChainPattern>,
+    pub compatibility: compatibility::CompatibilityAudit,
+}
 
 /// Detect read-only periodic chain grammars without enabling mutation.
 ///
@@ -218,6 +224,105 @@ pub fn detect_periodic_chains_bytes(
         .collect())
 }
 
+/// Expand one proven read-only periodic fused-solid chain.
+///
+/// This first mutation path supports positive-end growth only. It re-runs the
+/// chain detector after editing and refuses to serialize a result unless the
+/// requested site count is rediscovered with the same pitch and a complete,
+/// manifold, read-only proof.
+pub fn expand_periodic_chain_bytes(
+    input: &[u8],
+    chain_index: usize,
+    new_sites: usize,
+) -> Result<PeriodicChainEditOutput> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+    if exchange.data.len() != 1 {
+        bail!("periodic-chain editing currently requires exactly one DATA section");
+    }
+
+    let section = &mut exchange.data[0];
+    let chains = periodic_chains::detect_periodic_chains(&section.entities);
+    let chain = chains
+        .get(chain_index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("periodic chain index {chain_index} not found"))?;
+    if !chain.read_only_proven {
+        bail!("periodic chain {chain_index} is not sufficiently proven for editing");
+    }
+    if new_sites <= chain.sites {
+        bail!(
+            "periodic-chain editing currently requires growth ({} -> {})",
+            chain.sites,
+            new_sites
+        );
+    }
+
+    let source_entity_count = section.entities.len();
+    let mut resize =
+        periodic_resize::expand_periodic_chain_positive(&mut section.entities, &chain, new_sites)?;
+
+    // Compact normalization has already interned the source support geometry,
+    // but chain growth creates fresh translated PLANE/LINE/CYLINDER supports.
+    // Re-run the same guarded locus interning pass on the generated graph so
+    // newly created supports do not survive merely because mutation happened
+    // after the initial compact cleanup.
+    let _ = geometric_intern::intern_geometric_supports(&mut section.entities);
+    let _ = intern_section(&mut section.entities);
+    let detached_vertices =
+        periodic_resize::prune_detached_vertex_points(&mut section.entities);
+    resize.pruned_entities += detached_vertices;
+    resize.added_entities = section.entities.len().saturating_sub(source_entity_count);
+    resize.entity_delta = section.entities.len() as isize - source_entity_count as isize;
+    for section in &mut exchange.data {
+        dense_renumber(&mut section.entities);
+    }
+
+    let periodic_chains = exchange
+        .data
+        .iter()
+        .flat_map(|section| periodic_chains::detect_periodic_chains(&section.entities))
+        .collect::<Vec<_>>();
+    let verified = periodic_chains.iter().any(|candidate| {
+        candidate.read_only_proven
+            && candidate.complete_partition
+            && candidate.sites == new_sites
+            && (candidate.pitch_mm - chain.pitch_mm).abs() <= 1.0e-7
+            && candidate.interior_site_face_count == chain.interior_site_face_count
+            && candidate.interior_gap_face_count == chain.interior_gap_face_count
+            && candidate.stretch_face_ids.len() == chain.stretch_face_ids.len()
+            && candidate.fixed_negative_face_ids.len() == chain.fixed_negative_face_ids.len()
+            && candidate.fixed_positive_face_ids.len() == chain.fixed_positive_face_ids.len()
+            && candidate.faces_without_geometry == 0
+            && candidate.nonmanifold_edges == 0
+            && candidate.cross_site_edges == 0
+    });
+    if !verified {
+        bail!(
+            "post-edit periodic-chain verification failed: requested {new_sites} sites were not rediscovered with the same proven grammar"
+        );
+    }
+
+    let compatibility = audit_exchange_compatibility(&exchange);
+    let output = write_exchange(&exchange)?;
+    Ok(PeriodicChainEditOutput {
+        bytes: output.into_bytes(),
+        resize,
+        periodic_chains,
+        compatibility,
+    })
+}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -252,12 +357,7 @@ pub fn resize_count_parameter_bytes(
     parameter_index: usize,
     new_sites: usize,
 ) -> Result<CountEditOutput> {
-    resize_count_parameter_bytes_with_anchor(
-        input,
-        parameter_index,
-        new_sites,
-        CountAnchor::Start,
-    )
+    resize_count_parameter_bytes_with_anchor(input, parameter_index, new_sites, CountAnchor::Start)
 }
 
 /// Resize one recovered count parameter with explicit placement anchoring.
@@ -272,12 +372,7 @@ pub fn resize_count_parameter_bytes_with_anchor(
     anchor: CountAnchor,
 ) -> Result<CountEditOutput> {
     if anchor != CountAnchor::Center {
-        return resize_count_parameter_bytes_one_side(
-            input,
-            parameter_index,
-            new_sites,
-            anchor,
-        );
+        return resize_count_parameter_bytes_one_side(input, parameter_index, new_sites, anchor);
     }
 
     let parameters = detect_count_parameters_bytes(input)?;
@@ -316,11 +411,8 @@ pub fn resize_count_parameter_bytes_with_anchor(
         mid_sites,
         CountAnchor::Start,
     )?;
-    let followup_index = find_matching_count_parameter(
-        &first.count_parameters,
-        mid_sites,
-        &original,
-    )?;
+    let followup_index =
+        find_matching_count_parameter(&first.count_parameters, mid_sites, &original)?;
     let mut second = resize_count_parameter_bytes_one_side(
         &first.bytes,
         followup_index,
@@ -440,15 +532,14 @@ fn resize_count_parameter_bytes_one_side(
             .first()
             .copied()
             .ok_or_else(|| anyhow::anyhow!("coupled pattern has no basis"))?;
-        let axis_dot =
-            basis[0] * parameter.axis[0] + basis[1] * parameter.axis[1] + basis[2] * parameter.axis[2];
+        let axis_dot = basis[0] * parameter.axis[0]
+            + basis[1] * parameter.axis[1]
+            + basis[2] * parameter.axis[2];
         let pattern_anchor = match (anchor, axis_dot >= 0.0) {
             (CountAnchor::Start, true) | (CountAnchor::End, false) => {
                 patterns::PatternAnchor::Start
             }
-            (CountAnchor::Start, false) | (CountAnchor::End, true) => {
-                patterns::PatternAnchor::End
-            }
+            (CountAnchor::Start, false) | (CountAnchor::End, true) => patterns::PatternAnchor::End,
             (CountAnchor::Center, _) => unreachable!(),
         };
         pattern_resizes.push(patterns::resize_filled_linear_pattern(
@@ -508,9 +599,7 @@ fn reverse_periodic_body(
     reversed
 }
 
-fn detect_count_parameters_bytes(
-    input: &[u8],
-) -> Result<Vec<parameters::RecoveredCountParameter>> {
+fn detect_count_parameters_bytes(input: &[u8]) -> Result<Vec<parameters::RecoveredCountParameter>> {
     let (input_text, _) = decode_input(input)?;
     let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
@@ -546,12 +635,8 @@ fn find_matching_count_parameter(
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [index] => Ok(*index),
-        [] => bail!(
-            "could not rediscover the intermediate {sites}-site count parameter"
-        ),
-        _ => bail!(
-            "multiple matching intermediate {sites}-site count parameters: {matches:?}"
-        ),
+        [] => bail!("could not rediscover the intermediate {sites}-site count parameter"),
+        _ => bail!("multiple matching intermediate {sites}-site count parameters: {matches:?}"),
     }
 }
 
@@ -661,7 +746,8 @@ pub fn resize_linear_pattern_bytes(
         }
         remaining -= detected.len();
     }
-    let resize = resize.ok_or_else(|| anyhow::anyhow!("pattern index {pattern_index} not found"))?;
+    let resize =
+        resize.ok_or_else(|| anyhow::anyhow!("pattern index {pattern_index} not found"))?;
 
     for section in &mut exchange.data {
         dense_renumber(&mut section.entities);
@@ -691,8 +777,7 @@ fn detect_exchange_semantics(
     let mut bodies_out = Vec::new();
 
     for section in &exchange.data {
-        let local_patterns =
-            patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        let local_patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
         let offset = patterns_out.len();
         let mut local_bodies =
             periodic_bodies::detect_periodic_bodies(&section.entities, &local_patterns);
@@ -750,7 +835,14 @@ fn audit_exchange_compatibility(exchange: &Exchange) -> compatibility::Compatibi
         "SHAPE_REPRESENTATION_RELATIONSHIP",
     ]
     .iter()
-    .any(|name| combined.structural_risk_entities.get(*name).copied().unwrap_or(0) > 0);
+    .any(|name| {
+        combined
+            .structural_risk_entities
+            .get(*name)
+            .copied()
+            .unwrap_or(0)
+            > 0
+    });
     combined.conservative_structure = combined.structural_risk_total == 0;
     combined
 }
@@ -960,8 +1052,7 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             curve_replica_direct_aliases += pass.direct_aliases;
             curve_replica_transforms += pass.transforms;
             curve_replica_entities_removed += pass.entities_removed;
-            curve_replica_max_residual_mm =
-                curve_replica_max_residual_mm.max(pass.max_residual_mm);
+            curve_replica_max_residual_mm = curve_replica_max_residual_mm.max(pass.max_residual_mm);
         }
     }
 
@@ -1008,11 +1099,12 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let instance_patterns_detected = patterns.len();
     let pattern_instances_detected = patterns.iter().map(|pattern| pattern.item_ids.len()).sum();
     let periodic_body_patterns_detected = periodic_bodies.len();
-    let periodic_body_repeat_faces =
-        periodic_bodies.iter().map(|body| body.repeat_faces).sum();
+    let periodic_body_repeat_faces = periodic_bodies.iter().map(|body| body.repeat_faces).sum();
     let count_parameters_detected = count_parameters.len();
-    let count_parameters_with_body_grammar =
-        count_parameters.iter().filter(|parameter| parameter.body_grammar_proven).count();
+    let count_parameters_with_body_grammar = count_parameters
+        .iter()
+        .filter(|parameter| parameter.body_grammar_proven)
+        .count();
 
     let compatibility = audit_exchange_compatibility(&exchange);
 

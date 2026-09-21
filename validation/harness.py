@@ -623,6 +623,7 @@ def run_manifest(
     out: Path,
     step_redox: Path,
     step_count_resize: Path | None = None,
+    step_chain_resize: Path | None = None,
 ):
     manifest = json.loads(manifest_path.read_text())
     cases = [
@@ -653,6 +654,7 @@ def run_manifest(
         values = {
             "step_redox": str(step_redox),
             "step_count_resize": str(step_count_resize) if step_count_resize else "",
+            "step_chain_resize": str(step_chain_resize) if step_chain_resize else "",
             "input": str(input_path),
             "reference": str(reference_path),
             "output": str(output_path),
@@ -660,6 +662,10 @@ def run_manifest(
         if any("{step_count_resize}" in part for part in case["command"]) and not step_count_resize:
             raise RuntimeError(
                 f"case {name}: command requires --step-count-resize but none was supplied"
+            )
+        if any("{step_chain_resize}" in part for part in case["command"]) and not step_chain_resize:
+            raise RuntimeError(
+                f"case {name}: command requires --step-chain-resize but none was supplied"
             )
         command = [part.format(**values) for part in case["command"]]
         proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -723,6 +729,7 @@ def main():
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--step-redox", type=Path, required=True)
     run.add_argument("--step-count-resize", type=Path)
+    run.add_argument("--step-chain-resize", type=Path)
     compare = sub.add_parser("compare")
     compare.add_argument("reference", type=Path)
     compare.add_argument("candidate", type=Path)
@@ -742,6 +749,7 @@ def main():
                 args.out,
                 args.step_redox,
                 args.step_count_resize,
+                args.step_chain_resize,
             )
         )
 

@@ -30,7 +30,7 @@ jobs:
         run: cargo test --lib --release
 
       - name: Build step-redox
-        run: cargo build --release --bin step-redox --bin step-count-resize
+        run: cargo build --release --bin step-redox --bin step-count-resize --bin step-chain-resize
 
       - name: Cache upstream STEP fixtures
         uses: actions/cache@v4
@@ -45,7 +45,8 @@ jobs:
             --cache .cache/step-redox-validation \
             --out validation/out \
             --step-redox target/release/step-redox \
-            --step-count-resize target/release/step-count-resize
+            --step-count-resize target/release/step-count-resize \
+            --step-chain-resize target/release/step-chain-resize
 
 
       - name: Validate periodic chain recovery
