@@ -69,8 +69,8 @@ fn main() -> Result<()> {
 
     let before = StepDoc::parse(&before_text).context("parse before STEP")?;
     let after = StepDoc::parse(&after_text).context("parse after STEP")?;
-    let before_table = Table::from_step(&before_text).context("build before Monstertruck table")?;
-    let after_table = Table::from_step(&after_text).context("build after Monstertruck table")?;
+    let before_table = before.table().context("build before Monstertruck table")?;
+    let after_table = after.table().context("build after Monstertruck table")?;
 
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
@@ -173,6 +173,11 @@ impl StepDoc {
             shell_faces,
             shell_types,
         })
+    }
+
+    fn table(&self) -> Result<Table> {
+        let section = self.exchange.data.first().context("missing DATA section")?;
+        Ok(Table::from_data_section(section))
     }
 
     fn surface_for_face(&self, face: u64) -> Option<u64> {
