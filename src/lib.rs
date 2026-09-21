@@ -4,20 +4,42 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
+mod bezier_recovery;
 mod brep;
+pub mod compatibility;
+mod curve_replicas;
+mod face_coalesce;
+mod geometric_intern;
 mod instances;
 mod line_recovery;
 mod planar_features;
+mod partition_recovery;
+pub mod parameters;
+pub mod patterns;
+pub mod periodic_bodies;
+pub mod periodic_resize;
 mod spherical_caps;
 mod surface_recovery;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputProfile {
+    Compat,
+    Compact,
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
     pub experimental_recover_straight_bspline_lines: bool,
-    pub experimental_recover_rational_v_extrusions: bool,
+    pub experimental_recover_exact_bezier_curves: bool,
+    pub experimental_recover_v_extrusions: bool,
+    pub experimental_intern_geometric_supports: bool,
+    pub experimental_recover_partitioned_bodies: bool,
+    pub experimental_coalesce_same_support_faces: bool,
+    pub experimental_instance_translated_bspline_curves: bool,
     pub experimental_instance_z90: bool,
+    pub experimental_instance_z90_assembly: bool,
     pub experimental_instance_planar_positive_features: bool,
     pub experimental_instance_spherical_caps: bool,
     pub minify_placeholder_names: bool,
@@ -30,13 +52,42 @@ impl Default for Options {
             intern_values: true,
             consolidate_presentation: true,
             experimental_recover_straight_bspline_lines: false,
-            experimental_recover_rational_v_extrusions: false,
+            experimental_recover_exact_bezier_curves: false,
+            experimental_recover_v_extrusions: false,
+            experimental_intern_geometric_supports: false,
+            experimental_recover_partitioned_bodies: false,
+            experimental_coalesce_same_support_faces: false,
+            experimental_instance_translated_bspline_curves: false,
             experimental_instance_z90: false,
+            experimental_instance_z90_assembly: false,
             experimental_instance_planar_positive_features: false,
             experimental_instance_spherical_caps: false,
             minify_placeholder_names: false,
             dense_ids: true,
         }
+    }
+}
+
+impl Options {
+    pub fn for_profile(profile: OutputProfile) -> Self {
+        let mut options = Self {
+            experimental_recover_straight_bspline_lines: true,
+            experimental_recover_exact_bezier_curves: true,
+            experimental_recover_v_extrusions: true,
+            experimental_intern_geometric_supports: true,
+            experimental_recover_partitioned_bodies: true,
+            experimental_coalesce_same_support_faces: true,
+            minify_placeholder_names: true,
+            ..Self::default()
+        };
+
+        if profile == OutputProfile::Compact {
+            options.experimental_instance_translated_bspline_curves = true;
+            options.experimental_instance_z90 = true;
+            options.experimental_instance_planar_positive_features = true;
+            options.experimental_instance_spherical_caps = true;
+        }
+        options
     }
 }
 
@@ -52,9 +103,33 @@ pub struct Stats {
     pub straight_bspline_lines_recovered: usize,
     pub straight_bspline_direction_groups: usize,
     pub straight_bspline_points_removed: usize,
-    pub rational_v_extrusion_surfaces_recovered: usize,
-    pub rational_v_extrusion_profile_curves_created: usize,
-    pub rational_v_extrusion_points_removed: usize,
+    pub exact_bezier_curves_recovered: usize,
+    pub v_extrusion_surfaces_recovered: usize,
+    pub v_extrusion_rational_surfaces_recovered: usize,
+    pub v_extrusion_profile_curves_created: usize,
+    pub v_extrusion_points_removed: usize,
+    pub geometric_supports_merged: usize,
+    pub geometric_support_entities_removed: usize,
+    pub geometric_planes_merged: usize,
+    pub geometric_lines_merged: usize,
+    pub geometric_cylinders_merged: usize,
+    pub partition_components_recovered: usize,
+    pub partition_solids_merged: usize,
+    pub partition_interfaces_removed: usize,
+    pub partition_styles_retargeted: usize,
+    pub partition_entities_removed: usize,
+    pub face_coalesce_groups: usize,
+    pub face_coalesce_faces_merged: usize,
+    pub face_coalesce_faces_removed: usize,
+    pub face_coalesce_internal_edges_removed: usize,
+    pub face_coalesce_styles_removed: usize,
+    pub face_coalesce_entities_removed: usize,
+    pub curve_replica_families: usize,
+    pub curve_replicas: usize,
+    pub curve_replica_direct_aliases: usize,
+    pub curve_replica_transforms: usize,
+    pub curve_replica_entities_removed: usize,
+    pub curve_replica_max_residual_mm: f64,
     pub instance_groups: usize,
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
@@ -69,6 +144,12 @@ pub struct Stats {
     pub spherical_cap_entities_removed: usize,
     pub spherical_cap_styles_replaced: usize,
     pub placeholder_names_minified: usize,
+    pub instance_patterns_detected: usize,
+    pub pattern_instances_detected: usize,
+    pub periodic_body_patterns_detected: usize,
+    pub periodic_body_repeat_faces: usize,
+    pub count_parameters_detected: usize,
+    pub count_parameters_with_body_grammar: usize,
     pub byte_ratio: f64,
     pub interned_by_type: BTreeMap<String, usize>,
     pub consolidated_by_type: BTreeMap<String, usize>,
@@ -77,6 +158,215 @@ pub struct Stats {
 pub struct CleanOutput {
     pub bytes: Vec<u8>,
     pub stats: Stats,
+    /// Regular instance patterns detected in the final normalized graph.
+    /// Entity IDs refer to the emitted STEP after dense renumbering.
+    pub patterns: Vec<patterns::InstancePattern>,
+    /// Periodic planar body grammars coupled to recovered instance patterns.
+    pub periodic_bodies: Vec<periodic_bodies::PeriodicBodyPattern>,
+    /// Higher-level count controls recovered by coupling instance/body patterns.
+    pub count_parameters: Vec<parameters::RecoveredCountParameter>,
+    /// Structural compatibility audit of the emitted STEP.
+    pub compatibility: compatibility::CompatibilityAudit,
+}
+
+pub struct PatternEditOutput {
+    pub bytes: Vec<u8>,
+    pub resize: patterns::PatternResizeStats,
+    pub patterns: Vec<patterns::InstancePattern>,
+    /// Periodic planar body grammars coupled to recovered instance patterns.
+    pub periodic_bodies: Vec<periodic_bodies::PeriodicBodyPattern>,
+    /// Higher-level count controls recovered by coupling instance/body patterns.
+    pub count_parameters: Vec<parameters::RecoveredCountParameter>,
+    /// Structural compatibility audit of the emitted STEP.
+    pub compatibility: compatibility::CompatibilityAudit,
+}
+
+pub struct PeriodicBodyEditOutput {
+    pub bytes: Vec<u8>,
+    pub resize: periodic_resize::PeriodicBodyResizeStats,
+}
+
+/// Expand one detected periodic body at its positive-axis end.
+pub fn expand_periodic_body_bytes(
+    input: &[u8],
+    body_index: usize,
+    new_sites: usize,
+) -> Result<PeriodicBodyEditOutput> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    let mut remaining = body_index;
+    let mut resize = None;
+    for section in &mut exchange.data {
+        let patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        let bodies = periodic_bodies::detect_periodic_bodies(&section.entities, &patterns);
+        if remaining < bodies.len() {
+            resize = Some(periodic_resize::expand_periodic_body_positive(
+                &mut section.entities,
+                &bodies[remaining],
+                new_sites,
+            )?);
+            let _ = intern_section(&mut section.entities);
+            break;
+        }
+        remaining -= bodies.len();
+    }
+    let resize =
+        resize.ok_or_else(|| anyhow::anyhow!("periodic body index {body_index} not found"))?;
+
+    for section in &mut exchange.data {
+        dense_renumber(&mut section.entities);
+    }
+    let output = write_exchange(&exchange)?;
+    Ok(PeriodicBodyEditOutput {
+        bytes: output.into_bytes(),
+        resize,
+    })
+}
+
+/// Resize one fully occupied 1-D regular MAPPED_ITEM pattern in an already
+/// normalized STEP file. This edits only the instance pattern; higher-level
+/// package/body resizing is intentionally a separate operation.
+pub fn resize_linear_pattern_bytes(
+    input: &[u8],
+    pattern_index: usize,
+    new_count: usize,
+    anchor: patterns::PatternAnchor,
+) -> Result<PatternEditOutput> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    let mut remaining = pattern_index;
+    let mut resize = None;
+    for section in &mut exchange.data {
+        let detected = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        if remaining < detected.len() {
+            resize = Some(patterns::resize_filled_linear_pattern(
+                &mut section.entities,
+                &detected[remaining],
+                new_count,
+                anchor,
+            )?);
+            // Normalize newly-created placements/support values immediately.
+            let _ = intern_section(&mut section.entities);
+            break;
+        }
+        remaining -= detected.len();
+    }
+    let resize = resize.ok_or_else(|| anyhow::anyhow!("pattern index {pattern_index} not found"))?;
+
+    for section in &mut exchange.data {
+        dense_renumber(&mut section.entities);
+    }
+    let (patterns, periodic_bodies, count_parameters) = detect_exchange_semantics(&exchange);
+    let compatibility = audit_exchange_compatibility(&exchange);
+    let output = write_exchange(&exchange)?;
+
+    Ok(PatternEditOutput {
+        bytes: output.into_bytes(),
+        resize,
+        patterns,
+        periodic_bodies,
+        count_parameters,
+        compatibility,
+    })
+}
+
+fn detect_exchange_semantics(
+    exchange: &Exchange,
+) -> (
+    Vec<patterns::InstancePattern>,
+    Vec<periodic_bodies::PeriodicBodyPattern>,
+    Vec<parameters::RecoveredCountParameter>,
+) {
+    let mut patterns_out = Vec::new();
+    let mut bodies_out = Vec::new();
+
+    for section in &exchange.data {
+        let local_patterns =
+            patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        let offset = patterns_out.len();
+        let mut local_bodies =
+            periodic_bodies::detect_periodic_bodies(&section.entities, &local_patterns);
+        for body in &mut local_bodies {
+            for index in &mut body.coupled_instance_patterns {
+                *index += offset;
+            }
+        }
+        patterns_out.extend(local_patterns);
+        bodies_out.extend(local_bodies);
+    }
+
+    let count_parameters = parameters::detect_count_parameters(&patterns_out, &bodies_out);
+    (patterns_out, bodies_out, count_parameters)
+}
+
+fn audit_exchange_compatibility(exchange: &Exchange) -> compatibility::CompatibilityAudit {
+    let mut combined = compatibility::CompatibilityAudit::default();
+    for section in &exchange.data {
+        let audit = compatibility::audit_entities(&section.entities);
+        for (name, count) in audit.structural_risk_entities {
+            *combined.structural_risk_entities.entry(name).or_insert(0) += count;
+        }
+    }
+    combined.structural_risk_total = combined.structural_risk_entities.values().sum();
+    combined.has_mapped_items = combined
+        .structural_risk_entities
+        .get("MAPPED_ITEM")
+        .copied()
+        .unwrap_or(0)
+        > 0
+        || combined
+            .structural_risk_entities
+            .get("REPRESENTATION_MAP")
+            .copied()
+            .unwrap_or(0)
+            > 0;
+    combined.has_curve_or_surface_replicas = combined
+        .structural_risk_entities
+        .get("CURVE_REPLICA")
+        .copied()
+        .unwrap_or(0)
+        > 0
+        || combined
+            .structural_risk_entities
+            .get("SURFACE_REPLICA")
+            .copied()
+            .unwrap_or(0)
+            > 0;
+    combined.has_assembly_relationships = [
+        "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
+        "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+        "ITEM_DEFINED_TRANSFORMATION",
+        "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+        "SHAPE_REPRESENTATION_RELATIONSHIP",
+    ]
+    .iter()
+    .any(|name| combined.structural_risk_entities.get(*name).copied().unwrap_or(0) > 0);
+    combined.conservative_structure = combined.structural_risk_total == 0;
+    combined
 }
 
 pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
@@ -141,24 +431,98 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
-    let mut rational_v_extrusion_surfaces_recovered = 0usize;
-    let mut rational_v_extrusion_profile_curves_created = 0usize;
-    let mut rational_v_extrusion_points_removed = 0usize;
-    if options.experimental_recover_rational_v_extrusions {
+    let mut exact_bezier_curves_recovered = 0usize;
+    if options.experimental_recover_exact_bezier_curves {
         for section in &mut exchange.data {
-            let pass =
-                surface_recovery::recover_rational_v_extrusion_surfaces(&mut section.entities);
-            rational_v_extrusion_surfaces_recovered += pass.surfaces_recovered;
-            rational_v_extrusion_profile_curves_created += pass.profile_curves_created;
-            rational_v_extrusion_points_removed += pass.orphan_points_removed;
+            let pass = bezier_recovery::recover_exact_bezier_curves(&mut section.entities);
+            exact_bezier_curves_recovered += pass.curves_recovered;
         }
     }
+
+    let mut v_extrusion_surfaces_recovered = 0usize;
+    let mut v_extrusion_rational_surfaces_recovered = 0usize;
+    let mut v_extrusion_profile_curves_created = 0usize;
+    let mut v_extrusion_points_removed = 0usize;
+    if options.experimental_recover_v_extrusions {
+        for section in &mut exchange.data {
+            let pass = surface_recovery::recover_v_extrusion_surfaces(&mut section.entities);
+            v_extrusion_surfaces_recovered += pass.surfaces_recovered;
+            v_extrusion_rational_surfaces_recovered += pass.rational_surfaces_recovered;
+            v_extrusion_profile_curves_created += pass.profile_curves_created;
+            v_extrusion_points_removed += pass.orphan_points_removed;
+        }
+    }
+
+    let mut geometric_supports_merged = 0usize;
+    let mut geometric_support_entities_removed = 0usize;
+    let mut geometric_planes_merged = 0usize;
+    let mut geometric_lines_merged = 0usize;
+    let mut geometric_cylinders_merged = 0usize;
+    if options.experimental_intern_geometric_supports {
+        for section in &mut exchange.data {
+            let pass = geometric_intern::intern_geometric_supports(&mut section.entities);
+            geometric_supports_merged += pass.supports_merged;
+            geometric_support_entities_removed += pass.entities_removed;
+            geometric_planes_merged += pass.planes_merged;
+            geometric_lines_merged += pass.lines_merged;
+            geometric_cylinders_merged += pass.cylinders_merged;
+        }
+    }
+
+    let mut partition_components_recovered = 0usize;
+    let mut partition_solids_merged = 0usize;
+    let mut partition_interfaces_removed = 0usize;
+    let mut partition_styles_retargeted = 0usize;
+    let mut partition_entities_removed = 0usize;
+    if options.experimental_recover_partitioned_bodies {
+        for section in &mut exchange.data {
+            let pass = partition_recovery::recover_partitioned_bodies(&mut section.entities);
+            partition_components_recovered += pass.components;
+            partition_solids_merged += pass.solids_merged;
+            partition_interfaces_removed += pass.interfaces_removed;
+            partition_styles_retargeted += pass.styles_retargeted;
+            partition_entities_removed += pass.entities_removed;
+        }
+    }
+
+    let mut face_coalesce_groups = 0usize;
+    let mut face_coalesce_faces_merged = 0usize;
+    let mut face_coalesce_faces_removed = 0usize;
+    let mut face_coalesce_internal_edges_removed = 0usize;
+    let mut face_coalesce_styles_removed = 0usize;
+    let mut face_coalesce_entities_removed = 0usize;
+    if options.experimental_coalesce_same_support_faces {
+        for section in &mut exchange.data {
+            let pass = face_coalesce::coalesce_same_support_faces(&mut section.entities);
+            face_coalesce_groups += pass.groups;
+            face_coalesce_faces_merged += pass.faces_merged;
+            face_coalesce_faces_removed += pass.faces_removed;
+            face_coalesce_internal_edges_removed += pass.internal_edges_removed;
+            face_coalesce_styles_removed += pass.styles_removed;
+            face_coalesce_entities_removed += pass.entities_removed;
+        }
+    }
+
+    let mut curve_replica_families = 0usize;
+    let mut curve_replicas = 0usize;
+    let mut curve_replica_direct_aliases = 0usize;
+    let mut curve_replica_transforms = 0usize;
+    let mut curve_replica_entities_removed = 0usize;
+    let mut curve_replica_max_residual_mm = 0.0f64;
 
     let mut instance_groups = 0usize;
     let mut instanced_solids = 0usize;
     let mut instance_entities_removed = 0usize;
     let mut instance_styles_replaced = 0usize;
-    if options.experimental_instance_z90 {
+    if options.experimental_instance_z90_assembly {
+        for section in &mut exchange.data {
+            let pass = instances::instance_z90_solids_assembly(&mut section.entities);
+            instance_groups += pass.groups;
+            instanced_solids += pass.solids_replaced;
+            instance_entities_removed += pass.entities_removed;
+            instance_styles_replaced += pass.styles_replaced;
+        }
+    } else if options.experimental_instance_z90 {
         for section in &mut exchange.data {
             let pass = instances::instance_z90_solids(&mut section.entities);
             instance_groups += pass.groups;
@@ -198,6 +562,23 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    // Low-level curve factoring comes last. Higher-level body/feature repetition
+    // must be recognized against the actual geometry first; otherwise a
+    // CURVE_REPLICA decomposition can leak global source coordinates into a
+    // later rigid-body signature and hide obvious whole-solid instances.
+    if options.experimental_instance_translated_bspline_curves {
+        for section in &mut exchange.data {
+            let pass = curve_replicas::instance_translated_bspline_curves(&mut section.entities);
+            curve_replica_families += pass.families;
+            curve_replicas += pass.replicas;
+            curve_replica_direct_aliases += pass.direct_aliases;
+            curve_replica_transforms += pass.transforms;
+            curve_replica_entities_removed += pass.entities_removed;
+            curve_replica_max_residual_mm =
+                curve_replica_max_residual_mm.max(pass.max_residual_mm);
+        }
+    }
+
     // Experimental passes can create new placeholder-labelled entities.
     // Minify those before the post-rewrite intern pass so name normalization
     // cannot create fresh duplicates that only disappear on a second run.
@@ -211,7 +592,12 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     // values. Normalize them in the same invocation so aggressive output is a
     // fixed point rather than requiring a second safe cleanup pass.
     if (straight_bspline_lines_recovered > 0
-        || rational_v_extrusion_surfaces_recovered > 0
+        || v_extrusion_surfaces_recovered > 0
+        || geometric_supports_merged > 0
+        || partition_components_recovered > 0
+        || face_coalesce_groups > 0
+        || curve_replicas > 0
+        || curve_replica_direct_aliases > 0
         || instance_groups > 0
         || planar_feature_arrays > 0
         || spherical_cap_arrays > 0)
@@ -232,6 +618,18 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    let (patterns, periodic_bodies, count_parameters) = detect_exchange_semantics(&exchange);
+    let instance_patterns_detected = patterns.len();
+    let pattern_instances_detected = patterns.iter().map(|pattern| pattern.item_ids.len()).sum();
+    let periodic_body_patterns_detected = periodic_bodies.len();
+    let periodic_body_repeat_faces =
+        periodic_bodies.iter().map(|body| body.repeat_faces).sum();
+    let count_parameters_detected = count_parameters.len();
+    let count_parameters_with_body_grammar =
+        count_parameters.iter().filter(|parameter| parameter.body_grammar_proven).count();
+
+    let compatibility = audit_exchange_compatibility(&exchange);
+
     let output = write_exchange(&exchange)?;
     let output_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
     let output_bytes = output.len();
@@ -249,9 +647,33 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             straight_bspline_lines_recovered,
             straight_bspline_direction_groups,
             straight_bspline_points_removed,
-            rational_v_extrusion_surfaces_recovered,
-            rational_v_extrusion_profile_curves_created,
-            rational_v_extrusion_points_removed,
+            exact_bezier_curves_recovered,
+            v_extrusion_surfaces_recovered,
+            v_extrusion_rational_surfaces_recovered,
+            v_extrusion_profile_curves_created,
+            v_extrusion_points_removed,
+            geometric_supports_merged,
+            geometric_support_entities_removed,
+            geometric_planes_merged,
+            geometric_lines_merged,
+            geometric_cylinders_merged,
+            partition_components_recovered,
+            partition_solids_merged,
+            partition_interfaces_removed,
+            partition_styles_retargeted,
+            partition_entities_removed,
+            face_coalesce_groups,
+            face_coalesce_faces_merged,
+            face_coalesce_faces_removed,
+            face_coalesce_internal_edges_removed,
+            face_coalesce_styles_removed,
+            face_coalesce_entities_removed,
+            curve_replica_families,
+            curve_replicas,
+            curve_replica_direct_aliases,
+            curve_replica_transforms,
+            curve_replica_entities_removed,
+            curve_replica_max_residual_mm,
             instance_groups,
             instanced_solids,
             instance_entities_removed,
@@ -266,10 +688,20 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             spherical_cap_entities_removed,
             spherical_cap_styles_replaced,
             placeholder_names_minified,
+            instance_patterns_detected,
+            pattern_instances_detected,
+            periodic_body_patterns_detected,
+            periodic_body_repeat_faces,
+            count_parameters_detected,
+            count_parameters_with_body_grammar,
             byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
             interned_by_type,
             consolidated_by_type,
         },
+        patterns,
+        periodic_bodies,
+        count_parameters,
+        compatibility,
     })
 }
 

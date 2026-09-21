@@ -4,3 +4,13 @@
 
 __pycache__/
 *.pyc
+
+# validation harness generated/cache artifacts
+validation/out*/
+validation/.cache*/
+validation/*-compare.json
+validation/harness-*.stdout
+validation/harness-*.stderr
+.cache/step-redox-validation/
+web/**/target/
+tools/**/target/

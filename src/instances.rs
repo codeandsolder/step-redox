@@ -1,4 +1,4 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Name, Parameter, Record, SubSuperRecord};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone)]
@@ -85,9 +85,43 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
         }
 
         let mut infos = Vec::new();
-        for root in solid_ids {
+        for root in solid_ids.iter().copied() {
             if let Some(info) = analyze_solid(root, entities, &initial_index, &styles_by_target) {
                 infos.push(info);
+            }
+        }
+
+        if std::env::var_os("STEP_REDOX_DEBUG_INSTANCES").is_some() {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            fn h<T: Hash>(value: &T) -> u64 {
+                let mut hasher = DefaultHasher::new();
+                value.hash(&mut hasher);
+                hasher.finish()
+            }
+
+            eprintln!(
+                "instance grouping representation={} solids={} analyzed={}",
+                representation_id,
+                solid_ids.len(),
+                infos.len()
+            );
+            for info in &infos {
+                eprintln!(
+                    "instance key root={} center={:?} basic=({},{},{},{}) points={:016x} edge_geom={:016x} face_geom={:016x} topo={:016x} style={:016x}",
+                    info.root,
+                    info.center,
+                    info.key.vertices,
+                    info.key.edges,
+                    info.key.oriented_edges,
+                    info.key.faces,
+                    h(&info.key.points),
+                    h(&info.key.edge_geometry),
+                    h(&info.key.face_geometry),
+                    h(&info.key.topology),
+                    h(&info.face_style),
+                );
             }
         }
 
@@ -321,6 +355,708 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
     stats.entities_removed = delete.len();
     entities.retain(|entity| !delete.contains(&entity_id(entity)));
     stats
+}
+
+
+pub(crate) fn instance_z90_solids_assembly(
+    entities: &mut Vec<EntityInstance>,
+) -> InstanceStats {
+    // Reuse the mature geometric proof + guarded GC from the MAPPED_ITEM pass,
+    // then replace only its representation layer with the assembly structure
+    // emitted by OpenCascade itself. Keep a rollback copy because assembly
+    // conversion intentionally supports only simple, unambiguous product trees.
+    let original = entities.clone();
+    let stats = instance_z90_solids(entities);
+    if stats.groups == 0 {
+        return stats;
+    }
+    if convert_z90_mapped_items_to_assembly(entities) {
+        stats
+    } else {
+        *entities = original;
+        InstanceStats::default()
+    }
+}
+
+fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
+    let index = build_index(entities);
+    let refs = entity_ref_map(entities);
+    let inbound = inbound_map(&refs);
+    let styles_by_target = collect_styles_by_target(entities);
+
+    let source_reps: HashSet<u64> = entities
+        .iter()
+        .filter_map(|entity| {
+            let id = entity_id(entity);
+            let record = simple_record(entity)?;
+            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                return None;
+            }
+            let Parameter::List(params) = &record.parameter else {
+                return None;
+            };
+            matches!(
+                params.first(),
+                Some(Parameter::String(name)) if name == "step-redox instance source"
+            )
+            .then_some(id)
+        })
+        .collect();
+    if source_reps.is_empty() {
+        return false;
+    }
+
+    let mut map_to_source = HashMap::new();
+    let mut map_to_origin = HashMap::new();
+    for entity in entities.iter() {
+        let id = entity_id(entity);
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "REPRESENTATION_MAP" {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        if params.len() != 2 {
+            continue;
+        }
+        let Some(origin) = entity_ref_value(&params[0]) else {
+            continue;
+        };
+        let Some(rep) = entity_ref_value(&params[1]) else {
+            continue;
+        };
+        if source_reps.contains(&rep) {
+            map_to_source.insert(id, rep);
+            map_to_origin.insert(id, origin);
+        }
+    }
+    if map_to_source.is_empty() {
+        return false;
+    }
+
+    let mut mapped_info: HashMap<u64, (u64, u64)> = HashMap::new();
+    for entity in entities.iter() {
+        let id = entity_id(entity);
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MAPPED_ITEM" {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        if params.len() != 3 {
+            continue;
+        }
+        let Some(map) = entity_ref_value(&params[1]) else {
+            continue;
+        };
+        let Some(axis) = entity_ref_value(&params[2]) else {
+            continue;
+        };
+        if map_to_source.contains_key(&map) {
+            mapped_info.insert(id, (map, axis));
+        }
+    }
+    if mapped_info.is_empty() {
+        return false;
+    }
+    let mapped_ids: HashSet<u64> = mapped_info.keys().copied().collect();
+
+    let top_reps: Vec<u64> = entities
+        .iter()
+        .filter_map(|entity| {
+            let id = entity_id(entity);
+            if source_reps.contains(&id) {
+                return None;
+            }
+            let record = simple_record(entity)?;
+            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                return None;
+            }
+            let (items, _) = representation_items_and_context(entity)?;
+            items.iter().any(|item| mapped_ids.contains(item)).then_some(id)
+        })
+        .collect();
+    if top_reps.is_empty() {
+        return false;
+    }
+
+    // Every generated mapped item must be owned by exactly one top shape rep.
+    let mut ownership = HashMap::<u64, usize>::new();
+    for &rep in &top_reps {
+        let Some(&idx) = index.get(&rep) else {
+            return false;
+        };
+        let Some((items, _)) = representation_items_and_context(&entities[idx]) else {
+            return false;
+        };
+        for item in items {
+            if mapped_ids.contains(&item) {
+                *ownership.entry(item).or_insert(0) += 1;
+            }
+        }
+    }
+    if mapped_ids
+        .iter()
+        .any(|id| ownership.get(id).copied() != Some(1))
+    {
+        return false;
+    }
+
+    let mapped_style_ids: HashSet<u64> = mapped_ids
+        .iter()
+        .flat_map(|mapped| {
+            styles_by_target
+                .get(mapped)
+                .into_iter()
+                .flatten()
+                .map(|style| style.id)
+        })
+        .collect();
+
+    let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
+    let mut new_style_ids = Vec::new();
+    let mut used_maps = HashSet::new();
+
+    for (rep_ordinal, &top_rep) in top_reps.iter().enumerate() {
+        let Some(&top_idx) = index.get(&top_rep) else {
+            return false;
+        };
+        let Some((top_items, context_id)) =
+            representation_items_and_context(&entities[top_idx])
+        else {
+            return false;
+        };
+        let local_mapped: Vec<u64> = top_items
+            .iter()
+            .copied()
+            .filter(|item| mapped_ids.contains(item))
+            .collect();
+        if local_mapped.is_empty() {
+            continue;
+        }
+
+        let sdr_candidates: Vec<u64> = inbound
+            .get(&top_rep)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| {
+                index
+                    .get(id)
+                    .and_then(|idx| simple_record(&entities[*idx]))
+                    .is_some_and(|record| record.name == "SHAPE_DEFINITION_REPRESENTATION")
+            })
+            .collect();
+        if sdr_candidates.len() != 1 {
+            return false;
+        }
+        let root_sdr = sdr_candidates[0];
+
+        let Some(root_pds) = referenced_of_type(
+            root_sdr,
+            entities,
+            &index,
+            &["PRODUCT_DEFINITION_SHAPE"],
+        ) else {
+            return false;
+        };
+        let Some(parent_pd) =
+            referenced_of_type(root_pds, entities, &index, &["PRODUCT_DEFINITION"])
+        else {
+            return false;
+        };
+        let Some(pd_context) = referenced_of_type(
+            parent_pd,
+            entities,
+            &index,
+            &["PRODUCT_DEFINITION_CONTEXT"],
+        ) else {
+            return false;
+        };
+        let Some(formation) = referenced_of_type(
+            parent_pd,
+            entities,
+            &index,
+            &[
+                "PRODUCT_DEFINITION_FORMATION",
+                "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
+            ],
+        ) else {
+            return false;
+        };
+        let Some(parent_product) =
+            referenced_of_type(formation, entities, &index, &["PRODUCT"])
+        else {
+            return false;
+        };
+        let Some(product_context) =
+            referenced_of_type(parent_product, entities, &index, &["PRODUCT_CONTEXT"])
+        else {
+            return false;
+        };
+
+        let z_dir = push_simple(
+            entities,
+            &mut next_id,
+            "DIRECTION",
+            vec![
+                Parameter::String(String::new()),
+                Parameter::List(vec![
+                    Parameter::Real(0.0),
+                    Parameter::Real(0.0),
+                    Parameter::Real(1.0),
+                ]),
+            ],
+        );
+        let x_dir = push_simple(
+            entities,
+            &mut next_id,
+            "DIRECTION",
+            vec![
+                Parameter::String(String::new()),
+                Parameter::List(vec![
+                    Parameter::Real(1.0),
+                    Parameter::Real(0.0),
+                    Parameter::Real(0.0),
+                ]),
+            ],
+        );
+        let root_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
+        let root_origin = push_simple(
+            entities,
+            &mut next_id,
+            "AXIS2_PLACEMENT_3D",
+            vec![
+                Parameter::String(String::new()),
+                entity_ref(root_point),
+                entity_ref(z_dir),
+                entity_ref(x_dir),
+            ],
+        );
+        let residual_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
+        let residual_origin = push_simple(
+            entities,
+            &mut next_id,
+            "AXIS2_PLACEMENT_3D",
+            vec![
+                Parameter::String(String::new()),
+                entity_ref(residual_point),
+                entity_ref(z_dir),
+                entity_ref(x_dir),
+            ],
+        );
+
+        let residual_items: Vec<u64> = top_items
+            .iter()
+            .copied()
+            .filter(|item| !mapped_ids.contains(item))
+            .collect();
+        let mut patched_residual_items = residual_items.clone();
+        patched_residual_items.push(residual_origin);
+        set_representation_items(
+            entities
+                .get_mut(top_idx)
+                .expect("existing top representation index"),
+            &patched_residual_items,
+        );
+
+        let mut root_items = vec![root_origin];
+        if !residual_items.is_empty() {
+            root_items.push(residual_origin);
+        }
+        for mapped in &local_mapped {
+            let Some((_, axis)) = mapped_info.get(mapped) else {
+                return false;
+            };
+            if !root_items.contains(axis) {
+                root_items.push(*axis);
+            }
+        }
+        let root_rep = push_simple(
+            entities,
+            &mut next_id,
+            "SHAPE_REPRESENTATION",
+            vec![
+                Parameter::String(format!("step-redox assembly {rep_ordinal}")),
+                Parameter::List(root_items.iter().copied().map(entity_ref).collect()),
+                entity_ref(context_id),
+            ],
+        );
+        if !replace_direct_ref_in_simple(
+            entities
+                .get_mut(*index.get(&root_sdr).expect("existing SDR index"))
+                .expect("existing SDR"),
+            top_rep,
+            root_rep,
+        ) {
+            return false;
+        }
+
+        if !residual_items.is_empty() {
+            let residual_pd = push_child_product(
+                entities,
+                &mut next_id,
+                &format!("step-redox residual {rep_ordinal}"),
+                product_context,
+                pd_context,
+                top_rep,
+            );
+            push_assembly_occurrence(
+                entities,
+                &mut next_id,
+                parent_pd,
+                residual_pd,
+                top_rep,
+                root_rep,
+                residual_origin,
+                root_origin,
+                &format!("residual-{rep_ordinal}"),
+            );
+        }
+
+        let mut local_by_map: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+        for mapped in &local_mapped {
+            let Some(&(map, axis)) = mapped_info.get(mapped) else {
+                return false;
+            };
+            local_by_map.entry(map).or_default().push((*mapped, axis));
+        }
+
+        for (family_ordinal, (map, mut occurrences)) in
+            local_by_map.into_iter().enumerate()
+        {
+            occurrences.sort_by_key(|(mapped, _)| *mapped);
+            used_maps.insert(map);
+            let Some(&source_rep) = map_to_source.get(&map) else {
+                return false;
+            };
+            let Some(&source_origin) = map_to_origin.get(&map) else {
+                return false;
+            };
+            let Some(&source_idx) = index.get(&source_rep) else {
+                return false;
+            };
+            let Some((source_items, _)) =
+                representation_items_and_context(&entities[source_idx])
+            else {
+                return false;
+            };
+            let source_solids: Vec<u64> = source_items
+                .iter()
+                .copied()
+                .filter(|id| {
+                    index
+                        .get(id)
+                        .and_then(|idx| simple_record(&entities[*idx]))
+                        .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+                })
+                .collect();
+            if source_solids.len() != 1 {
+                return false;
+            }
+            let canonical_solid = source_solids[0];
+
+            let first_mapped = occurrences[0].0;
+            let Some(mapped_styles) = styles_by_target.get(&first_mapped) else {
+                return false;
+            };
+            if mapped_styles.len() != 1 || mapped_styles[0].assignments.is_empty() {
+                return false;
+            }
+            let inherited_style = mapped_styles[0].assignments.clone();
+            for (mapped, _) in &occurrences {
+                let Some(styles) = styles_by_target.get(mapped) else {
+                    return false;
+                };
+                if styles.len() != 1 || styles[0].assignments != inherited_style {
+                    return false;
+                }
+            }
+
+            if let Some(root_styles) = styles_by_target.get(&canonical_solid) {
+                for style in root_styles {
+                    let Some(&style_idx) = index.get(&style.id) else {
+                        return false;
+                    };
+                    if !set_styled_item_assignments(
+                        &mut entities[style_idx],
+                        &inherited_style,
+                    ) {
+                        return false;
+                    }
+                }
+            } else {
+                let styled = push_simple(
+                    entities,
+                    &mut next_id,
+                    "STYLED_ITEM",
+                    vec![
+                        Parameter::String("NONE".to_string()),
+                        Parameter::List(
+                            inherited_style.iter().copied().map(entity_ref).collect(),
+                        ),
+                        entity_ref(canonical_solid),
+                    ],
+                );
+                new_style_ids.push(styled);
+            }
+
+            let child_pd = push_child_product(
+                entities,
+                &mut next_id,
+                &format!("step-redox repeated solid {rep_ordinal}-{family_ordinal}"),
+                product_context,
+                pd_context,
+                source_rep,
+            );
+
+            for (occurrence_ordinal, (_, axis)) in occurrences.iter().enumerate() {
+                push_assembly_occurrence(
+                    entities,
+                    &mut next_id,
+                    parent_pd,
+                    child_pd,
+                    source_rep,
+                    root_rep,
+                    source_origin,
+                    *axis,
+                    &format!(
+                        "instance-{rep_ordinal}-{family_ordinal}-{occurrence_ordinal}"
+                    ),
+                );
+            }
+        }
+    }
+
+    // Remove the intermediate occurrence styles from presentation roots and
+    // register any new inherited child styles.
+    patch_presentation_lists(entities, &mapped_style_ids, &new_style_ids);
+
+    let mut delete = mapped_style_ids;
+    delete.extend(mapped_ids);
+    delete.extend(used_maps);
+    entities.retain(|entity| !delete.contains(&entity_id(entity)));
+    true
+}
+
+fn referenced_of_type(
+    id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    names: &[&str],
+) -> Option<u64> {
+    let entity = entities.get(*index.get(&id)?)?;
+    let mut found = Vec::new();
+    visit_entity_refs(entity, &mut |child| {
+        if let Some(record) = index
+            .get(&child)
+            .and_then(|idx| simple_record(&entities[*idx]))
+            && names.iter().any(|name| *name == record.name)
+        {
+            found.push(child);
+        }
+    });
+    found.sort_unstable();
+    found.dedup();
+    (found.len() == 1).then_some(found[0])
+}
+
+fn set_representation_items(entity: &mut EntityInstance, items: &[u64]) {
+    let Some(record) = simple_record_mut(entity) else {
+        return;
+    };
+    let Parameter::List(params) = &mut record.parameter else {
+        return;
+    };
+    if let Some(slot) = params.get_mut(1) {
+        *slot = Parameter::List(items.iter().copied().map(entity_ref).collect());
+    }
+}
+
+fn replace_direct_ref_in_simple(
+    entity: &mut EntityInstance,
+    old: u64,
+    new: u64,
+) -> bool {
+    let Some(record) = simple_record_mut(entity) else {
+        return false;
+    };
+    let Parameter::List(params) = &mut record.parameter else {
+        return false;
+    };
+    let mut changed = false;
+    for param in params {
+        if entity_ref_value(param) == Some(old) {
+            *param = entity_ref(new);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn set_styled_item_assignments(
+    entity: &mut EntityInstance,
+    assignments: &[u64],
+) -> bool {
+    let Some(record) = simple_record_mut(entity) else {
+        return false;
+    };
+    if record.name != "STYLED_ITEM" {
+        return false;
+    }
+    let Parameter::List(params) = &mut record.parameter else {
+        return false;
+    };
+    if params.len() != 3 {
+        return false;
+    }
+    params[1] = Parameter::List(assignments.iter().copied().map(entity_ref).collect());
+    true
+}
+
+fn push_child_product(
+    entities: &mut Vec<EntityInstance>,
+    next_id: &mut u64,
+    name: &str,
+    product_context: u64,
+    pd_context: u64,
+    representation: u64,
+) -> u64 {
+    let product = push_simple(
+        entities,
+        next_id,
+        "PRODUCT",
+        vec![
+            Parameter::String(name.to_string()),
+            Parameter::String(name.to_string()),
+            Parameter::String(String::new()),
+            Parameter::List(vec![entity_ref(product_context)]),
+        ],
+    );
+    let formation = push_simple(
+        entities,
+        next_id,
+        "PRODUCT_DEFINITION_FORMATION",
+        vec![
+            Parameter::String(String::new()),
+            Parameter::String(String::new()),
+            entity_ref(product),
+        ],
+    );
+    let pd = push_simple(
+        entities,
+        next_id,
+        "PRODUCT_DEFINITION",
+        vec![
+            Parameter::String("design".to_string()),
+            Parameter::String(String::new()),
+            entity_ref(formation),
+            entity_ref(pd_context),
+        ],
+    );
+    let pds = push_simple(
+        entities,
+        next_id,
+        "PRODUCT_DEFINITION_SHAPE",
+        vec![
+            Parameter::String(String::new()),
+            Parameter::String(String::new()),
+            entity_ref(pd),
+        ],
+    );
+    push_simple(
+        entities,
+        next_id,
+        "SHAPE_DEFINITION_REPRESENTATION",
+        vec![entity_ref(pds), entity_ref(representation)],
+    );
+    pd
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_assembly_occurrence(
+    entities: &mut Vec<EntityInstance>,
+    next_id: &mut u64,
+    parent_pd: u64,
+    child_pd: u64,
+    child_rep: u64,
+    root_rep: u64,
+    source_axis: u64,
+    target_axis: u64,
+    name: &str,
+) {
+    let transform = push_simple(
+        entities,
+        next_id,
+        "ITEM_DEFINED_TRANSFORMATION",
+        vec![
+            Parameter::String(String::new()),
+            Parameter::String(String::new()),
+            entity_ref(source_axis),
+            entity_ref(target_axis),
+        ],
+    );
+
+    let relationship_id = *next_id;
+    *next_id += 1;
+    entities.push(EntityInstance::Complex {
+        id: relationship_id,
+        subsuper: SubSuperRecord(vec![
+            Record {
+                name: "REPRESENTATION_RELATIONSHIP".to_string(),
+                parameter: Parameter::List(vec![
+                    Parameter::String(String::new()),
+                    Parameter::String(String::new()),
+                    entity_ref(child_rep),
+                    entity_ref(root_rep),
+                ]),
+            },
+            Record {
+                name: "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION".to_string(),
+                parameter: Parameter::List(vec![entity_ref(transform)]),
+            },
+            Record {
+                name: "SHAPE_REPRESENTATION_RELATIONSHIP".to_string(),
+                parameter: Parameter::List(Vec::new()),
+            },
+        ]),
+    });
+
+    let nauo = push_simple(
+        entities,
+        next_id,
+        "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
+        vec![
+            Parameter::String(name.to_string()),
+            Parameter::String(name.to_string()),
+            Parameter::String(String::new()),
+            entity_ref(parent_pd),
+            entity_ref(child_pd),
+            Parameter::NotProvided,
+        ],
+    );
+    let placement = push_simple(
+        entities,
+        next_id,
+        "PRODUCT_DEFINITION_SHAPE",
+        vec![
+            Parameter::String("Placement".to_string()),
+            Parameter::String("Placement of an item".to_string()),
+            entity_ref(nauo),
+        ],
+    );
+    push_simple(
+        entities,
+        next_id,
+        "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+        vec![entity_ref(relationship_id), entity_ref(placement)],
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -643,8 +1379,15 @@ fn oriented_edge_signature(
         0,
     )?;
 
+    // ORIENTED_EDGE.orientation and EDGE_CURVE.same_sense are two
+    // serialization choices describing one semantic relation: whether this
+    // edge use traverses the underlying curve in its parameter direction.
+    // Equivalent exporters may flip both while swapping the stored edge
+    // endpoints. Signature the combined meaning, not the two raw flags.
+    let curve_forward = orientation == same_sense;
     Some(format!(
-        "OE({orientation};{same_sense};{start}->{end};{curve})"
+        "OE(CF{};{start}->{end};{curve})",
+        if curve_forward { "T" } else { "F" }
     ))
 }
 
@@ -677,22 +1420,271 @@ fn support_entity_signature(
     if depth > 48 || !visiting.insert(id) {
         return None;
     }
-    let record = simple_record(&entities[*index.get(&id)?])?;
+    let entity = &entities[*index.get(&id)?];
 
-    let result = match record.name.as_str() {
-        "CARTESIAN_POINT" => {
-            let p = cartesian_point(id, entities, index)?;
-            let q = transform_point(p, center, quarter);
-            Some(format!("POINT({},{},{})", q[0], q[1], q[2]))
+    let result = match entity {
+        EntityInstance::Simple { record, .. } => match record.name.as_str() {
+            "CARTESIAN_POINT" => {
+                let p = cartesian_point(id, entities, index)?;
+                let q = transform_point(p, center, quarter);
+                Some(format!("POINT({},{},{})", q[0], q[1], q[2]))
+            }
+            "DIRECTION" => {
+                let d = direction_components(record)?;
+                let q = transform_direction(d, quarter);
+                Some(format!("DIR({},{},{})", q[0], q[1], q[2]))
+            }
+            "LINE" => line_support_signature(record, entities, index, center, quarter),
+            "PLANE" => plane_support_signature(record, entities, index, center, quarter),
+            "CYLINDRICAL_SURFACE" => {
+                cylindrical_surface_signature(record, entities, index, center, quarter)
+            }
+            _ if is_topology_type(&record.name) => None,
+            _ => support_record_signature(
+                record,
+                entities,
+                index,
+                center,
+                quarter,
+                visiting,
+                depth + 1,
+            ),
+        },
+        EntityInstance::Complex { subsuper, .. } => {
+            let mut parts = Vec::with_capacity(subsuper.0.len());
+            for record in &subsuper.0 {
+                if is_topology_type(&record.name) {
+                    return None;
+                }
+                parts.push(support_record_signature(
+                    record,
+                    entities,
+                    index,
+                    center,
+                    quarter,
+                    visiting,
+                    depth + 1,
+                )?);
+            }
+            Some(format!("COMPLEX[{}]", parts.join("|")))
         }
-        "DIRECTION" => {
-            let d = direction_components(record)?;
-            let q = transform_direction(d, quarter);
-            Some(format!("DIR({},{},{})", q[0], q[1], q[2]))
-        }
-        _ if is_topology_type(&record.name) => None,
-        _ => {
-            let params = support_param_signature(
+    };
+    visiting.remove(&id);
+    result
+}
+
+fn line_support_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<String> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let point_id = entity_ref_value(params.get(1)?)?;
+    let vector_id = entity_ref_value(params.get(2)?)?;
+    let point = cartesian_point(point_id, entities, index)?;
+
+    let vector = simple_record(&entities[*index.get(&vector_id)?])?;
+    if vector.name != "VECTOR" {
+        return None;
+    }
+    let Parameter::List(vector_params) = &vector.parameter else {
+        return None;
+    };
+    let direction_id = entity_ref_value(vector_params.get(1)?)?;
+    let magnitude = number(vector_params.get(2)?)?;
+    let direction_record = simple_record(&entities[*index.get(&direction_id)?])?;
+    let direction = direction_components(direction_record)?;
+
+    let offset = canonical_axis_offset(point, direction, center, quarter)?;
+    let q_dir = transform_direction(direction, quarter);
+    Some(format!(
+        "LINE_LOCUS(P({},{},{});DIR({},{},{});MAG{})",
+        offset[0],
+        offset[1],
+        offset[2],
+        q_dir[0],
+        q_dir[1],
+        q_dir[2],
+        (magnitude * 1.0e9).round() as i64,
+    ))
+}
+
+fn cylindrical_surface_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<String> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let placement_id = entity_ref_value(params.get(1)?)?;
+    let radius = number(params.get(2)?)?;
+    let placement = simple_record(&entities[*index.get(&placement_id)?])?;
+    if placement.name != "AXIS2_PLACEMENT_3D" {
+        return None;
+    }
+    let Parameter::List(place_params) = &placement.parameter else {
+        return None;
+    };
+    let point_id = entity_ref_value(place_params.get(1)?)?;
+    let axis_id = entity_ref_value(place_params.get(2)?)?;
+    let ref_direction_id = entity_ref_value(place_params.get(3)?)?;
+    let point = cartesian_point(point_id, entities, index)?;
+    let axis_record = simple_record(&entities[*index.get(&axis_id)?])?;
+    let ref_record = simple_record(&entities[*index.get(&ref_direction_id)?])?;
+    let axis = direction_components(axis_record)?;
+    let ref_direction = direction_components(ref_record)?;
+
+    // Sliding the placement origin along the cylinder axis changes only the
+    // parameter-space V origin, not the 3-D cylindrical locus.  Keep axis and
+    // reference-direction orientation strict, but compare the perpendicular
+    // axis-line offset instead of the exporter's arbitrary point on that line.
+    let offset = canonical_axis_offset(point, axis, center, quarter)?;
+    let q_axis = transform_direction(axis, quarter);
+    let q_ref = transform_direction(ref_direction, quarter);
+    Some(format!(
+        "CYLINDER_LOCUS(P({},{},{});AXIS({},{},{});REF({},{},{});R{})",
+        offset[0],
+        offset[1],
+        offset[2],
+        q_axis[0],
+        q_axis[1],
+        q_axis[2],
+        q_ref[0],
+        q_ref[1],
+        q_ref[2],
+        (radius * 1.0e9).round() as i64,
+    ))
+}
+
+fn canonical_axis_offset(
+    point: [f64; 3],
+    direction: [f64; 3],
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<[i64; 3]> {
+    let norm2 =
+        direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
+    if !norm2.is_finite() || norm2 <= 1.0e-24 {
+        return None;
+    }
+    let rel = [
+        point[0] - center[0],
+        point[1] - center[1],
+        point[2] - center[2],
+    ];
+    let along =
+        (rel[0] * direction[0] + rel[1] * direction[1] + rel[2] * direction[2]) / norm2;
+    let perpendicular = [
+        rel[0] - along * direction[0],
+        rel[1] - along * direction[1],
+        rel[2] - along * direction[2],
+    ];
+    let (x, y) = rotate_xy(perpendicular[0], perpendicular[1], quarter);
+    Some([
+        (x * 1.0e5).round() as i64,
+        (y * 1.0e5).round() as i64,
+        (perpendicular[2] * 1.0e5).round() as i64,
+    ])
+}
+
+fn plane_support_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<String> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let placement_id = entity_ref_value(params.get(1)?)?;
+    let placement = simple_record(&entities[*index.get(&placement_id)?])?;
+    if placement.name != "AXIS2_PLACEMENT_3D" {
+        return None;
+    }
+    let Parameter::List(place_params) = &placement.parameter else {
+        return None;
+    };
+    let point_id = entity_ref_value(place_params.get(1)?)?;
+    let axis_id = entity_ref_value(place_params.get(2)?)?;
+    let point = cartesian_point(point_id, entities, index)?;
+    let axis_record = simple_record(&entities[*index.get(&axis_id)?])?;
+    let axis = direction_components(axis_record)?;
+
+    // A plane is invariant to sliding AXIS2_PLACEMENT_3D's origin within
+    // itself, and to rotating ref_direction around the normal. Signature the
+    // actual oriented geometric locus: normal + signed perpendicular offset.
+    let q_axis = transform_direction(axis, quarter);
+    let rel = [
+        point[0] - center[0],
+        point[1] - center[1],
+        point[2] - center[2],
+    ];
+    let (rx, ry) = rotate_xy(rel[0], rel[1], quarter);
+    let q_rel = [rx, ry, rel[2]];
+    let (anx, any) = rotate_xy(axis[0], axis[1], quarter);
+    let q_axis_f = [anx, any, axis[2]];
+    let offset = (q_rel[0] * q_axis_f[0] + q_rel[1] * q_axis_f[1] + q_rel[2] * q_axis_f[2]) * 1.0e9;
+    Some(format!(
+        "PLANE(OFFSET{};DIR({},{},{}))",
+        offset.round() as i64,
+        q_axis[0],
+        q_axis[1],
+        q_axis[2],
+    ))
+}
+
+fn support_record_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+    visiting: &mut HashSet<u64>,
+    depth: usize,
+) -> Option<String> {
+    let ignored_self_intersect = match record.name.as_str() {
+        // self_intersect is exporter metadata, not part of the mathematical
+        // B-spline definition. Keep closed-curve/surface flags strict.
+        "B_SPLINE_CURVE" => Some(4usize),
+        "B_SPLINE_CURVE_WITH_KNOTS" => Some(5usize),
+        "B_SPLINE_SURFACE" => Some(6usize),
+        "B_SPLINE_SURFACE_WITH_KNOTS" => Some(7usize),
+        _ => None,
+    };
+
+    let params = if let (Some(ignore), Parameter::List(items)) =
+        (ignored_self_intersect, &record.parameter)
+    {
+        if ignore < items.len() {
+            let mut parts = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                if idx == ignore {
+                    parts.push("SELF_INTERSECT_IGNORED".to_string());
+                } else {
+                    parts.push(support_param_signature(
+                        item,
+                        entities,
+                        index,
+                        center,
+                        quarter,
+                        visiting,
+                        depth + 1,
+                    )?);
+                }
+            }
+            format!("({})", parts.join(","))
+        } else {
+            // Complex STEP entities split inherited B-spline fields across
+            // subrecords, so a WITH_KNOTS record may not carry this field.
+            support_param_signature(
                 &record.parameter,
                 entities,
                 index,
@@ -700,12 +1692,20 @@ fn support_entity_signature(
                 quarter,
                 visiting,
                 depth + 1,
-            )?;
-            Some(format!("{}{}", record.name, params))
+            )?
         }
+    } else {
+        support_param_signature(
+            &record.parameter,
+            entities,
+            index,
+            center,
+            quarter,
+            visiting,
+            depth + 1,
+        )?
     };
-    visiting.remove(&id);
-    result
+    Some(format!("{}{}", record.name, params))
 }
 
 fn support_param_signature(
@@ -810,9 +1810,9 @@ fn transform_point(point: [f64; 3], center: [f64; 3], quarter: u8) -> [i64; 3] {
     let z = point[2] - center[2];
     let (rx, ry) = rotate_xy(x, y, quarter);
     [
-        (rx * 1.0e9).round() as i64,
-        (ry * 1.0e9).round() as i64,
-        (z * 1.0e9).round() as i64,
+        (rx * 1.0e5).round() as i64,
+        (ry * 1.0e5).round() as i64,
+        (z * 1.0e5).round() as i64,
     ]
 }
 
@@ -839,7 +1839,9 @@ fn parameter_literal_signature(parameter: &Parameter) -> Option<String> {
     match parameter {
         Parameter::Enumeration(value) => Some(format!(".{value}.")),
         Parameter::Integer(value) => Some(value.to_string()),
-        Parameter::Real(value) => Some(format!("{}", (value * 1.0e9).round() as i64)),
+        // Scalar geometry (radii, lengths, knot literals in geometric
+        // signatures) uses the same 1e-5 mm equivalence floor as points.
+        Parameter::Real(value) => Some(format!("{}", (value * 1.0e5).round() as i64)),
         Parameter::Omitted => Some("*".to_string()),
         Parameter::NotProvided => Some("$".to_string()),
         _ => None,
@@ -868,10 +1870,31 @@ fn geometry_signature(
     index: &HashMap<u64, usize>,
 ) -> Option<(String, Vec<i64>)> {
     let &idx = index.get(&id)?;
-    let record = simple_record(&entities[idx])?;
-    let mut scalars = Vec::new();
-    collect_nonref_scalars(&record.parameter, &mut scalars);
-    Some((record.name.clone(), scalars))
+    match &entities[idx] {
+        EntityInstance::Simple { record, .. } => {
+            let mut scalars = Vec::new();
+            collect_nonref_scalars(&record.parameter, &mut scalars);
+            Some((record.name.clone(), scalars))
+        }
+        EntityInstance::Complex { subsuper, .. } => {
+            // Complex rational B-spline curves/surfaces are normal geometry,
+            // not a reason to reject an otherwise instanceable solid.  Keep
+            // the same shallow safeguard as for simple supports: entity class
+            // plus non-reference scalar parameters.  The full recursive
+            // support geometry is proved independently by topology_signature.
+            let mut scalars = Vec::new();
+            let mut names = String::from("COMPLEX[");
+            for (idx, record) in subsuper.0.iter().enumerate() {
+                if idx != 0 {
+                    names.push('+');
+                }
+                names.push_str(&record.name);
+                collect_nonref_scalars(&record.parameter, &mut scalars);
+            }
+            names.push(']');
+            Some((names, scalars))
+        }
+    }
 }
 
 fn collect_nonref_scalars(param: &Parameter, out: &mut Vec<i64>) {
@@ -1277,5 +2300,23 @@ mod tests {
         let (ka, _) = canonical_z90_points(&a, centroid(&a));
         let (kb, _) = canonical_z90_points(&b, centroid(&b));
         assert_ne!(ka, kb);
+    }
+
+    #[test]
+    fn axis_offset_ignores_slide_along_axis() {
+        let center = [0.0, 0.0, 0.0];
+        let axis = [0.0, 2.0, 0.0];
+        let a = canonical_axis_offset([1.25, -7.0, 3.5], axis, center, 0).unwrap();
+        let b = canonical_axis_offset([1.25, 42.0, 3.5], axis, center, 0).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, [125_000, 0, 350_000]);
+    }
+
+    #[test]
+    fn axis_offset_rotates_with_solid_quarter_turn() {
+        let center = [0.0, 0.0, 0.0];
+        let axis = [0.0, 0.0, 1.0];
+        let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1).unwrap();
+        assert_eq!(a, [-100_000, 200_000, 0]);
     }
 }

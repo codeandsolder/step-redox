@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "fixtures": {
+    "jlc_header_2x24_2mm": {
+      "url": "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/469ecbad11cf4237a5002b63dbad0683",
+      "sha256": "8ea8569dbf2f45128374ce085e694567083335cd36463c8ffa8ea775864a4294",
+      "filename": "jlc-header-2x24-2mm.step",
+      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_48P-P2.00-V-F-R2-C24-S2.00"
+    },
+    "jlc_header_2x36_2mm": {
+      "url": "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/7c7e5c95024e4504899bb9db9346a373",
+      "sha256": "5427a07ac8237d50b062b85a920a8e74c132879f20f8b4689c9e587b5b431b06",
+      "filename": "jlc-header-2x36-2mm.step",
+      "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_72P-P2.00-V-F-R2-C36-S2.00"
+    },
+    "te_3_353293_4": {
+      "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4",
+      "archive": "zip",
+      "archive_filename": "te-3-353293-4.zip",
+      "archive_sha256": "b030e5430fdd3536e84bdfcd5e82f729c137b9e89b2f61ef938cd8fd89123d13",
+      "member": "c-3-353293-4-k-3d.stp",
+      "sha256": "e4c88f74302a2e4cf076df9b78bca605087bb33ef7efe526a4deec5be31d3904",
+      "filename": "te-3-353293-4.step",
+      "source_page": "https://www.te.com/en/product-3-353293-4.html",
+      "source_note": "TE Connectivity first-party Customer View Model, 14-position 1.5 mm receptacle"
+    },
+    "te_3_353293_5": {
+      "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5",
+      "archive": "zip",
+      "archive_filename": "te-3-353293-5.zip",
+      "archive_sha256": "9b22d82552cfa8122eea505d85d4273a344d24fb9dcaccfba0f2800a26e7c88d",
+      "member": "c-3-353293-5-k-3d.stp",
+      "sha256": "86cfe5bd5af83cb675bb13c6764b19560b753093cfb83681a49399d25416eba8",
+      "filename": "te-3-353293-5.step",
+      "source_page": "https://www.te.com/en/product-3-353293-5.html",
+      "source_note": "TE Connectivity first-party Customer View Model, 15-position 1.5 mm receptacle"
+    },
+    "te_3_353293_8": {
+      "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8",
+      "archive": "zip",
+      "archive_filename": "te-3-353293-8.zip",
+      "archive_sha256": "6c68c71f591ec57812ff57705cbf3a20bddaa3dbf3a5506840bf06cbfd3fb7f1",
+      "member": "c-3-353293-8-k-3d.stp",
+      "sha256": "72a7f9c144a4d0383bdf6cd4067f1f32767a6b84a64329f68d79d8d5066005f5",
+      "filename": "te-3-353293-8.step",
+      "source_page": "https://www.te.com/en/product-3-353293-8.html",
+      "source_note": "TE Connectivity first-party Customer View Model, same 1.5 mm receptacle family"
+    }
+  },
+  "cases": [
+    {
+      "name": "compact_header_2x24",
+      "input_fixture": "jlc_header_2x24_2mm",
+      "command": ["{step_redox}", "--profile", "compact", "{input}", "{output}"],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 0.00002,
+        "area_rel": 0.00000001,
+        "edge_length_rel": 0.00000001,
+        "bbox_extent_abs_mm": 0.000001,
+        "center_abs_mm": 0.000001,
+        "com_abs_mm": 0.00025,
+        "inertia_rel": 0.00002,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
+      "name": "compact_header_2x36",
+      "input_fixture": "jlc_header_2x36_2mm",
+      "command": ["{step_redox}", "--profile", "compact", "{input}", "{output}"],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 0.00002,
+        "area_rel": 0.00000001,
+        "edge_length_rel": 0.00000001,
+        "bbox_extent_abs_mm": 0.000001,
+        "center_abs_mm": 0.000001,
+        "com_abs_mm": 0.00025,
+        "inertia_rel": 0.00002,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
+      "name": "compact_te_3_353293_4",
+      "input_fixture": "te_3_353293_4",
+      "command": ["{step_redox}", "--profile", "compact", "{input}", "{output}"],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 0.00002,
+        "area_rel": 0.00000001,
+        "edge_length_rel": 0.00000001,
+        "bbox_extent_abs_mm": 0.000001,
+        "center_abs_mm": 0.000001,
+        "com_abs_mm": 0.00025,
+        "inertia_rel": 0.00002,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
+      "name": "compact_te_3_353293_5",
+      "input_fixture": "te_3_353293_5",
+      "command": ["{step_redox}", "--profile", "compact", "{input}", "{output}"],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 0.00002,
+        "area_rel": 0.00000001,
+        "edge_length_rel": 0.00000001,
+        "bbox_extent_abs_mm": 0.000001,
+        "center_abs_mm": 0.000001,
+        "com_abs_mm": 0.00025,
+        "inertia_rel": 0.00002,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
+      "name": "compact_te_3_353293_8",
+      "input_fixture": "te_3_353293_8",
+      "command": ["{step_redox}", "--profile", "compact", "{input}", "{output}"],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 0.00002,
+        "area_rel": 0.00000001,
+        "edge_length_rel": 0.00000001,
+        "bbox_extent_abs_mm": 0.000001,
+        "center_abs_mm": 0.000001,
+        "com_abs_mm": 0.00025,
+        "inertia_rel": 0.00002,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    }
+  ]
+}

@@ -380,7 +380,8 @@ fn mesh_shell_and_face(
     let compressed = table
         .to_compressed_shell(step_shell)
         .map_err(|e| anyhow::anyhow!("convert shell #{shell_id}: {e}"))?;
-    let body_obj = shell_to_obj(&compressed, tolerance)?;
+    let meshed = compressed.robust_triangulation(tolerance);
+    let body_obj = polygon_to_obj(&meshed.to_polygon())?;
 
     let Some(face_id) = face_id else {
         return Ok((body_obj, None));
@@ -389,11 +390,11 @@ fn mesh_shell_and_face(
         .shell_faces
         .get(&shell_id)
         .with_context(|| format!("missing source face list for shell #{shell_id}"))?;
-    if compressed.faces.len() != source_faces.len() {
+    if meshed.faces.len() != source_faces.len() {
         bail!(
             "cannot reliably map face IDs in shell #{shell_id}: STEP has {} faces, Truck converted {}",
             source_faces.len(),
-            compressed.faces.len()
+            meshed.faces.len()
         );
     }
     let face_index = source_faces
@@ -401,19 +402,21 @@ fn mesh_shell_and_face(
         .position(|&id| id == face_id)
         .with_context(|| format!("face #{face_id} not in shell #{shell_id}"))?;
 
-    let one_face = TruckShell {
-        vertices: compressed.vertices.clone(),
-        edges: compressed.edges.clone(),
-        faces: vec![compressed.faces[face_index].clone()],
+    // Tessellate in full-shell context first: constrained face meshing can depend on
+    // shared edge polylines. Isolating the CompressedFace before tessellation caused
+    // valid trimmed faces to produce no polygon at all.
+    let one_face = truck_topology::compress::CompressedShell {
+        vertices: meshed.vertices.clone(),
+        edges: meshed.edges.clone(),
+        faces: vec![meshed.faces[face_index].clone()],
     };
-    let face_obj = shell_to_obj(&one_face, tolerance)?;
+    let face_obj = polygon_to_obj(&one_face.to_polygon())?;
     Ok((body_obj, Some(face_obj)))
 }
 
-fn shell_to_obj(shell: &TruckShell, tolerance: f64) -> Result<String> {
-    let polygon = shell.triangulation(tolerance).to_polygon();
+fn polygon_to_obj(polygon: &truck_polymesh::PolygonMesh) -> Result<String> {
     let mut bytes = Vec::new();
-    truck_polymesh::obj::write(&polygon, &mut bytes)?;
+    truck_polymesh::obj::write(polygon, &mut bytes)?;
     Ok(String::from_utf8(bytes)?)
 }
 

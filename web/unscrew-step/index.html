@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Unscrew your STEP</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="eyebrow">STEP semantic recovery</div>
+      <h1>Unscrew your STEP</h1>
+      <p class="lede">
+        Recover the CAD hiding inside exporter sludge. Everything runs locally in your browser.
+      </p>
+    </header>
+
+    <section id="drop" class="drop" tabindex="0">
+      <input id="file" type="file" accept=".step,.stp,model/step">
+      <div>
+        <strong>Drop a STEP file here</strong>
+        <span>or choose one from disk</span>
+      </div>
+      <small id="fileMeta">No file selected</small>
+    </section>
+
+    <section class="controls">
+      <fieldset>
+        <legend>Output</legend>
+        <label>
+          <input type="radio" name="profile" value="compat" checked>
+          <span><strong>Compatible</strong><small>Conservative advanced B-rep; avoid clever factoring.</small></span>
+        </label>
+        <label>
+          <input type="radio" name="profile" value="compact">
+          <span><strong>Compact</strong><small>Use instances, replicas and recovered repetition where profitable.</small></span>
+        </label>
+      </fieldset>
+      <button id="run" disabled>Unscrew it</button>
+    </section>
+
+    <section id="status" class="status" hidden></section>
+
+    <section id="result" hidden>
+      <div class="metrics">
+        <article><span>Input</span><strong id="inputBytes">—</strong></article>
+        <article><span>Output</span><strong id="outputBytes">—</strong></article>
+        <article><span>Remaining</span><strong id="ratio">—</strong></article>
+        <article><span>Entities</span><strong id="entities">—</strong></article>
+      </div>
+
+      <section class="panel">
+        <div class="panelHead">
+          <div>
+            <h2>Recovered structure</h2>
+            <p id="recoverySummary">—</p>
+          </div>
+          <button id="download">Download STEP</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Compatibility audit</h2>
+        <div id="compatibility" class="compatibility"></div>
+      </section>
+
+      <section id="patternsPanel" class="panel" hidden>
+        <h2>Editable regular patterns</h2>
+        <p>
+          Controls appear only for patterns proven to be exact contiguous lattices.
+          Editing a pattern does not automatically resize unrelated surrounding bodies.
+        </p>
+        <div id="patterns"></div>
+      </section>
+
+      <details class="panel">
+        <summary>Full machine report</summary>
+        <pre id="report"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

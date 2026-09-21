@@ -3,8 +3,56 @@
 step-redox rewrites ISO 10303-21 STEP files into smaller, semantically equivalent
 Part 21 files.
 
-The current default pipeline is deliberately conservative. It does not merge
-topological identity objects (vertices, edges, loops, faces, shells, or solids).
+The project now has three output policies:
+
+- `--profile manual`: only explicitly selected transformations
+- `--profile compat`: broadly compatible plain-BREP cleanup
+- `--profile compact`: proven semantic recovery, instancing, and aggressive compact output
+
+The current semantic layer also recovers regular instance patterns, coupled count
+parameters, and periodic body grammars. On a validated 2.00 mm dual-row header,
+step-redox independently recovers two contact rows plus a 24-face-per-site housing
+grammar. Expanding the recovered 24-site model to 36 sites reproduces an
+independently exported 72-contact sibling with the same solid/face/edge/vertex
+counts, bounding-box dimensions, and volume to floating-point noise. The direct
+graph rewrite produces a valid closed B-rep without booleans or tessellation.
+
+A browser/WASM prototype lives under `web/`, including an experimental
+"Unscrew your STEP" front end. The Rust library exposes detected patterns,
+periodic bodies, and higher-level recovered count parameters; positive-end
+periodic-body expansion is implemented in `periodic_resize.rs`.
+
+## Validation and CI
+
+The regression harness under `validation/` downloads public upstream CAD fixtures
+by URL, verifies SHA-256, runs step-redox, and validates results independently with
+OpenCascade. Fixtures are cached in CI and are not redistributed in this repo.
+
+Checks include:
+
+- B-rep validity
+- solid/shell/face/edge/vertex counts
+- bounding-box center and dimensions
+- volume, surface area, total edge length
+- center of mass and inertia tensor
+- software-rendered ±X/±Y/±Z and isometric views with image/silhouette diffs
+
+The initial CI corpus includes public JLC/EasyEDA models and first-party TE
+Connectivity STEP models. GitHub Actions uploads the numerical report and render
+contact sheets for inspection.
+
+Run locally with:
+
+    cargo build --release --bin step-redox
+    python -m pip install -r validation/requirements.txt
+    python validation/harness.py run \
+      --manifest validation/fixtures.json \
+      --cache .cache/step-redox-validation \
+      --out validation/out \
+      --step-redox target/release/step-redox
+
+The current default/manual pipeline is deliberately conservative unless a profile
+or experimental pass is selected.
 
 ## Safe/default passes
 

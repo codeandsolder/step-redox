@@ -1,0 +1,9 @@
+[package]
+name = "step-redox-occt-wasm-validator"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+occt-wasm = "=3.3.2"
+sha2 = "0.10"

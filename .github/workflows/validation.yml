@@ -1,0 +1,59 @@
+name: STEP validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: validation/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install validation dependencies
+        run: python -m pip install -r validation/requirements.txt
+
+      - name: Build step-redox
+        run: cargo build --release --bin step-redox
+
+      - name: Cache upstream STEP fixtures
+        uses: actions/cache@v4
+        with:
+          path: .cache/step-redox-validation
+          key: step-fixtures-${{ hashFiles('validation/fixtures.json') }}
+
+      - name: Validate geometry and renders
+        run: |
+          python validation/harness.py run \
+            --manifest validation/fixtures.json \
+            --cache .cache/step-redox-validation \
+            --out validation/out \
+            --step-redox target/release/step-redox
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f validation/out/summary.md ]; then
+            cat validation/out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step-validation
+          path: validation/out
+          if-no-files-found: warn
