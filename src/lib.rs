@@ -224,16 +224,105 @@ pub fn detect_periodic_chains_bytes(
         .collect())
 }
 
-/// Resize one proven periodic fused-solid chain at its positive-axis end.
-///
-/// The editor supports guarded growth and shrink. It re-runs the chain detector
-/// after editing and refuses to serialize a result unless the requested site
-/// count is rediscovered with the same pitch and complete manifold grammar.
+/// Resize one proven periodic fused-solid chain while keeping its start fixed.
 pub fn resize_periodic_chain_bytes(
     input: &[u8],
     chain_index: usize,
     new_sites: usize,
 ) -> Result<PeriodicChainEditOutput> {
+    resize_periodic_chain_bytes_with_anchor(
+        input,
+        chain_index,
+        new_sites,
+        CountAnchor::Start,
+    )
+}
+
+/// Resize one proven periodic fused-solid chain with explicit placement anchoring.
+///
+/// Start and End keep the corresponding physical end fixed. Center composes
+/// equal edits at both ends and therefore currently requires an even site delta.
+pub fn resize_periodic_chain_bytes_with_anchor(
+    input: &[u8],
+    chain_index: usize,
+    new_sites: usize,
+    anchor: CountAnchor,
+) -> Result<PeriodicChainEditOutput> {
+    if anchor != CountAnchor::Center {
+        return resize_periodic_chain_bytes_one_side(input, chain_index, new_sites, anchor);
+    }
+
+    let chains = detect_periodic_chains_bytes(input)?;
+    let original = chains
+        .get(chain_index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("periodic chain index {chain_index} not found"))?;
+    if !original.read_only_proven || !original.complete_partition {
+        bail!("periodic chain {chain_index} is not sufficiently proven for editing");
+    }
+    if new_sites == original.sites {
+        bail!("periodic-chain resize requested the existing site count {new_sites}");
+    }
+    if new_sites < 6 {
+        bail!("center-anchored periodic-chain editing currently requires at least 6 sites");
+    }
+
+    let delta = new_sites.abs_diff(original.sites);
+    if delta % 2 != 0 {
+        bail!(
+            "center-anchored periodic-chain resize currently requires an even site delta ({} -> {})",
+            original.sites,
+            new_sites
+        );
+    }
+    let half = delta / 2;
+    let mid_sites = if new_sites > original.sites {
+        original.sites + half
+    } else {
+        original.sites - half
+    };
+
+    let first = resize_periodic_chain_bytes_one_side(
+        input,
+        chain_index,
+        mid_sites,
+        CountAnchor::Start,
+    )?;
+    let followup_index =
+        find_matching_periodic_chain(&first.periodic_chains, mid_sites, &original)?;
+    let mut second = resize_periodic_chain_bytes_one_side(
+        &first.bytes,
+        followup_index,
+        new_sites,
+        CountAnchor::End,
+    )?;
+
+    let mut combined = second.resize.clone();
+    combined.old_sites = original.sites;
+    combined.new_sites = new_sites;
+    combined.inserted_units = first.resize.inserted_units + second.resize.inserted_units;
+    combined.removed_units = first.resize.removed_units + second.resize.removed_units;
+    combined.seam_edge_pairs = first.resize.seam_edge_pairs + second.resize.seam_edge_pairs;
+    combined.welded_vertices = first.resize.welded_vertices + second.resize.welded_vertices;
+    combined.welded_edges = first.resize.welded_edges + second.resize.welded_edges;
+    combined.rebuilt_stretch_faces =
+        first.resize.rebuilt_stretch_faces + second.resize.rebuilt_stretch_faces;
+    combined.new_stretch_edges =
+        first.resize.new_stretch_edges + second.resize.new_stretch_edges;
+    combined.added_entities = first.resize.added_entities + second.resize.added_entities;
+    combined.pruned_entities = first.resize.pruned_entities + second.resize.pruned_entities;
+    combined.entity_delta = first.resize.entity_delta + second.resize.entity_delta;
+    second.resize = combined;
+    Ok(second)
+}
+
+fn resize_periodic_chain_bytes_one_side(
+    input: &[u8],
+    chain_index: usize,
+    new_sites: usize,
+    anchor: CountAnchor,
+) -> Result<PeriodicChainEditOutput> {
+    debug_assert!(anchor != CountAnchor::Center);
     let (input_text, _) = decode_input(input)?;
     let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
@@ -264,11 +353,25 @@ pub fn resize_periodic_chain_bytes(
         bail!("periodic-chain resize requested the existing site count {new_sites}");
     }
 
-    let source_entity_count = section.entities.len();
-    let mut resize = if new_sites > chain.sites {
-        periodic_resize::expand_periodic_chain_positive(&mut section.entities, &chain, new_sites)?
+    let directed = if anchor == CountAnchor::End {
+        reverse_periodic_chain(&chain)
     } else {
-        periodic_resize::shrink_periodic_chain_positive(&mut section.entities, &chain, new_sites)?
+        chain.clone()
+    };
+
+    let source_entity_count = section.entities.len();
+    let mut resize = if new_sites > directed.sites {
+        periodic_resize::expand_periodic_chain_positive(
+            &mut section.entities,
+            &directed,
+            new_sites,
+        )?
+    } else {
+        periodic_resize::shrink_periodic_chain_positive(
+            &mut section.entities,
+            &directed,
+            new_sites,
+        )?
     };
 
     // Compact normalization has already interned the source support geometry,
@@ -603,6 +706,61 @@ fn resize_count_parameter_bytes_one_side(
         count_parameters,
         compatibility,
     })
+}
+
+fn find_matching_periodic_chain(
+    chains: &[periodic_chains::PeriodicChainPattern],
+    sites: usize,
+    original: &periodic_chains::PeriodicChainPattern,
+) -> Result<usize> {
+    let matches = chains
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (candidate.read_only_proven
+                && candidate.complete_partition
+                && candidate.sites == sites
+                && (candidate.pitch_mm - original.pitch_mm).abs() <= 1.0e-7
+                && candidate.interior_site_face_count == original.interior_site_face_count
+                && candidate.interior_gap_face_count == original.interior_gap_face_count
+                && candidate.stretch_face_ids.len() == original.stretch_face_ids.len()
+                && candidate.fixed_negative_face_ids.len()
+                    == original.fixed_negative_face_ids.len()
+                && candidate.fixed_middle_face_ids.len() == original.fixed_middle_face_ids.len()
+                && candidate.fixed_positive_face_ids.len()
+                    == original.fixed_positive_face_ids.len())
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => bail!("could not rediscover the intermediate {sites}-site periodic chain"),
+        _ => bail!("multiple matching intermediate {sites}-site periodic chains: {matches:?}"),
+    }
+}
+
+fn reverse_periodic_chain(
+    chain: &periodic_chains::PeriodicChainPattern,
+) -> periodic_chains::PeriodicChainPattern {
+    let mut reversed = chain.clone();
+    reversed.axis = [-chain.axis[0], -chain.axis[1], -chain.axis[2]];
+    reversed.site_centers_mm = chain
+        .site_centers_mm
+        .iter()
+        .rev()
+        .map(|center| -*center)
+        .collect();
+    reversed.site_face_counts.reverse();
+    reversed.gap_face_counts.reverse();
+    reversed.site_face_ids.reverse();
+    reversed.gap_face_ids.reverse();
+    reversed.site_adjacency_signatures.reverse();
+    reversed.gap_adjacency_signatures.reverse();
+    std::mem::swap(
+        &mut reversed.fixed_negative_face_ids,
+        &mut reversed.fixed_positive_face_ids,
+    );
+    reversed
 }
 
 fn reverse_periodic_body(

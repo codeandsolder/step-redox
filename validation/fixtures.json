@@ -530,6 +530,72 @@
       }
     },
     {
+      "name": "generate_te_14_to_18_periodic_chain_center",
+      "input_fixture": "te_3_353293_4",
+      "reference_fixture": "te_3_353293_8",
+      "command": [
+        "{step_chain_resize}",
+        "{input}",
+        "{output}",
+        "--sites",
+        "18",
+        "--anchor",
+        "center"
+      ],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 2e-05,
+        "area_rel": 1e-08,
+        "edge_length_rel": 1e-08,
+        "solid_volume_sum_rel": 1e-07,
+        "solid_area_sum_rel": 1e-08,
+        "bbox_extent_abs_mm": 1e-06,
+        "com_abs_mm": 0.00025,
+        "solid_topology_exact": true,
+        "solid_center_abs_mm": 1e-06,
+        "solid_bbox_extent_abs_mm": 1e-06,
+        "solid_volume_rel": 2e-05,
+        "solid_area_rel": 1e-08,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
+      "name": "generate_te_18_to_14_periodic_chain_center",
+      "input_fixture": "te_3_353293_8",
+      "reference_fixture": "te_3_353293_4",
+      "command": [
+        "{step_chain_resize}",
+        "{input}",
+        "{output}",
+        "--sites",
+        "14",
+        "--anchor",
+        "center"
+      ],
+      "alignment": "identity",
+      "thresholds": {
+        "topology_exact": true,
+        "volume_rel": 2e-05,
+        "area_rel": 1e-08,
+        "edge_length_rel": 1e-08,
+        "solid_volume_sum_rel": 1e-07,
+        "solid_area_sum_rel": 1e-08,
+        "bbox_extent_abs_mm": 1e-06,
+        "com_abs_mm": 0.00025,
+        "solid_topology_exact": true,
+        "solid_center_abs_mm": 1e-06,
+        "solid_bbox_extent_abs_mm": 1e-06,
+        "solid_volume_rel": 2e-05,
+        "solid_area_rel": 1e-08,
+        "render_mean_abs": 0.004,
+        "render_changed_fraction": 0.015,
+        "silhouette_xor": 0.0015
+      }
+    },
+    {
       "name": "compact_te_2513069_1_heavy",
       "enabled": false,
       "input_fixture": "te_2513069_1_heavy",

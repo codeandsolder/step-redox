@@ -38,20 +38,24 @@ A periodic-chain analyzer recovers repeated structure inside fused solids even
 when no editable `MAPPED_ITEM` row exists. On three independent first-party TE
 Connectivity siblings it proves the same 1.500 mm family grammar: 14/15/18 sites,
 70 interior site faces + 3 gap faces per added position, six stretch faces, and
-symmetric 33-face end regions. The guarded editor now resizes this proven
-family in both directions at the positive end without booleans or tessellation.
-Growth clones the generic 73-face unit; shrink removes whole units. Both translate
-the proven positive tail, weld seam topology, rebuild the six spanning face loops,
+symmetric 33-face end regions. The guarded editor resizes this proven
+family in both directions without booleans or tessellation, with explicit
+`start`, `end`, and `center` placement anchors. Growth clones the generic
+73-face unit; shrink removes whole units. One-sided edits translate the proven
+two-site/end-cap tail, weld seam topology, rebuild the six spanning face loops,
 garbage-collect only replaced/detached closures, and then require the same semantic
-grammar to be rediscovered.
+grammar to be rediscovered. End anchoring reuses exactly the same operation on a
+reversed semantic chain grammar; center anchoring composes equal edits at both ends.
 
-Five generated-family regressions are checked against independently published TE
-siblings: 14→15, 14→18, 15→14, 18→15, and 18→14. All preserve exact
-solid/shell/face/edge/vertex counts, match dimensions and mass properties to
+Five start-anchored generated-family regressions are checked against independently
+published TE siblings: 14→15, 14→18, 15→14, 18→15, and 18→14. All preserve
+exact solid/shell/face/edge/vertex counts, match dimensions and mass properties to
 numerical noise after placement alignment, and pass eight software-rendered view
-comparisons. Representative compact outputs are 944,851 B for 14→15, 1,124,856 B
-for 14→18, and 885,518 B for 15→14, all within a few kilobytes of the corresponding
-independent sibling exports.
+comparisons. Centered 14→18 and 18→14 additionally pass against the independent
+siblings with **identity alignment**: no compensating translation is permitted.
+Representative compact outputs are 944,851 B for start-anchored 14→15, 1,124,856 B
+for start-anchored 14→18, 885,518 B for start-anchored 15→14, 1,123,512 B for
+centered 14→18, and 889,463 B for centered 18→14.
 
 A browser/WASM prototype lives under `web/`, including an experimental
 "Unscrew your STEP" front end. The Rust library exposes detected patterns,

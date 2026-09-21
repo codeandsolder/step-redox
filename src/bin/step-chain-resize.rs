@@ -1,6 +1,23 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AnchorArg {
+    Start,
+    Center,
+    End,
+}
+
+impl From<AnchorArg> for step_redox::CountAnchor {
+    fn from(value: AnchorArg) -> Self {
+        match value {
+            AnchorArg::Start => step_redox::CountAnchor::Start,
+            AnchorArg::Center => step_redox::CountAnchor::Center,
+            AnchorArg::End => step_redox::CountAnchor::End,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -16,6 +33,9 @@ struct Cli {
 
     #[arg(long)]
     sites: usize,
+
+    #[arg(long, value_enum, default_value_t = AnchorArg::Start)]
+    anchor: AnchorArg,
 
     #[arg(
         long,
@@ -42,7 +62,12 @@ fn main() -> Result<()> {
         .bytes
     };
 
-    let edited = step_redox::resize_periodic_chain_bytes(&semantic, cli.chain, cli.sites)?;
+    let edited = step_redox::resize_periodic_chain_bytes_with_anchor(
+        &semantic,
+        cli.chain,
+        cli.sites,
+        cli.anchor.into(),
+    )?;
 
     std::fs::write(&cli.output, &edited.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;
