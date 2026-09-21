@@ -208,12 +208,8 @@ pub fn detect_formed_sheet_evidence_bytes(
     input: &[u8],
 ) -> Result<Vec<formed_sheet::FormedSheetEvidence>> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
-    let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+    let exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -236,12 +232,8 @@ pub fn detect_solid_extrusions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
-    let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+    let exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -266,12 +258,8 @@ pub fn detect_periodic_chains_bytes(
     input: &[u8],
 ) -> Result<Vec<periodic_chains::PeriodicChainPattern>> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
-    let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+    let exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -386,12 +374,8 @@ fn resize_periodic_chain_bytes_one_side(
 ) -> Result<PeriodicChainEditOutput> {
     debug_assert!(anchor != CountAnchor::Center);
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -626,12 +610,8 @@ fn resize_count_parameter_bytes_one_side(
 ) -> Result<CountEditOutput> {
     debug_assert!(anchor != CountAnchor::Center);
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -838,12 +818,8 @@ fn reverse_periodic_body(
 
 fn detect_count_parameters_bytes(input: &[u8]) -> Result<Vec<parameters::RecoveredCountParameter>> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
-    let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+    let exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }
@@ -901,12 +877,8 @@ pub fn expand_periodic_body_bytes(
     new_sites: usize,
 ) -> Result<PeriodicBodyEditOutput> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -953,12 +925,8 @@ pub fn resize_linear_pattern_bytes(
     anchor: patterns::PatternAnchor,
 ) -> Result<PatternEditOutput> {
     let (input_text, _) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -1086,12 +1054,8 @@ fn audit_exchange_compatibility(exchange: &Exchange) -> compatibility::Compatibi
 
 pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let (input_text, input_encoding) = decode_input(input)?;
-    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
-        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
-    if had_empty_aggregate_shim {
-        restore_empty_aggregates(&mut exchange)?;
-    }
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
 
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
@@ -2033,154 +1997,6 @@ fn write_param(param: &Parameter, out: &mut String) {
     }
 }
 
-const EMPTY_AGGREGATE_MARKER: &str = "STEPREDOXEMPTYAGGREGATE";
-
-fn prepare_parser_input(input: &str) -> Result<(std::borrow::Cow<'_, str>, bool)> {
-    // ruststep 0.4 documents aggregate contents as optional, but its
-    // comma_separated() parser currently requires at least one parameter. A
-    // few valid AP214 exporters emit empty aggregates such as
-    // SHAPE_REPRESENTATION('',(),#ctx). Encode those with an impossible
-    // enumeration sentinel for parsing, then restore them in the AST.
-    let Some(data_start) = input.find("DATA;") else {
-        return Ok((std::borrow::Cow::Borrowed(input), false));
-    };
-    let scan_start = data_start + "DATA;".len();
-    let suffix = &input[scan_start..];
-    if !suffix.as_bytes().windows(2).any(|w| w == b"()")
-        && !suffix.contains("( ")
-        && !suffix.contains("(\t")
-        && !suffix.contains("(\r")
-        && !suffix.contains("(\n")
-    {
-        return Ok((std::borrow::Cow::Borrowed(input), false));
-    }
-    let marker = format!(".{EMPTY_AGGREGATE_MARKER}.");
-    if input.contains(&marker) {
-        bail!("STEP input collides with step-redox empty-aggregate parser marker");
-    }
-
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len() + 64);
-    out.push_str(&input[..scan_start]);
-
-    let mut i = scan_start;
-    let mut last = scan_start;
-    let mut in_string = false;
-    let mut in_comment = false;
-    let mut replaced = false;
-
-    while i < bytes.len() {
-        if in_comment {
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                in_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if in_string {
-            if bytes[i] == b'\'' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                } else {
-                    in_string = false;
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'\'' {
-            in_string = true;
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'(' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b')' {
-                out.push_str(&input[last..i]);
-                out.push('(');
-                out.push_str(&marker);
-                out.push(')');
-                i = j + 1;
-                last = i;
-                replaced = true;
-                continue;
-            }
-        }
-        i += 1;
-    }
-
-    if !replaced {
-        return Ok((std::borrow::Cow::Borrowed(input), false));
-    }
-    out.push_str(&input[last..]);
-    Ok((std::borrow::Cow::Owned(out), true))
-}
-
-fn restore_empty_aggregates(exchange: &mut Exchange) -> Result<()> {
-    for section in &mut exchange.data {
-        for entity in &mut section.entities {
-            match entity {
-                EntityInstance::Simple { record, .. } => {
-                    restore_empty_aggregate_param(&mut record.parameter)?;
-                }
-                EntityInstance::Complex { subsuper, .. } => {
-                    for record in &mut subsuper.0 {
-                        restore_empty_aggregate_param(&mut record.parameter)?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn restore_empty_aggregate_param(parameter: &mut Parameter) -> Result<()> {
-    match parameter {
-        Parameter::List(items) => {
-            if items.len() == 1
-                && matches!(
-                    &items[0],
-                    Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER
-                )
-            {
-                items.clear();
-                return Ok(());
-            }
-            for item in items {
-                restore_empty_aggregate_param(item)?;
-            }
-        }
-        Parameter::Typed { parameter, .. } => {
-            if matches!(
-                parameter.as_ref(),
-                Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER
-            ) {
-                bail!("unsupported empty typed-parameter aggregate in STEP input");
-            }
-            restore_empty_aggregate_param(parameter)?;
-        }
-        Parameter::Enumeration(value) if value == EMPTY_AGGREGATE_MARKER => {
-            bail!("empty-aggregate parser marker escaped its aggregate");
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static str)> {
     if let Ok(s) = std::str::from_utf8(input) {
         return Ok((std::borrow::Cow::Borrowed(s), "utf-8"));
@@ -2215,7 +2031,7 @@ fn write_step_string(s: &str, out: &mut String) {
             out.push(ch);
         } else {
             // Encode apostrophes too; this stays valid Part 21 and avoids
-            // depending on ruststep's incomplete doubled-apostrophe parser.
+            // depending on every downstream reader handling doubled-apostrophe escaping correctly.
             non_ascii.push(ch);
         }
     }
@@ -2306,19 +2122,18 @@ mod tests {
     }
 
     #[test]
-    fn legal_empty_aggregates_roundtrip_through_ruststep_compatibility_shim() {
+    fn legal_empty_aggregates_roundtrip_without_parser_rewrite() {
         let src = wrap("#8=SHAPE_REPRESENTATION('',(),#6);\n#6=CARTESIAN_POINT('',(0.0,0.0,0.0));");
         let once = clean_bytes(&src, &Options::default()).unwrap();
         let text = std::str::from_utf8(&once.bytes).unwrap();
         assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
-        assert!(!text.contains(EMPTY_AGGREGATE_MARKER));
 
         let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
         assert_eq!(once.bytes, twice.bytes);
     }
 
     #[test]
-    fn empty_aggregate_shim_ignores_parentheses_inside_strings_and_comments() {
+    fn empty_aggregates_do_not_confuse_strings_and_comments() {
         let src = wrap(
             "#1=CARTESIAN_POINT('literal ()', (0.0,0.0,0.0));\n/* () */\n#2=SHAPE_REPRESENTATION('',( ),#1);",
         );
@@ -2326,7 +2141,14 @@ mod tests {
         let text = std::str::from_utf8(&out.bytes).unwrap();
         assert!(text.contains("literal ()"));
         assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
-        assert!(!text.contains(EMPTY_AGGREGATE_MARKER));
+    }
+
+    #[test]
+    fn doubled_apostrophe_step_strings_parse_directly() {
+        let src = wrap("#1=CARTESIAN_POINT('M3'' thread',(0.0,0.0,0.0));");
+        ruststep::parser::parse(std::str::from_utf8(&src).unwrap()).unwrap();
+        let out = clean_bytes(&src, &Options::default()).unwrap();
+        assert_eq!(out.stats.input_entities, 1);
     }
 
     #[test]
