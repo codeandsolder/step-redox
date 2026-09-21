@@ -11,6 +11,14 @@
         "instances_per_pattern": 24,
         "step_mm": [2.0, 0.0, 0.0],
         "max_residual_mm": 1.0e-7
+      },
+      "formed_sheet_expectation": {
+        "candidates": 2,
+        "thickness_mm": 0.2,
+        "cylindrical_faces": 20,
+        "paired_cylindrical_faces": 16,
+        "coaxial_radius_pairs": 8,
+        "parallel_plane_pairs": 9
       }
     },
     "jlc_header_2x36_2mm": {
@@ -23,6 +31,14 @@
         "instances_per_pattern": 36,
         "step_mm": [2.0, 0.0, 0.0],
         "max_residual_mm": 1.0e-7
+      },
+      "formed_sheet_expectation": {
+        "candidates": 2,
+        "thickness_mm": 0.2,
+        "cylindrical_faces": 20,
+        "paired_cylindrical_faces": 16,
+        "coaxial_radius_pairs": 8,
+        "parallel_plane_pairs": 9
       }
     },
     "te_3_353293_4": {

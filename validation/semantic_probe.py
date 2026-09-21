@@ -22,6 +22,7 @@ def run_probe(step_redox: Path, input_path: Path, prefix: Path):
         str(prefix.with_suffix(".compact.step")),
         "--patterns-json", str(prefix.with_suffix(".patterns.json")),
         "--cad-fragments-json", str(prefix.with_suffix(".cad-fragments.json")),
+        "--formed-sheet-json", str(prefix.with_suffix(".formed-sheet.json")),
         "--periodic-bodies-json", str(prefix.with_suffix(".bodies.json")),
         "--count-parameters-json", str(prefix.with_suffix(".counts.json")),
         "--periodic-chains-json", str(prefix.with_suffix(".chains.json")),
@@ -114,6 +115,43 @@ def validate_cad_fragments(name: str, fragments: list[dict], expected: dict) -> 
     }
 
 
+def validate_formed_sheet(name: str, candidates: list[dict], expected: dict) -> dict:
+    if len(candidates) != expected["candidates"]:
+        raise AssertionError(
+            f"{name}: expected {expected['candidates']} formed-sheet candidates, got {len(candidates)}"
+        )
+
+    observed = []
+    for index, candidate in enumerate(candidates):
+        checks = {
+            "thickness_mm": close(candidate["thickness_mm"], expected["thickness_mm"], 1e-9),
+            "cylindrical_faces": candidate["cylindrical_faces"] == expected["cylindrical_faces"],
+            "paired_cylindrical_faces": candidate["paired_cylindrical_faces"] == expected["paired_cylindrical_faces"],
+            "coaxial_radius_pairs": candidate["coaxial_radius_pairs"] == expected["coaxial_radius_pairs"],
+            "parallel_plane_pairs": candidate["parallel_plane_pairs"] == expected["parallel_plane_pairs"],
+        }
+        failed = [key for key, ok in checks.items() if not ok]
+        if failed:
+            raise AssertionError(
+                f"{name}: formed-sheet candidate {index} failed {failed}; observed={candidate}"
+            )
+        expected_ratio = expected["paired_cylindrical_faces"] / expected["cylindrical_faces"]
+        if not close(candidate["paired_cylinder_face_ratio"], expected_ratio, 1e-12):
+            raise AssertionError(
+                f"{name}: formed-sheet candidate {index} paired ratio "
+                f"{candidate['paired_cylinder_face_ratio']} != {expected_ratio}"
+            )
+        observed.append({
+            "solid_id": candidate["solid_id"],
+            "thickness_mm": candidate["thickness_mm"],
+            "paired_cylinder_face_ratio": candidate["paired_cylinder_face_ratio"],
+            "coaxial_radius_pairs": candidate["coaxial_radius_pairs"],
+            "parallel_plane_pairs": candidate["parallel_plane_pairs"],
+        })
+
+    return {"fixture": name, "candidates": observed}
+
+
 def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
     candidates = [
         chain for chain in chains
@@ -176,12 +214,14 @@ def main():
     manifest = json.loads(args.manifest.read_text())
     chain_results = []
     cad_results = []
+    sheet_results = []
     args.out.mkdir(parents=True, exist_ok=True)
 
     for name, spec in manifest["fixtures"].items():
         chain_expected = spec.get("periodic_chain_expectation")
         cad_expected = spec.get("cad_fragment_expectation")
-        if not chain_expected and not cad_expected:
+        sheet_expected = spec.get("formed_sheet_expectation")
+        if not chain_expected and not cad_expected and not sheet_expected:
             continue
         input_path = fixture_path(args.cache, spec)
         if not input_path.exists():
@@ -214,7 +254,19 @@ def main():
                 f"residual<={max(p['max_residual_mm'] for p in result['patterns']):.3g} mm"
             )
 
-    if not chain_results and not cad_results:
+        if sheet_expected:
+            candidates = json.loads(prefix.with_suffix(".formed-sheet.json").read_text())
+            result = validate_formed_sheet(name, candidates, sheet_expected)
+            sheet_results.append(result)
+            first = result["candidates"][0]
+            print(
+                f"{name}: {len(result['candidates'])} formed-sheet candidates "
+                f"t={first['thickness_mm']} mm, "
+                f"paired={first['paired_cylinder_face_ratio']:.1%}, "
+                f"bend_pairs={first['coaxial_radius_pairs']}"
+            )
+
+    if not chain_results and not cad_results and not sheet_results:
         raise RuntimeError("manifest contains no semantic expectations")
 
     if chain_results:
@@ -234,6 +286,11 @@ def main():
     if cad_results:
         (args.out / "cad-fragment-summary.json").write_text(
             json.dumps(cad_results, indent=2) + "\n"
+        )
+
+    if sheet_results:
+        (args.out / "formed-sheet-summary.json").write_text(
+            json.dumps(sheet_results, indent=2) + "\n"
         )
 
 

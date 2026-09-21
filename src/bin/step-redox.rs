@@ -123,6 +123,13 @@ struct Cli {
     )]
     cad_fragments_json: Option<PathBuf>,
 
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write formed-sheet geometric evidence as JSON"
+    )]
+    formed_sheet_json: Option<PathBuf>,
+
     #[arg(long, value_name = "PATH", help = "Write detected periodic body grammars as JSON")]
     periodic_bodies_json: Option<PathBuf>,
 
@@ -189,6 +196,12 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&fragments)?;
         std::fs::write(path, data)
             .with_context(|| format!("write CAD fragment report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.formed_sheet_json {
+        let evidence = step_redox::detect_formed_sheet_evidence_bytes(&cleaned.bytes)?;
+        let data = serde_json::to_vec_pretty(&evidence)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write formed-sheet report {}", path.display()))?;
     }
     if let Some(path) = &cli.periodic_bodies_json {
         let data = serde_json::to_vec_pretty(&cleaned.periodic_bodies)?;

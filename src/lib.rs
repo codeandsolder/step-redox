@@ -9,6 +9,7 @@ mod brep;
 pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
+pub mod formed_sheet;
 pub mod compatibility;
 mod curve_replicas;
 mod face_coalesce;
@@ -195,6 +196,35 @@ pub struct PeriodicChainEditOutput {
     pub resize: periodic_resize::PeriodicChainResizeStats,
     pub periodic_chains: Vec<periodic_chains::PeriodicChainPattern>,
     pub compatibility: compatibility::CompatibilityAudit,
+}
+
+/// Detect read-only formed-sheet geometric evidence in a STEP exchange.
+///
+/// This is evidence only: it reports repeated constant-thickness signatures such as
+/// coaxial cylinder radius pairs and parallel-plane offsets. It does not claim that
+/// a complete editable sheet-metal construction has been recovered.
+pub fn detect_formed_sheet_evidence_bytes(
+    input: &[u8],
+) -> Result<Vec<formed_sheet::FormedSheetEvidence>> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| formed_sheet::detect_formed_sheet_evidence(&section.entities))
+        .collect())
 }
 
 /// Detect read-only periodic chain grammars without enabling mutation.
