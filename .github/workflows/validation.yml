@@ -47,6 +47,39 @@ jobs:
             --step-redox target/release/step-redox \
             --step-count-resize target/release/step-count-resize
 
+
+      - name: Probe TE semantic count recovery
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p validation/out/semantic-probes
+          for part in te-3-353293-4 te-3-353293-5 te-3-353293-8; do
+            input=".cache/step-redox-validation/${part}.step"
+            prefix="validation/out/semantic-probes/${part}"
+            target/release/step-redox --profile compact               "$input" "${prefix}.compact.step"               --patterns-json "${prefix}.patterns.json"               --periodic-bodies-json "${prefix}.bodies.json"               --count-parameters-json "${prefix}.counts.json"               --json 2> "${prefix}.stats.json"
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("validation/out/semantic-probes")
+          print("TE semantic recovery summary")
+          for stats_path in sorted(root.glob("*.stats.json")):
+              stem = stats_path.name.removesuffix(".stats.json")
+              patterns = json.loads((root / f"{stem}.patterns.json").read_text())
+              bodies = json.loads((root / f"{stem}.bodies.json").read_text())
+              counts = json.loads((root / f"{stem}.counts.json").read_text())
+              print(
+                  stem,
+                  "patterns=", len(patterns),
+                  "pattern_sizes=", [len(x["item_ids"]) for x in patterns],
+                  "bodies=", len(bodies),
+                  "body_sites=", [x["sites"] for x in bodies],
+                  "counts=", len(counts),
+                  "count_sites=", [x["sites"] for x in counts],
+                  "proven=", [x["body_grammar_proven"] for x in counts],
+              )
+          PY
+
       - name: Publish summary
         if: always()
         run: |

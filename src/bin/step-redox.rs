@@ -118,6 +118,9 @@ struct Cli {
 
     #[arg(long, value_name = "PATH", help = "Write detected periodic body grammars as JSON")]
     periodic_bodies_json: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH", help = "Write recovered semantic count parameters as JSON")]
+    count_parameters_json: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -170,6 +173,11 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&cleaned.periodic_bodies)?;
         std::fs::write(path, data)
             .with_context(|| format!("write periodic body report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.count_parameters_json {
+        let data = serde_json::to_vec_pretty(&cleaned.count_parameters)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write count parameter report {}", path.display()))?;
     }
 
     if cli.json {
