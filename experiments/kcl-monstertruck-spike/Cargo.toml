@@ -1,0 +1,14 @@
+[package]
+name = "kcl-monstertruck-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+kcl-conformance = ["dep:kcl-lib"]
+
+[dependencies]
+anyhow = "1"
+step-redox = { path = "../..", features = ["cad-kernel-monstertruck"] }
+kcl-lib = { version = "=0.2.185", default-features = false, optional = true }
