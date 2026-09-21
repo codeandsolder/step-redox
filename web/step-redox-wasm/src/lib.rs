@@ -100,7 +100,7 @@ pub fn resize_count_parameter(
     options.experimental_instance_translated_bspline_curves = false;
     let semantic = step_redox::clean_bytes(input, &options)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let edited = step_redox::expand_count_parameter_bytes(
+    let edited = step_redox::resize_count_parameter_bytes(
         &semantic.bytes,
         parameter_index,
         new_sites,

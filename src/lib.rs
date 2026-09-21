@@ -205,14 +205,13 @@ pub struct CountEditOutput {
     pub compatibility: compatibility::CompatibilityAudit,
 }
 
-/// Expand one recovered count parameter atomically.
+/// Resize one recovered count parameter atomically.
 ///
 /// The input must already contain a proven periodic body grammar and its coupled
-/// filled 1-D instance rows. This first implementation intentionally supports
-/// growth only because the periodic-body graph mutator currently expands the
-/// positive end. Each coupled row is anchored so that it grows toward the same
-/// positive body axis regardless of the row's own basis sign.
-pub fn expand_count_parameter_bytes(
+/// filled 1-D instance rows. The negative end is kept fixed while the positive
+/// end grows or shrinks. Each coupled row chooses Start/End anchoring from its
+/// basis direction so every row follows the same physical body end.
+pub fn resize_count_parameter_bytes(
     input: &[u8],
     parameter_index: usize,
     new_sites: usize,
@@ -248,12 +247,11 @@ pub fn expand_count_parameter_bytes(
     if !parameter.body_grammar_proven || parameter.periodic_bodies.is_empty() {
         bail!("count parameter {parameter_index} does not have a proven periodic body grammar");
     }
-    if new_sites <= parameter.sites {
-        bail!(
-            "count-parameter editing currently supports growth only ({} -> {})",
-            parameter.sites,
-            new_sites
-        );
+    if new_sites == parameter.sites {
+        bail!("count-parameter edit is a no-op at {new_sites} sites");
+    }
+    if new_sites < 4 {
+        bail!("count-parameter editing currently requires at least 4 sites");
     }
 
     let body_specs = parameter
@@ -279,11 +277,20 @@ pub fn expand_count_parameter_bytes(
 
     let mut body_resizes = Vec::with_capacity(body_specs.len());
     for body in &body_specs {
-        body_resizes.push(periodic_resize::expand_periodic_body_positive(
-            &mut section.entities,
-            body,
-            new_sites,
-        )?);
+        let stats = if new_sites > body.sites {
+            periodic_resize::expand_periodic_body_positive(
+                &mut section.entities,
+                body,
+                new_sites,
+            )?
+        } else {
+            periodic_resize::shrink_periodic_body_positive(
+                &mut section.entities,
+                body,
+                new_sites,
+            )?
+        };
+        body_resizes.push(stats);
     }
 
     let mut pattern_resizes = Vec::with_capacity(pattern_specs.len());
@@ -345,6 +352,22 @@ pub fn expand_count_parameter_bytes(
     })
 }
 
+/// Backward-compatible growth-only wrapper.
+pub fn expand_count_parameter_bytes(
+    input: &[u8],
+    parameter_index: usize,
+    new_sites: usize,
+) -> Result<CountEditOutput> {
+    let edited = resize_count_parameter_bytes(input, parameter_index, new_sites)?;
+    if edited.resize.new_sites <= edited.resize.old_sites {
+        bail!(
+            "expand_count_parameter_bytes requires growth ({} -> {})",
+            edited.resize.old_sites,
+            edited.resize.new_sites
+        );
+    }
+    Ok(edited)
+}
 
 /// Expand one detected periodic body at its positive-axis end.
 pub fn expand_periodic_body_bytes(

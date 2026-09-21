@@ -414,6 +414,346 @@ pub fn expand_periodic_body_positive(
         new_stretch_edges,
         added_entities,
     })
+
+}
+
+/// Shrink a proven 1-D periodic body at its positive-axis end.
+///
+/// The negative end and the first `new_sites` repeat cells remain in place.
+/// The positive fixed cap is cloned inward, the removed repeat faces are
+/// omitted from the CLOSED_SHELL, and the spanning-face boundary grammar is
+/// rebuilt over the shortened cell/gap sequence.
+pub fn shrink_periodic_body_positive(
+    entities: &mut Vec<EntityInstance>,
+    body: &PeriodicBodyPattern,
+    new_sites: usize,
+) -> Result<PeriodicBodyResizeStats> {
+    let old_sites = body.sites;
+    if new_sites >= old_sites {
+        bail!("periodic body shrink requires new_sites < old_sites");
+    }
+    // Instance/count semantic recovery currently requires at least four sites,
+    // so do not emit an edit that the postcondition checker cannot prove.
+    if new_sites < 4 {
+        bail!("periodic body shrink currently requires at least 4 sites");
+    }
+    if body.repeat_face_families.is_empty()
+        || body
+            .repeat_face_families
+            .iter()
+            .any(|family| family.face_ids.len() != old_sites)
+    {
+        bail!("periodic body face families do not all span every site");
+    }
+
+    let axis = normalize(body.axis).ok_or_else(|| anyhow!("periodic body axis is zero"))?;
+    let pitch = body.pitch_mm;
+    if !pitch.is_finite() || pitch <= COORD_TOL_MM {
+        bail!("periodic body pitch is invalid");
+    }
+    let removed = old_sites - new_sites;
+    let delta_total = scale(axis, -(removed as f64) * pitch);
+
+    let mut graph = GraphEditor::new(entities);
+    let solid = body.solid_id;
+    let shell = graph
+        .simple_record(solid)
+        .and_then(|record| {
+            list_params(record).and_then(|params| {
+                params
+                    .iter()
+                    .filter_map(entity_ref_value)
+                    .find(|id| graph.entity_type(*id) == Some("CLOSED_SHELL"))
+            })
+        })
+        .ok_or_else(|| anyhow!("periodic body solid #{solid} has no CLOSED_SHELL"))?;
+    let shell_faces = graph.shell_faces(shell)?;
+
+    let stretch_faces = body
+        .stretch_face_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let fixed_faces = body
+        .fixed_face_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let repeat_faces = body
+        .repeat_face_families
+        .iter()
+        .flat_map(|family| family.face_ids.iter().copied())
+        .collect::<HashSet<_>>();
+    let housing_faces = repeat_faces
+        .iter()
+        .chain(stretch_faces.iter())
+        .chain(fixed_faces.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let edge_faces = graph.edge_faces(&housing_faces)?;
+
+    let site_faces = (0..old_sites)
+        .map(|site| {
+            body.repeat_face_families
+                .iter()
+                .map(|family| family.face_ids[site])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let canonical_site = new_sites / 2;
+
+    let site_projection = site_faces
+        .iter()
+        .map(|faces| -> Result<f64> {
+            let total = faces
+                .iter()
+                .map(|face| graph.face_center(*face).map(|center| dot(center, axis)))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .sum::<f64>();
+            Ok(total / faces.len().max(1) as f64)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let right_threshold = site_projection[old_sites - 1] + pitch * 0.5;
+
+    let mut right_fixed = HashSet::new();
+    let mut left_fixed = HashSet::new();
+    for &face in &fixed_faces {
+        let projected = dot(graph.face_center(face)?, axis);
+        if projected > right_threshold - COORD_TOL_MM {
+            right_fixed.insert(face);
+        } else {
+            left_fixed.insert(face);
+        }
+    }
+    if right_fixed.is_empty() || left_fixed.is_empty() {
+        bail!(
+            "could not split fixed faces into negative/positive caps: left={} right={}",
+            left_fixed.len(),
+            right_fixed.len()
+        );
+    }
+
+    let source_loops = stretch_faces
+        .iter()
+        .map(|&face| Ok((face, graph.source_loops(face)?)))
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    let cap_map = graph.clone_descendants(&right_fixed, delta_total)?;
+    let new_right_fixed = right_fixed
+        .iter()
+        .map(|face| {
+            cap_map
+                .get(face)
+                .copied()
+                .ok_or_else(|| anyhow!("positive cap clone missing face #{face}"))
+        })
+        .collect::<Result<HashSet<_>>>()?;
+
+    let kept_repeat_faces = site_faces[..new_sites]
+        .iter()
+        .flat_map(|faces| faces.iter().copied())
+        .collect::<HashSet<_>>();
+    let removed_repeat_faces = site_faces[new_sites..]
+        .iter()
+        .flat_map(|faces| faces.iter().copied())
+        .collect::<HashSet<_>>();
+
+    let mut target_patch_faces = kept_repeat_faces.clone();
+    target_patch_faces.extend(left_fixed.iter().copied());
+    target_patch_faces.extend(new_right_fixed.iter().copied());
+
+    let mut coord_vertices = HashMap::<[i64; 3], Vec<u64>>::new();
+    for face in target_patch_faces {
+        for vertex in graph.face_vertices(face)? {
+            coord_vertices
+                .entry(quantize_coord(graph.vertex_coord(vertex)?))
+                .or_default()
+                .push(vertex);
+        }
+    }
+    for vertices in coord_vertices.values_mut() {
+        vertices.sort_unstable();
+        vertices.dedup();
+    }
+
+    let find_vertex = |point: [f64; 3]| -> Result<u64> {
+        let Some(vertices) = coord_vertices.get(&quantize_coord(point)) else {
+            bail!("no target vertex at {point:?}");
+        };
+        if vertices.len() != 1 {
+            bail!("ambiguous target vertex at {point:?}: {vertices:?}");
+        }
+        Ok(vertices[0])
+    };
+
+    let mut stretch_edges = stretch_faces
+        .iter()
+        .map(|&face| (face, HashSet::<u64>::new()))
+        .collect::<HashMap<_, _>>();
+
+    // Keep only repeat-cell interfaces that belong to surviving sites.
+    for (&edge, faces) in &edge_faces {
+        let repeated = faces
+            .iter()
+            .any(|face| kept_repeat_faces.contains(face));
+        if repeated {
+            for stretch in faces.iter().filter(|face| stretch_faces.contains(face)) {
+                stretch_edges.get_mut(stretch).unwrap().insert(edge);
+            }
+        }
+    }
+
+    // Fixed-cap interfaces: negative cap stays in place; positive cap moves
+    // inward by the removed pitch span.
+    for (&edge, faces) in &edge_faces {
+        let fixed = faces
+            .iter()
+            .find(|face| fixed_faces.contains(face))
+            .copied();
+        let Some(fixed) = fixed else {
+            continue;
+        };
+        let stretches = faces
+            .iter()
+            .filter(|face| stretch_faces.contains(face))
+            .copied()
+            .collect::<Vec<_>>();
+        if stretches.is_empty() {
+            continue;
+        }
+        let target_edge = if right_fixed.contains(&fixed) {
+            cap_map
+                .get(&edge)
+                .copied()
+                .ok_or_else(|| anyhow!("positive cap clone missing interface edge #{edge}"))?
+        } else {
+            edge
+        };
+        for stretch in stretches {
+            stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+        }
+    }
+
+    // Rebuild the stretch-to-stretch grammar. Full-span rails receive a new
+    // positive endpoint; gap runs keep only the first new_sites-1 gaps.
+    let mut ss_pairs = HashMap::<(u64, u64), Vec<SsRow>>::new();
+    for (&edge, faces) in &edge_faces {
+        if faces.len() != 2 || !faces.iter().all(|face| stretch_faces.contains(face)) {
+            continue;
+        }
+        let mut pair = [faces[0], faces[1]];
+        pair.sort_unstable();
+        let (center, span) = graph.edge_center_span(edge, axis)?;
+        ss_pairs
+            .entry((pair[0], pair[1]))
+            .or_default()
+            .push(SsRow { center, span, edge });
+    }
+
+    let mut new_stretch_edges = 0usize;
+    for (pair, mut rows) in ss_pairs {
+        rows.sort_by(|a, b| a.center.total_cmp(&b.center));
+        let full_threshold = (old_sites.saturating_sub(1)) as f64 * pitch;
+        let full = rows
+            .iter()
+            .copied()
+            .filter(|row| row.span > full_threshold)
+            .collect::<Vec<_>>();
+        let short = rows
+            .iter()
+            .copied()
+            .filter(|row| row.span <= full_threshold)
+            .collect::<Vec<_>>();
+
+        for row in full {
+            let [mut va, mut vb] = graph.edge_vertices(row.edge)?;
+            let mut pa = graph.vertex_coord(va)?;
+            let mut pb = graph.vertex_coord(vb)?;
+            if dot(pa, axis) > dot(pb, axis) {
+                std::mem::swap(&mut va, &mut vb);
+                std::mem::swap(&mut pa, &mut pb);
+            }
+            let target_right = add(pb, delta_total);
+            let nv = find_vertex(target_right)?;
+            let edge = graph.make_edge_like(row.edge, va, nv)?;
+            new_stretch_edges += 1;
+            stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
+            stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+        }
+
+        if short.is_empty() {
+            continue;
+        }
+        if short.len() != old_sites + 1 {
+            bail!(
+                "unexpected short stretch-edge grammar for faces {:?}: {} rows, expected {}",
+                pair,
+                short.len(),
+                old_sites + 1
+            );
+        }
+        let left_end = short[0];
+        let right_end = short[short.len() - 1];
+        let gaps = &short[1..short.len() - 1];
+
+        stretch_edges.get_mut(&pair.0).unwrap().insert(left_end.edge);
+        stretch_edges.get_mut(&pair.1).unwrap().insert(left_end.edge);
+        for row in gaps.iter().take(new_sites.saturating_sub(1)) {
+            stretch_edges.get_mut(&pair.0).unwrap().insert(row.edge);
+            stretch_edges.get_mut(&pair.1).unwrap().insert(row.edge);
+        }
+
+        let [va, vb] = graph.edge_vertices(right_end.edge)?;
+        let nva = find_vertex(add(graph.vertex_coord(va)?, delta_total))?;
+        let nvb = find_vertex(add(graph.vertex_coord(vb)?, delta_total))?;
+        let edge = graph.make_edge_like(right_end.edge, nva, nvb)?;
+        new_stretch_edges += 1;
+        stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
+        stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+    }
+
+    for &face in &body.stretch_face_ids {
+        let edges = stretch_edges
+            .get(&face)
+            .ok_or_else(|| anyhow!("missing target edge set for stretch face #{face}"))?
+            .clone();
+        let loops = source_loops
+            .get(&face)
+            .ok_or_else(|| anyhow!("missing source loop semantics for stretch face #{face}"))?;
+        graph.rebuild_face_bounds(face, &edges, loops)?;
+    }
+
+    let mut target_shell_faces =
+        Vec::with_capacity(shell_faces.len().saturating_sub(removed_repeat_faces.len()));
+    for face in shell_faces {
+        if right_fixed.contains(&face) {
+            target_shell_faces.push(
+                cap_map
+                    .get(&face)
+                    .copied()
+                    .ok_or_else(|| anyhow!("cap clone missing shell face #{face}"))?,
+            );
+        } else if removed_repeat_faces.contains(&face) {
+            continue;
+        } else {
+            target_shell_faces.push(face);
+        }
+    }
+    graph.set_shell_faces(shell, &target_shell_faces)?;
+
+    let added_entities = graph.entities.len().saturating_sub(graph.initial_len);
+
+    Ok(PeriodicBodyResizeStats {
+        old_sites,
+        new_sites,
+        canonical_site,
+        cloned_repeat_faces: 0,
+        cloned_positive_fixed_faces: right_fixed.len(),
+        rebuilt_stretch_faces: body.stretch_face_ids.len(),
+        new_stretch_edges,
+        added_entities,
+    })
 }
 
 struct GraphEditor<'a> {

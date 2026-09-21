@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "step-count-resize",
-    about = "Expand one recovered semantic count parameter, including body and coupled instance rows"
+    about = "Resize one recovered semantic count parameter, including body and coupled instance rows"
 )]
 struct Cli {
     input: PathBuf,
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
     };
 
     let edited =
-        step_redox::expand_count_parameter_bytes(&semantic, cli.parameter, cli.sites)?;
+        step_redox::resize_count_parameter_bytes(&semantic, cli.parameter, cli.sites)?;
 
     std::fs::write(&cli.output, &edited.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;

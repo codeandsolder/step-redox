@@ -8,9 +8,10 @@ when it is absent from its private cache and rejects it if the checksum changes.
 
 Each case runs step-redox or the semantic count-generator CLI and validates
 the result with several independent signals. The same manifest therefore covers
-ordinary optimizer roundtrips and cross-model generation: the current strongest
-case recovers the count grammar from an upstream 48-contact header, generates
-72 contacts, and compares it with an independently published 72-contact sibling.
+ordinary optimizer roundtrips and cross-model generation. The strongest
+pair now exercises the same recovered header grammar in both directions:
+48 contacts → 72 contacts and 72 contacts → 48 contacts, each compared with an
+independently published sibling model.
 
 - OCCT import and BRepCheck validity
 - solid, shell, face, edge, and vertex counts

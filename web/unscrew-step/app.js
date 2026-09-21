@@ -95,7 +95,7 @@ function renderCountParameters(parameters) {
         </div>
       </div>
       <div class="edit">
-        <input class="sites" type="number" min="${p.sites + 1}" step="1" value="${p.sites}" aria-label="site count">
+        <input class="sites" type="number" min="4" step="1" value="${p.sites}" aria-label="site count">
         <button class="apply">Regenerate</button>
       </div>`;
     row.querySelector(".apply").addEventListener("click", () => editCountParameter(index, row));
