@@ -5,15 +5,8 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use truck_meshalgo::tessellation::*;
-use truck_stepio::r#in::*;
-use truck_topology::compress::CompressedShell;
-
-type TruckShell = CompressedShell<
-    truck_stepio::r#in::alias::Point3,
-    truck_stepio::r#in::alias::Curve3D,
-    truck_stepio::r#in::alias::Surface,
->;
+use monstertruck_meshing::prelude::*;
+use monstertruck_io::step::load::Table;
 
 #[derive(Parser, Debug)]
 #[command(about = "Generate an interactive before/after STEP body/face viewer")]
@@ -76,8 +69,8 @@ fn main() -> Result<()> {
 
     let before = StepDoc::parse(&before_text).context("parse before STEP")?;
     let after = StepDoc::parse(&after_text).context("parse after STEP")?;
-    let before_table = before.table().context("build before Truck table")?;
-    let after_table = after.table().context("build after Truck table")?;
+    let before_table = Table::from_step(&before_text).context("build before Monstertruck table")?;
+    let after_table = Table::from_step(&after_text).context("build after Monstertruck table")?;
 
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
@@ -181,11 +174,6 @@ impl StepDoc {
             shell_faces,
             shell_types,
         })
-    }
-
-    fn table(&self) -> Result<Table> {
-        let section = self.exchange.data.first().context("missing DATA section")?;
-        Ok(Table::from_data_section(section))
     }
 
     fn surface_for_face(&self, face: u64) -> Option<u64> {
@@ -376,7 +364,7 @@ fn mesh_shell_and_face(
     let step_shell = table
         .shell
         .get(&shell_id)
-        .with_context(|| format!("Truck did not parse shell #{shell_id}"))?;
+        .with_context(|| format!("Monstertruck did not parse shell #{shell_id}"))?;
     let compressed = table
         .to_compressed_shell(step_shell)
         .map_err(|e| anyhow::anyhow!("convert shell #{shell_id}: {e}"))?;
@@ -392,7 +380,7 @@ fn mesh_shell_and_face(
         .with_context(|| format!("missing source face list for shell #{shell_id}"))?;
     if meshed.faces.len() != source_faces.len() {
         bail!(
-            "cannot reliably map face IDs in shell #{shell_id}: STEP has {} faces, Truck converted {}",
+            "cannot reliably map face IDs in shell #{shell_id}: STEP has {} faces, Monstertruck converted {}",
             source_faces.len(),
             meshed.faces.len()
         );
@@ -405,18 +393,24 @@ fn mesh_shell_and_face(
     // Tessellate in full-shell context first: constrained face meshing can depend on
     // shared edge polylines. Isolating the CompressedFace before tessellation caused
     // valid trimmed faces to produce no polygon at all.
-    let one_face = truck_topology::compress::CompressedShell {
+    let one_face = monstertruck_topology::compress::CompressedShell {
         vertices: meshed.vertices.clone(),
         edges: meshed.edges.clone(),
         faces: vec![meshed.faces[face_index].clone()],
+        vertex_stable_ids: meshed.vertex_stable_ids.clone(),
+        edge_stable_ids: meshed.edge_stable_ids.clone(),
+        face_stable_ids: meshed
+            .face_stable_ids
+            .as_ref()
+            .map(|ids| vec![ids[face_index]]),
     };
     let face_obj = polygon_to_obj(&one_face.to_polygon())?;
     Ok((body_obj, Some(face_obj)))
 }
 
-fn polygon_to_obj(polygon: &truck_polymesh::PolygonMesh) -> Result<String> {
+fn polygon_to_obj(polygon: &monstertruck_mesh::PolygonMesh) -> Result<String> {
     let mut bytes = Vec::new();
-    truck_polymesh::obj::write(polygon, &mut bytes)?;
+    monstertruck_mesh::obj::write(polygon, &mut bytes)?;
     Ok(String::from_utf8(bytes)?)
 }
 
