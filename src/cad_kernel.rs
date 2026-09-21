@@ -60,26 +60,42 @@ pub mod truck {
         Ok(builder::tsweep(&face, Vector3::new(0.0, 0.0, length_mm)))
     }
 
+    fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
+        match model.node(root)? {
+            CadNode::Extrude { profile, vector_mm } => {
+                if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
+                    bail!("Truck backend currently supports local Z extrusion only");
+                }
+                let points = profile.single_polygon_points().ok_or_else(|| {
+                    anyhow::anyhow!("Truck backend currently needs one line polygon")
+                })?;
+                extrude_polygon_z(&points, vector_mm[2])
+            }
+            CadNode::Transform { transform, child } => {
+                let child = evaluate_node(model, *child)?;
+                let m = transform.matrix;
+                let matrix = Matrix4::from_cols(
+                    Vector4::new(m[0][0], m[1][0], m[2][0], m[3][0]),
+                    Vector4::new(m[0][1], m[1][1], m[2][1], m[3][1]),
+                    Vector4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
+                    Vector4::new(m[0][3], m[1][3], m[2][3], m[3][3]),
+                );
+                Ok(builder::transformed(&child, matrix))
+            }
+            unsupported => {
+                bail!("Truck backend does not yet evaluate node {root:?}: {unsupported:?}")
+            }
+        }
+    }
+
     impl CadKernel for TruckKernel {
         type Evaluated = EvaluatedShape;
 
         fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated> {
             model.validate()?;
-            let solid = match model.node(root)? {
-                CadNode::Extrude { profile, vector_mm } => {
-                    if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
-                        bail!("Truck backend currently supports Z extrusion only");
-                    }
-                    let points = profile.single_polygon_points().ok_or_else(|| {
-                        anyhow::anyhow!("Truck backend currently needs one line polygon")
-                    })?;
-                    extrude_polygon_z(&points, vector_mm[2])?
-                }
-                unsupported => {
-                    bail!("Truck backend does not yet evaluate node {root:?}: {unsupported:?}")
-                }
-            };
-            Ok(EvaluatedShape { solid })
+            Ok(EvaluatedShape {
+                solid: evaluate_node(model, root)?,
+            })
         }
 
         fn summarize(&self, evaluated: &Self::Evaluated) -> KernelSummary {

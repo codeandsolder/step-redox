@@ -10,6 +10,7 @@ pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
 pub mod formed_sheet;
+pub mod solid_extrusions;
 pub mod compatibility;
 mod curve_replicas;
 mod face_coalesce;
@@ -224,6 +225,34 @@ pub fn detect_formed_sheet_evidence_bytes(
         .data
         .iter()
         .flat_map(|section| formed_sheet::detect_formed_sheet_evidence(&section.entities))
+        .collect())
+}
+
+/// Detect whole-solid line-profile extrusion grammars in a STEP exchange.
+///
+/// This first pass is intentionally strict: accepted solids must be closed, all-planar,
+/// single-loop prisms whose cap edges and lateral connectors prove one translation.
+pub fn detect_solid_extrusions_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_extrusions::detect_solid_extrusions(&section.entities))
         .collect())
 }
 

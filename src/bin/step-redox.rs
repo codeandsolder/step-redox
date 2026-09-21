@@ -130,6 +130,13 @@ struct Cli {
     )]
     formed_sheet_json: Option<PathBuf>,
 
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write exact whole-solid line-profile extrusion analysis as JSON"
+    )]
+    solid_extrusions_json: Option<PathBuf>,
+
     #[arg(long, value_name = "PATH", help = "Write detected periodic body grammars as JSON")]
     periodic_bodies_json: Option<PathBuf>,
 
@@ -191,8 +198,12 @@ fn main() -> Result<()> {
             .with_context(|| format!("write pattern report {}", path.display()))?;
     }
     if let Some(path) = &cli.cad_fragments_json {
-        let fragments =
+        let mut fragments =
             step_redox::cad_recovery::recover_instance_pattern_fragments(&cleaned.patterns)?;
+        let extrusions = step_redox::detect_solid_extrusions_bytes(&cleaned.bytes)?;
+        fragments.extend(step_redox::cad_recovery::recover_solid_extrusion_fragments(
+            &extrusions,
+        )?);
         let data = serde_json::to_vec_pretty(&fragments)?;
         std::fs::write(path, data)
             .with_context(|| format!("write CAD fragment report {}", path.display()))?;
@@ -202,6 +213,12 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&evidence)?;
         std::fs::write(path, data)
             .with_context(|| format!("write formed-sheet report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.solid_extrusions_json {
+        let extrusions = step_redox::detect_solid_extrusions_bytes(&cleaned.bytes)?;
+        let data = serde_json::to_vec_pretty(&extrusions)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write solid-extrusion report {}", path.display()))?;
     }
     if let Some(path) = &cli.periodic_bodies_json {
         let data = serde_json::to_vec_pretty(&cleaned.periodic_bodies)?;

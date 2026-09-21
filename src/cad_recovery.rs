@@ -1,7 +1,9 @@
 use crate::cad_ir::{
-    BrepFallback, CadModel, CadNode, NodeId, PatternSpec, ProofStatus, Provenance,
+    BrepFallback, CadModel, CadNode, NodeId, PatternSpec, Profile2d, ProofStatus, Provenance,
+    RigidTransform,
 };
 use crate::patterns::InstancePattern;
+use crate::solid_extrusions::RecoveredSolidExtrusion;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -20,6 +22,131 @@ pub enum CadFragmentSource {
         representation_map: u64,
         item_ids: Vec<u64>,
     },
+    SolidExtrusion {
+        solid_id: u64,
+        cap_face_ids: [u64; 2],
+        side_face_ids: Vec<u64>,
+    },
+}
+
+/// Recover a constructive CAD fragment from a geometrically-proven solid extrusion.
+///
+/// The sketch is expressed in a canonical local XY frame and extruded along local +Z.
+/// A rigid transform then places that constructive body back into source coordinates.
+pub fn recover_solid_extrusion_fragment(
+    extrusion: &RecoveredSolidExtrusion,
+) -> Result<CadFragment> {
+    validate_solid_extrusion(extrusion)?;
+
+    let mut model = CadModel::new();
+    let profile = Profile2d::polygon(extrusion.profile_points_mm.clone())?;
+    let body = model.add_node(CadNode::Extrude {
+        profile,
+        vector_mm: [0.0, 0.0, extrusion.height_mm],
+    });
+
+    let mut source_entity_ids = Vec::with_capacity(extrusion.side_face_ids.len() + 3);
+    source_entity_ids.push(extrusion.solid_id);
+    source_entity_ids.extend(extrusion.cap_face_ids);
+    source_entity_ids.extend(extrusion.side_face_ids.iter().copied());
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+
+    let proof = Provenance {
+        source_entity_ids: source_entity_ids.clone(),
+        proof: ProofStatus::WithinTolerance,
+        max_residual_mm: Some(extrusion.max_residual_mm),
+    };
+    model.set_provenance(body, proof.clone())?;
+
+    let root = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            extrusion.origin_mm,
+            extrusion.x_axis,
+            extrusion.y_axis,
+            extrusion.z_axis,
+        ),
+        child: body,
+    });
+    model.set_provenance(root, proof)?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::SolidExtrusion {
+            solid_id: extrusion.solid_id,
+            cap_face_ids: extrusion.cap_face_ids,
+            side_face_ids: extrusion.side_face_ids.clone(),
+        },
+        model,
+        root,
+    })
+}
+
+pub fn recover_solid_extrusion_fragments(
+    extrusions: &[RecoveredSolidExtrusion],
+) -> Result<Vec<CadFragment>> {
+    extrusions
+        .iter()
+        .map(recover_solid_extrusion_fragment)
+        .collect()
+}
+
+fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
+    if extrusion.profile_points_mm.len() < 3 {
+        bail!("solid extrusion needs at least three profile points");
+    }
+    if !extrusion.height_mm.is_finite() || extrusion.height_mm <= 0.0 {
+        bail!("solid extrusion height must be finite and positive");
+    }
+    if !extrusion.max_residual_mm.is_finite()
+        || extrusion.max_residual_mm < 0.0
+        || extrusion.max_residual_mm > 1.0e-7 + 1.0e-15
+    {
+        bail!("solid extrusion has invalid proof residual");
+    }
+    for vector in [
+        extrusion.origin_mm,
+        extrusion.x_axis,
+        extrusion.y_axis,
+        extrusion.z_axis,
+    ] {
+        if vector.iter().any(|value| !value.is_finite()) {
+            bail!("solid extrusion frame contains non-finite values");
+        }
+    }
+    for axis in [extrusion.x_axis, extrusion.y_axis, extrusion.z_axis] {
+        if (norm(axis) - 1.0).abs() > 1.0e-10 {
+            bail!("solid extrusion frame axis is not unit length");
+        }
+    }
+    if dot(extrusion.x_axis, extrusion.y_axis).abs() > 1.0e-10
+        || dot(extrusion.x_axis, extrusion.z_axis).abs() > 1.0e-10
+        || dot(extrusion.y_axis, extrusion.z_axis).abs() > 1.0e-10
+    {
+        bail!("solid extrusion frame is not orthogonal");
+    }
+    let handedness = dot(cross(extrusion.x_axis, extrusion.y_axis), extrusion.z_axis);
+    if (handedness - 1.0).abs() > 1.0e-10 {
+        bail!("solid extrusion frame is not right-handed");
+    }
+    Ok(())
+}
+
+fn local_frame_transform(
+    origin: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    z_axis: [f64; 3],
+) -> RigidTransform {
+    RigidTransform {
+        matrix: [
+            [x_axis[0], y_axis[0], z_axis[0], origin[0]],
+            [x_axis[1], y_axis[1], z_axis[1], origin[1]],
+            [x_axis[2], y_axis[2], z_axis[2], origin[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    }
 }
 
 /// Recover a constructive CAD fragment from an already-proven STEP instance pattern.
@@ -297,6 +424,18 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
     actual == expected
 }
 
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 fn norm(vector: [f64; 3]) -> f64 {
     (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
 }
@@ -324,6 +463,53 @@ mod tests {
             tolerance_mm: 1.0e-7,
             max_residual_mm: residual,
         }
+    }
+
+    #[test]
+    fn solid_extrusion_becomes_local_extrude_plus_world_frame() -> Result<()> {
+        let extrusion = RecoveredSolidExtrusion {
+            solid_id: 10,
+            cap_face_ids: [20, 21],
+            side_face_ids: vec![30, 31, 32, 33],
+            profile_points_mm: vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]],
+            origin_mm: [12.0, -3.0, 7.0],
+            x_axis: [0.0, 1.0, 0.0],
+            y_axis: [0.0, 0.0, 1.0],
+            z_axis: [1.0, 0.0, 0.0],
+            height_mm: 5.0,
+            max_residual_mm: 2.0e-12,
+        };
+
+        let fragment = recover_solid_extrusion_fragment(&extrusion)?;
+        let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
+            panic!("expected transform root");
+        };
+        assert_eq!(
+            transform.matrix,
+            [
+                [0.0, 0.0, 1.0, 12.0],
+                [1.0, 0.0, 0.0, -3.0],
+                [0.0, 1.0, 0.0, 7.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        );
+        let CadNode::Extrude { profile, vector_mm } = fragment.model.node(*child)? else {
+            panic!("expected local extrusion child");
+        };
+        assert_eq!(*vector_mm, [0.0, 0.0, 5.0]);
+        assert_eq!(
+            profile.single_polygon_points(),
+            Some(extrusion.profile_points_mm.clone())
+        );
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].proof,
+            ProofStatus::WithinTolerance
+        );
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].max_residual_mm,
+            Some(2.0e-12)
+        );
+        Ok(())
     }
 
     #[test]
