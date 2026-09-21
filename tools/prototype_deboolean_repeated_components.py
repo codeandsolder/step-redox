@@ -44,8 +44,28 @@ ROOT_TYPES={
 def parse(path):
     lines=path.read_text(errors="replace").splitlines()
     raw={};typ={};refs={};pts={};inb=collections.defaultdict(list);maxid=0
+
+    # Part 21 allows entity instances to span physical lines. EasyEDA usually
+    # emits one entity per line, but several first-party vendor exporters
+    # (notably TE) wrap large CLOSED_SHELL / ADVANCED_FACE aggregates. Assemble
+    # complete #id=...; statements for analysis while keeping the original
+    # physical lines unchanged for rewrite-oriented prototypes.
+    statements=[]
+    pending=None
     for line in lines:
-        m=ER.match(line.strip())
+        s=line.strip()
+        if pending is None:
+            if not s.startswith("#"):
+                continue
+            pending=s
+        else:
+            pending+=s
+        if pending.endswith(";"):
+            statements.append(pending)
+            pending=None
+
+    for statement in statements:
+        m=ER.match(statement)
         if not m:continue
         i=int(m.group(1));maxid=max(maxid,i);b=m.group(2)
         raw[i]=b;typ[i]="COMPLEX" if b.startswith("(") else b.split("(",1)[0]

@@ -271,9 +271,11 @@
         "{input}",
         "{output}",
         "--sites",
-        "36"
+        "36",
+        "--anchor",
+        "center"
       ],
-      "alignment": "bbox_center",
+      "alignment": "identity",
       "thresholds": {
         "topology_exact": true,
         "volume_rel": 2e-05,
@@ -304,9 +306,11 @@
         "{input}",
         "{output}",
         "--sites",
-        "24"
+        "24",
+        "--anchor",
+        "center"
       ],
-      "alignment": "bbox_center",
+      "alignment": "identity",
       "thresholds": {
         "topology_exact": true,
         "volume_rel": 2e-05,

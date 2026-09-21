@@ -24,15 +24,20 @@ instance row atomically:
     cargo run --release --bin step-count-resize -- input.step output.step --sites 36
 
 Raw input is normalized into the editable semantic representation first. The
-current body graph mutator keeps the negative pattern end fixed and grows or shrinks
-the positive end. Alternate body anchors are still future work. The editor re-runs
-semantic detection after mutation and fails rather than returning a model unless
-the requested count and the same coupled body/instance grammar are recovered again.
+count editor supports start-, end-, and center-anchored placement. Center anchoring
+composes equal edits at both physical ends and currently requires an even site-count
+delta. The editor re-runs semantic detection after mutation and fails rather than
+returning a model unless the requested count and the same coupled body/instance
+grammar are recovered again.
+
+The validated 24↔36-site header regressions now pass with center anchoring under
+identity alignment in both directions: no compensating translation is permitted by
+the comparison harness.
 
 A browser/WASM prototype lives under `web/`, including an experimental
 "Unscrew your STEP" front end. The Rust library exposes detected patterns,
-periodic bodies, and higher-level recovered count parameters; positive-end
-periodic-body growth and shrink are implemented in `periodic_resize.rs`.
+periodic bodies, and higher-level recovered count parameters; bidirectional
+periodic-body growth/shrink are implemented in `periodic_resize.rs`.
 
 ## Validation and CI
 

@@ -187,11 +187,20 @@ pub struct PeriodicBodyEditOutput {
 }
 
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CountAnchor {
+    Start,
+    Center,
+    End,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CountResizeStats {
     pub old_sites: usize,
     pub new_sites: usize,
     pub instances_per_site: usize,
+    pub anchor: CountAnchor,
     pub body_resizes: Vec<periodic_resize::PeriodicBodyResizeStats>,
     pub pattern_resizes: Vec<patterns::PatternResizeStats>,
 }
@@ -205,17 +214,111 @@ pub struct CountEditOutput {
     pub compatibility: compatibility::CompatibilityAudit,
 }
 
-/// Resize one recovered count parameter atomically.
-///
-/// The input must already contain a proven periodic body grammar and its coupled
-/// filled 1-D instance rows. The negative end is kept fixed while the positive
-/// end grows or shrinks. Each coupled row chooses Start/End anchoring from its
-/// basis direction so every row follows the same physical body end.
+/// Resize one recovered count parameter atomically, keeping its negative end fixed.
 pub fn resize_count_parameter_bytes(
     input: &[u8],
     parameter_index: usize,
     new_sites: usize,
 ) -> Result<CountEditOutput> {
+    resize_count_parameter_bytes_with_anchor(
+        input,
+        parameter_index,
+        new_sites,
+        CountAnchor::Start,
+    )
+}
+
+/// Resize one recovered count parameter with explicit placement anchoring.
+///
+/// Start and End keep the corresponding physical end fixed. Center keeps the
+/// geometric center fixed by performing equal edits at both ends; for now this
+/// requires an even site-count delta.
+pub fn resize_count_parameter_bytes_with_anchor(
+    input: &[u8],
+    parameter_index: usize,
+    new_sites: usize,
+    anchor: CountAnchor,
+) -> Result<CountEditOutput> {
+    if anchor != CountAnchor::Center {
+        return resize_count_parameter_bytes_one_side(
+            input,
+            parameter_index,
+            new_sites,
+            anchor,
+        );
+    }
+
+    let parameters = detect_count_parameters_bytes(input)?;
+    let original = parameters
+        .get(parameter_index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("count parameter index {parameter_index} not found"))?;
+    if !original.body_grammar_proven || original.periodic_bodies.is_empty() {
+        bail!("count parameter {parameter_index} does not have a proven periodic body grammar");
+    }
+    if new_sites == original.sites {
+        bail!("count-parameter edit is a no-op at {new_sites} sites");
+    }
+    if new_sites < 4 {
+        bail!("count-parameter editing currently requires at least 4 sites");
+    }
+
+    let delta = new_sites.abs_diff(original.sites);
+    if delta % 2 != 0 {
+        bail!(
+            "center-anchored count resize currently requires an even site delta ({} -> {})",
+            original.sites,
+            new_sites
+        );
+    }
+    let half = delta / 2;
+    let mid_sites = if new_sites > original.sites {
+        original.sites + half
+    } else {
+        original.sites - half
+    };
+
+    let first = resize_count_parameter_bytes_one_side(
+        input,
+        parameter_index,
+        mid_sites,
+        CountAnchor::Start,
+    )?;
+    let followup_index = find_matching_count_parameter(
+        &first.count_parameters,
+        mid_sites,
+        &original,
+    )?;
+    let mut second = resize_count_parameter_bytes_one_side(
+        &first.bytes,
+        followup_index,
+        new_sites,
+        CountAnchor::End,
+    )?;
+
+    let mut body_resizes = first.resize.body_resizes;
+    body_resizes.extend(second.resize.body_resizes);
+    let mut pattern_resizes = first.resize.pattern_resizes;
+    pattern_resizes.extend(second.resize.pattern_resizes);
+    second.resize = CountResizeStats {
+        old_sites: original.sites,
+        new_sites,
+        instances_per_site: original.instances_per_site,
+        anchor: CountAnchor::Center,
+        body_resizes,
+        pattern_resizes,
+    };
+    Ok(second)
+}
+
+/// One-sided primitive used by all placement policies.
+fn resize_count_parameter_bytes_one_side(
+    input: &[u8],
+    parameter_index: usize,
+    new_sites: usize,
+    anchor: CountAnchor,
+) -> Result<CountEditOutput> {
+    debug_assert!(anchor != CountAnchor::Center);
     let (input_text, _) = decode_input(input)?;
     let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
     let mut exchange =
@@ -277,16 +380,21 @@ pub fn resize_count_parameter_bytes(
 
     let mut body_resizes = Vec::with_capacity(body_specs.len());
     for body in &body_specs {
-        let stats = if new_sites > body.sites {
+        let directed = if anchor == CountAnchor::End {
+            reverse_periodic_body(body)
+        } else {
+            body.clone()
+        };
+        let stats = if new_sites > directed.sites {
             periodic_resize::expand_periodic_body_positive(
                 &mut section.entities,
-                body,
+                &directed,
                 new_sites,
             )?
         } else {
             periodic_resize::shrink_periodic_body_positive(
                 &mut section.entities,
-                body,
+                &directed,
                 new_sites,
             )?
         };
@@ -302,16 +410,20 @@ pub fn resize_count_parameter_bytes(
             .ok_or_else(|| anyhow::anyhow!("coupled pattern has no basis"))?;
         let axis_dot =
             basis[0] * parameter.axis[0] + basis[1] * parameter.axis[1] + basis[2] * parameter.axis[2];
-        let anchor = if axis_dot >= 0.0 {
-            patterns::PatternAnchor::Start
-        } else {
-            patterns::PatternAnchor::End
+        let pattern_anchor = match (anchor, axis_dot >= 0.0) {
+            (CountAnchor::Start, true) | (CountAnchor::End, false) => {
+                patterns::PatternAnchor::Start
+            }
+            (CountAnchor::Start, false) | (CountAnchor::End, true) => {
+                patterns::PatternAnchor::End
+            }
+            (CountAnchor::Center, _) => unreachable!(),
         };
         pattern_resizes.push(patterns::resize_filled_linear_pattern(
             &mut section.entities,
             pattern,
             new_sites,
-            anchor,
+            pattern_anchor,
         )?);
     }
 
@@ -342,6 +454,7 @@ pub fn resize_count_parameter_bytes(
             old_sites: parameter.sites,
             new_sites,
             instances_per_site: parameter.instances_per_site,
+            anchor,
             body_resizes,
             pattern_resizes,
         },
@@ -350,6 +463,64 @@ pub fn resize_count_parameter_bytes(
         count_parameters,
         compatibility,
     })
+}
+
+fn reverse_periodic_body(
+    body: &periodic_bodies::PeriodicBodyPattern,
+) -> periodic_bodies::PeriodicBodyPattern {
+    let mut reversed = body.clone();
+    reversed.axis = [-body.axis[0], -body.axis[1], -body.axis[2]];
+    for family in &mut reversed.repeat_face_families {
+        family.face_ids.reverse();
+    }
+    reversed
+}
+
+fn detect_count_parameters_bytes(
+    input: &[u8],
+) -> Result<Vec<parameters::RecoveredCountParameter>> {
+    let (input_text, _) = decode_input(input)?;
+    let (parser_text, had_empty_aggregate_shim) = prepare_parser_input(&input_text)?;
+    let mut exchange =
+        ruststep::parser::parse(&parser_text).context("parse STEP exchange structure")?;
+    if had_empty_aggregate_shim {
+        restore_empty_aggregates(&mut exchange)?;
+    }
+    if exchange.data.len() != 1 {
+        bail!("count-parameter editing currently requires exactly one DATA section");
+    }
+    let section = &exchange.data[0];
+    let patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+    let bodies = periodic_bodies::detect_periodic_bodies(&section.entities, &patterns);
+    Ok(parameters::detect_count_parameters(&patterns, &bodies))
+}
+
+fn find_matching_count_parameter(
+    parameters: &[parameters::RecoveredCountParameter],
+    sites: usize,
+    original: &parameters::RecoveredCountParameter,
+) -> Result<usize> {
+    let matches = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.body_grammar_proven
+                && candidate.sites == sites
+                && candidate.instances_per_site == original.instances_per_site
+                && candidate.instance_patterns.len() == original.instance_patterns.len()
+                && candidate.periodic_bodies.len() == original.periodic_bodies.len()
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => bail!(
+            "could not rediscover the intermediate {sites}-site count parameter"
+        ),
+        _ => bail!(
+            "multiple matching intermediate {sites}-site count parameters: {matches:?}"
+        ),
+    }
 }
 
 /// Backward-compatible growth-only wrapper.
