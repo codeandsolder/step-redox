@@ -1,9 +1,9 @@
 use crate::cad_ir::{
-    BrepFallback, CadModel, CadNode, NodeId, PatternSpec, Profile2d, ProofStatus, Provenance,
-    RigidTransform,
+    BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d, ProfileLoop,
+    ProofStatus, Provenance, RigidTransform,
 };
 use crate::patterns::InstancePattern;
-use crate::solid_extrusions::RecoveredSolidExtrusion;
+use crate::solid_extrusions::{RecoveredProfileCurve, RecoveredSolidExtrusion};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -39,16 +39,28 @@ pub fn recover_solid_extrusion_fragment(
     validate_solid_extrusion(extrusion)?;
 
     let mut model = CadModel::new();
-    let profile = Profile2d::polygon(extrusion.profile_points_mm.clone())?;
+    let profile = recovered_extrusion_profile(extrusion)?;
     let body = model.add_node(CadNode::Extrude {
         profile,
         vector_mm: [0.0, 0.0, extrusion.height_mm],
     });
 
-    let mut source_entity_ids = Vec::with_capacity(extrusion.side_face_ids.len() + 3);
+    let profile_edge_count = extrusion
+        .profile_curves
+        .iter()
+        .map(|curve| curve.source_edge_ids().len())
+        .sum::<usize>();
+    let mut source_entity_ids =
+        Vec::with_capacity(extrusion.side_face_ids.len() + profile_edge_count + 3);
     source_entity_ids.push(extrusion.solid_id);
     source_entity_ids.extend(extrusion.cap_face_ids);
     source_entity_ids.extend(extrusion.side_face_ids.iter().copied());
+    source_entity_ids.extend(
+        extrusion
+            .profile_curves
+            .iter()
+            .flat_map(|curve| curve.source_edge_ids().iter().copied()),
+    );
     source_entity_ids.sort_unstable();
     source_entity_ids.dedup();
 
@@ -92,9 +104,39 @@ pub fn recover_solid_extrusion_fragments(
         .collect()
 }
 
+fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
+    let curves = extrusion
+        .profile_curves
+        .iter()
+        .map(|curve| match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => Curve2d::Line {
+                start_mm: *start_mm,
+                end_mm: *end_mm,
+            },
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } => Curve2d::CircleArc {
+                center_mm: *center_mm,
+                radius_mm: *radius_mm,
+                start_angle_rad: *start_angle_rad,
+                end_angle_rad: *end_angle_rad,
+            },
+        })
+        .collect::<Vec<_>>();
+    Ok(Profile2d {
+        loops: vec![ProfileLoop { curves }],
+    })
+}
+
 fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
-    if extrusion.profile_points_mm.len() < 3 {
-        bail!("solid extrusion needs at least three profile points");
+    if extrusion.profile_curves.is_empty() {
+        bail!("solid extrusion needs at least one profile curve");
     }
     if !extrusion.height_mm.is_finite() || extrusion.height_mm <= 0.0 {
         bail!("solid extrusion height must be finite and positive");
@@ -471,7 +513,28 @@ mod tests {
             solid_id: 10,
             cap_face_ids: [20, 21],
             side_face_ids: vec![30, 31, 32, 33],
-            profile_points_mm: vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]],
+            profile_curves: vec![
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: vec![100],
+                    start_mm: [0.0, 0.0],
+                    end_mm: [4.0, 0.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: vec![101],
+                    start_mm: [4.0, 0.0],
+                    end_mm: [4.0, 2.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: vec![102],
+                    start_mm: [4.0, 2.0],
+                    end_mm: [0.0, 2.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: vec![103],
+                    start_mm: [0.0, 2.0],
+                    end_mm: [0.0, 0.0],
+                },
+            ],
             origin_mm: [12.0, -3.0, 7.0],
             x_axis: [0.0, 1.0, 0.0],
             y_axis: [0.0, 0.0, 1.0],
@@ -499,7 +562,7 @@ mod tests {
         assert_eq!(*vector_mm, [0.0, 0.0, 5.0]);
         assert_eq!(
             profile.single_polygon_points(),
-            Some(extrusion.profile_points_mm.clone())
+            Some(vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]])
         );
         assert_eq!(
             fragment.model.provenance[&fragment.root].proof,

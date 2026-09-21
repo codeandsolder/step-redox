@@ -1,6 +1,437 @@
-use crate::instances::{entity_ref, entity_ref_value, simple_record, simple_record_mut};
+use crate::instances::{
+    cartesian_point, entity_ref, entity_ref_value, number, simple_record, simple_record_mut,
+};
 use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
+
+const DIRECTION_TOLERANCE: f64 = 1.0e-15;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlaneSupport {
+    pub origin_mm: [f64; 3],
+    pub normal: [f64; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CylinderSupport {
+    pub axis_origin_mm: [f64; 3],
+    pub axis: [f64; 3],
+    pub x_direction: [f64; 3],
+    pub radius_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SurfaceSupport {
+    Plane(PlaneSupport),
+    Cylinder(CylinderSupport),
+    Other { entity_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LineSupport {
+    pub origin_mm: [f64; 3],
+    pub direction: [f64; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CircleSupport {
+    pub center_mm: [f64; 3],
+    pub normal: [f64; 3],
+    pub x_direction: [f64; 3],
+    pub radius_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CurveSupport {
+    Line(LineSupport),
+    Circle(CircleSupport),
+    Other { entity_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OrientedEdgeUse {
+    pub oriented_edge_id: u64,
+    pub edge_id: u64,
+    pub curve_id: u64,
+    pub curve_same_sense: bool,
+    pub parameter_forward: bool,
+    pub start_vertex: u64,
+    pub end_vertex: u64,
+    pub start_mm: [f64; 3],
+    pub end_mm: [f64; 3],
+    pub support: CurveSupport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FaceLoop {
+    pub bound_id: u64,
+    pub loop_id: u64,
+    pub outer: bool,
+    pub orientation: bool,
+    pub edges: Vec<OrientedEdgeUse>,
+}
+
+pub(crate) fn solid_face_ids(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<u64>> {
+    let shell_id = manifold_shell(solid_id, entities, index)?;
+    ref_list_param(shell_id, 1, entities, index)
+}
+
+pub(crate) fn face_loops(
+    face_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<FaceLoop>> {
+    let record = simple_record(&entities[*index.get(&face_id)?])?;
+    if record.name != "ADVANCED_FACE" && record.name != "FACE_SURFACE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let Parameter::List(bounds) = params.get(1)? else {
+        return None;
+    };
+    bounds
+        .iter()
+        .map(|bound| ordered_bound_loop(entity_ref_value(bound)?, entities, index))
+        .collect()
+}
+
+pub(crate) fn ordered_bound_loop(
+    bound_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<FaceLoop> {
+    let record = simple_record(&entities[*index.get(&bound_id)?])?;
+    let outer = match record.name.as_str() {
+        "FACE_OUTER_BOUND" => true,
+        "FACE_BOUND" => false,
+        _ => return None,
+    };
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let loop_id = entity_ref_value(params.get(1)?)?;
+    let orientation = enumeration_bool(params.get(2)?)?;
+
+    let loop_record = simple_record(&entities[*index.get(&loop_id)?])?;
+    if loop_record.name != "EDGE_LOOP" {
+        return None;
+    }
+    let Parameter::List(loop_params) = &loop_record.parameter else {
+        return None;
+    };
+    let Parameter::List(oriented_edges) = loop_params.get(1)? else {
+        return None;
+    };
+
+    let edges = oriented_edges
+        .iter()
+        .map(|oriented| oriented_edge_use(entity_ref_value(oriented)?, entities, index))
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(FaceLoop {
+        bound_id,
+        loop_id,
+        outer,
+        orientation,
+        edges,
+    })
+}
+
+pub(crate) fn oriented_edge_use(
+    oriented_edge_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<OrientedEdgeUse> {
+    let oriented_record = simple_record(&entities[*index.get(&oriented_edge_id)?])?;
+    if oriented_record.name != "ORIENTED_EDGE" {
+        return None;
+    }
+    let Parameter::List(oriented_params) = &oriented_record.parameter else {
+        return None;
+    };
+    let edge_id = entity_ref_value(oriented_params.get(3)?)?;
+    let forward = enumeration_bool(oriented_params.get(4)?)?;
+
+    let edge_record = simple_record(&entities[*index.get(&edge_id)?])?;
+    if edge_record.name != "EDGE_CURVE" {
+        return None;
+    }
+    let Parameter::List(edge_params) = &edge_record.parameter else {
+        return None;
+    };
+    let raw_start = entity_ref_value(edge_params.get(1)?)?;
+    let raw_end = entity_ref_value(edge_params.get(2)?)?;
+    let curve_id = entity_ref_value(edge_params.get(3)?)?;
+    let curve_same_sense = enumeration_bool(edge_params.get(4)?)?;
+    let raw_start_mm = vertex_point(raw_start, entities, index)?;
+    let raw_end_mm = vertex_point(raw_end, entities, index)?;
+
+    let (start_vertex, end_vertex, start_mm, end_mm) = if forward {
+        (raw_start, raw_end, raw_start_mm, raw_end_mm)
+    } else {
+        (raw_end, raw_start, raw_end_mm, raw_start_mm)
+    };
+
+    Some(OrientedEdgeUse {
+        oriented_edge_id,
+        edge_id,
+        curve_id,
+        curve_same_sense,
+        parameter_forward: if forward {
+            curve_same_sense
+        } else {
+            !curve_same_sense
+        },
+        start_vertex,
+        end_vertex,
+        start_mm,
+        end_mm,
+        support: curve_support(curve_id, entities, index),
+    })
+}
+
+pub(crate) fn surface_support(
+    surface_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> SurfaceSupport {
+    let Some(record) = index
+        .get(&surface_id)
+        .and_then(|&idx| simple_record(&entities[idx]))
+    else {
+        return SurfaceSupport::Other {
+            entity_id: surface_id,
+        };
+    };
+    let Parameter::List(params) = &record.parameter else {
+        return SurfaceSupport::Other {
+            entity_id: surface_id,
+        };
+    };
+
+    match record.name.as_str() {
+        "PLANE" => {
+            let support = (|| {
+                let placement = entity_ref_value(params.get(1)?)?;
+                let (origin_mm, normal, _) = axis2_placement_3d(placement, entities, index)?;
+                Some(PlaneSupport { origin_mm, normal })
+            })();
+            support
+                .map(SurfaceSupport::Plane)
+                .unwrap_or(SurfaceSupport::Other {
+                    entity_id: surface_id,
+                })
+        }
+        "CYLINDRICAL_SURFACE" => {
+            let support = (|| {
+                let placement = entity_ref_value(params.get(1)?)?;
+                let (axis_origin_mm, axis, x_direction) =
+                    axis2_placement_3d(placement, entities, index)?;
+                Some(CylinderSupport {
+                    axis_origin_mm,
+                    axis,
+                    x_direction,
+                    radius_mm: number(params.get(2)?)?,
+                })
+            })();
+            support
+                .map(SurfaceSupport::Cylinder)
+                .unwrap_or(SurfaceSupport::Other {
+                    entity_id: surface_id,
+                })
+        }
+        _ => SurfaceSupport::Other {
+            entity_id: surface_id,
+        },
+    }
+}
+
+pub(crate) fn curve_support(
+    curve_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> CurveSupport {
+    let Some(record) = index
+        .get(&curve_id)
+        .and_then(|&idx| simple_record(&entities[idx]))
+    else {
+        return CurveSupport::Other {
+            entity_id: curve_id,
+        };
+    };
+    let Parameter::List(params) = &record.parameter else {
+        return CurveSupport::Other {
+            entity_id: curve_id,
+        };
+    };
+
+    match record.name.as_str() {
+        "LINE" => {
+            let support = (|| {
+                let origin_mm =
+                    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)?;
+                let vector_id = entity_ref_value(params.get(2)?)?;
+                let vector = simple_record(&entities[*index.get(&vector_id)?])?;
+                if vector.name != "VECTOR" {
+                    return None;
+                }
+                let Parameter::List(vector_params) = &vector.parameter else {
+                    return None;
+                };
+                let direction = direction_components(
+                    entity_ref_value(vector_params.get(1)?)?,
+                    entities,
+                    index,
+                )?;
+                Some(LineSupport {
+                    origin_mm,
+                    direction,
+                })
+            })();
+            support
+                .map(CurveSupport::Line)
+                .unwrap_or(CurveSupport::Other {
+                    entity_id: curve_id,
+                })
+        }
+        "CIRCLE" => {
+            let support = (|| {
+                let (center_mm, normal, x_direction) =
+                    axis2_placement_3d(entity_ref_value(params.get(1)?)?, entities, index)?;
+                Some(CircleSupport {
+                    center_mm,
+                    normal,
+                    x_direction,
+                    radius_mm: number(params.get(2)?)?,
+                })
+            })();
+            support
+                .map(CurveSupport::Circle)
+                .unwrap_or(CurveSupport::Other {
+                    entity_id: curve_id,
+                })
+        }
+        _ => CurveSupport::Other {
+            entity_id: curve_id,
+        },
+    }
+}
+
+pub(crate) fn axis2_placement_3d(
+    placement_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let placement = simple_record(&entities[*index.get(&placement_id)?])?;
+    if placement.name != "AXIS2_PLACEMENT_3D" {
+        return None;
+    }
+    let Parameter::List(params) = &placement.parameter else {
+        return None;
+    };
+    let origin_mm = cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)?;
+    let axis = match params.get(2)? {
+        Parameter::Ref(_) => {
+            direction_components(entity_ref_value(params.get(2)?)?, entities, index)?
+        }
+        Parameter::Omitted => [0.0, 0.0, 1.0],
+        _ => return None,
+    };
+    let axis = normalize(axis)?;
+    let raw_x = match params.get(3)? {
+        Parameter::Ref(_) => {
+            direction_components(entity_ref_value(params.get(3)?)?, entities, index)?
+        }
+        Parameter::Omitted => default_ref_direction(axis),
+        _ => return None,
+    };
+    let x_direction = normalize(sub(raw_x, mul(axis, dot(raw_x, axis))))?;
+    Some((origin_mm, axis, x_direction))
+}
+
+pub(crate) fn direction_components(
+    id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[f64; 3]> {
+    let record = simple_record(&entities[*index.get(&id)?])?;
+    if record.name != "DIRECTION" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let Parameter::List(values) = params.get(1)? else {
+        return None;
+    };
+    if values.len() != 3 {
+        return None;
+    }
+    normalize([
+        number(&values[0])?,
+        number(&values[1])?,
+        number(&values[2])?,
+    ])
+}
+
+pub(crate) fn vertex_point(
+    vertex_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[f64; 3]> {
+    let vertex = simple_record(&entities[*index.get(&vertex_id)?])?;
+    if vertex.name != "VERTEX_POINT" {
+        return None;
+    }
+    let Parameter::List(params) = &vertex.parameter else {
+        return None;
+    };
+    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)
+}
+
+pub(crate) fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
+    match parameter {
+        Parameter::Enumeration(value) if value == "T" => Some(true),
+        Parameter::Enumeration(value) if value == "F" => Some(false),
+        _ => None,
+    }
+}
+
+fn default_ref_direction(axis: [f64; 3]) -> [f64; 3] {
+    if axis[0].abs() <= axis[1].abs() && axis[0].abs() <= axis[2].abs() {
+        [1.0, 0.0, 0.0]
+    } else if axis[1].abs() <= axis[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = dot(vector, vector).sqrt();
+    if !length.is_finite() || length <= DIRECTION_TOLERANCE {
+        return None;
+    }
+    Some(mul(vector, 1.0 / length))
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn mul(a: [f64; 3], scalar: f64) -> [f64; 3] {
+    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
+}
 
 pub(crate) fn manifold_shell(
     solid_id: u64,
@@ -23,7 +454,7 @@ pub(crate) fn face_surface(
     index: &HashMap<u64, usize>,
 ) -> Option<u64> {
     let record = simple_record(&entities[*index.get(&face_id)?])?;
-    if record.name != "ADVANCED_FACE" {
+    if record.name != "ADVANCED_FACE" && record.name != "FACE_SURFACE" {
         return None;
     }
     let Parameter::List(params) = &record.parameter else {
@@ -71,40 +502,12 @@ pub(crate) fn bound_loop_edges(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<(u64, HashSet<u64>, String)> {
-    let record = simple_record(&entities[*index.get(&bound_id)?])?;
-    if record.name != "FACE_BOUND" && record.name != "FACE_OUTER_BOUND" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let loop_id = entity_ref_value(params.get(1)?)?;
-    let orientation = enumeration_value(params.get(2)?)?;
-
-    let loop_record = simple_record(&entities[*index.get(&loop_id)?])?;
-    if loop_record.name != "EDGE_LOOP" {
-        return None;
-    }
-    let Parameter::List(loop_params) = &loop_record.parameter else {
-        return None;
-    };
-    let Parameter::List(oriented_edges) = loop_params.get(1)? else {
-        return None;
-    };
-
-    let mut edge_curves = HashSet::new();
-    for oriented in oriented_edges {
-        let oriented_id = entity_ref_value(oriented)?;
-        let oriented_record = simple_record(&entities[*index.get(&oriented_id)?])?;
-        if oriented_record.name != "ORIENTED_EDGE" {
-            return None;
-        }
-        let Parameter::List(oriented_params) = &oriented_record.parameter else {
-            return None;
-        };
-        edge_curves.insert(entity_ref_value(oriented_params.get(3)?)?);
-    }
-    Some((loop_id, edge_curves, orientation))
+    let loop_ = ordered_bound_loop(bound_id, entities, index)?;
+    Some((
+        loop_.loop_id,
+        loop_.edges.iter().map(|edge| edge.edge_id).collect(),
+        if loop_.orientation { "T" } else { "F" }.to_string(),
+    ))
 }
 
 pub(crate) fn matching_plane_bound(

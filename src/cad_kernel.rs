@@ -24,7 +24,7 @@ pub trait CadKernel {
 #[cfg(feature = "cad-kernel-truck")]
 pub mod truck {
     use super::{CadKernel, KernelSummary};
-    use crate::cad_ir::{CadModel, CadNode, NodeId};
+    use crate::cad_ir::{CadModel, CadNode, Curve2d, NodeId, Profile2d};
     use anyhow::{Result, bail};
     use truck_modeling::*;
     use truck_stepio::out::{self, StepDesign};
@@ -37,27 +37,139 @@ pub mod truck {
         solid: Solid,
     }
 
-    fn extrude_polygon_z(points_mm: &[[f64; 2]], length_mm: f64) -> Result<Solid> {
-        if points_mm.len() < 3 {
-            bail!("polygon needs at least three points");
-        }
+    fn extrude_profile_z(profile: &Profile2d, length_mm: f64) -> Result<Solid> {
         if !length_mm.is_finite() || length_mm == 0.0 {
             bail!("extrusion length must be finite and nonzero");
         }
+        if profile.loops.len() != 1 {
+            bail!("Truck backend currently supports one profile loop");
+        }
+        let curves = &profile.loops[0].curves;
+        if curves.is_empty() {
+            bail!("profile loop must contain at least one curve");
+        }
 
-        let vertices = points_mm
+        let wire: Wire = if curves.len() == 1 {
+            match &curves[0] {
+                Curve2d::CircleArc {
+                    center_mm,
+                    radius_mm,
+                    start_angle_rad,
+                    end_angle_rad,
+                } if ((end_angle_rad - start_angle_rad).abs() - std::f64::consts::TAU).abs()
+                    <= 1.0e-9 =>
+                {
+                    let start = Point3::new(
+                        center_mm[0] + radius_mm * start_angle_rad.cos(),
+                        center_mm[1] + radius_mm * start_angle_rad.sin(),
+                        0.0,
+                    );
+                    primitive::circle(
+                        start,
+                        Point3::new(center_mm[0], center_mm[1], 0.0),
+                        Vector3::new(0.0, 0.0, 1.0),
+                        2,
+                    )
+                }
+                _ => profile_wire(curves)?,
+            }
+        } else {
+            profile_wire(curves)?
+        };
+
+        let face: Face = builder::try_attach_plane(vec![wire])?;
+        Ok(builder::tsweep(&face, Vector3::new(0.0, 0.0, length_mm)))
+    }
+
+    fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
+        let starts = curves
+            .iter()
+            .map(curve_start_point)
+            .collect::<Result<Vec<_>>>()?;
+        let vertices = starts
             .iter()
             .map(|[x, y]| builder::vertex(Point3::new(*x, *y, 0.0)))
             .collect::<Vec<_>>();
-        let mut edges = Vec::with_capacity(vertices.len());
-        for index in 0..vertices.len() {
-            let next = (index + 1) % vertices.len();
-            edges.push(builder::line(&vertices[index], &vertices[next]));
+        let mut edges = Vec::with_capacity(curves.len());
+
+        for (index, curve) in curves.iter().enumerate() {
+            let next = (index + 1) % curves.len();
+            let expected_end = curve_end_point(curve)?;
+            if point2_distance(expected_end, starts[next]) > 1.0e-8 {
+                bail!("profile curve endpoints are not topologically continuous");
+            }
+            match curve {
+                Curve2d::Line { .. } => {
+                    edges.push(builder::line(&vertices[index], &vertices[next]));
+                }
+                Curve2d::CircleArc {
+                    center_mm,
+                    radius_mm,
+                    start_angle_rad,
+                    end_angle_rad,
+                } => {
+                    let sweep = end_angle_rad - start_angle_rad;
+                    if !sweep.is_finite() || sweep.abs() <= 1.0e-12 {
+                        bail!("circle arc sweep must be finite and nonzero");
+                    }
+                    if sweep.abs() >= std::f64::consts::TAU - 1.0e-9 {
+                        bail!("full circles must be represented by one profile curve");
+                    }
+                    let midpoint = (start_angle_rad + end_angle_rad) * 0.5;
+                    let transit = Point3::new(
+                        center_mm[0] + radius_mm * midpoint.cos(),
+                        center_mm[1] + radius_mm * midpoint.sin(),
+                        0.0,
+                    );
+                    edges.push(builder::circle_arc(
+                        &vertices[index],
+                        &vertices[next],
+                        transit,
+                    ));
+                }
+                unsupported => {
+                    bail!("Truck backend does not yet evaluate profile curve {unsupported:?}")
+                }
+            }
         }
 
-        let wire: Wire = edges.into();
-        let face: Face = builder::try_attach_plane(vec![wire])?;
-        Ok(builder::tsweep(&face, Vector3::new(0.0, 0.0, length_mm)))
+        Ok(edges.into())
+    }
+
+    fn curve_start_point(curve: &Curve2d) -> Result<[f64; 2]> {
+        match curve {
+            Curve2d::Line { start_mm, .. } => Ok(*start_mm),
+            Curve2d::CircleArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                ..
+            } => Ok([
+                center_mm[0] + radius_mm * start_angle_rad.cos(),
+                center_mm[1] + radius_mm * start_angle_rad.sin(),
+            ]),
+            unsupported => bail!("unsupported profile curve {unsupported:?}"),
+        }
+    }
+
+    fn curve_end_point(curve: &Curve2d) -> Result<[f64; 2]> {
+        match curve {
+            Curve2d::Line { end_mm, .. } => Ok(*end_mm),
+            Curve2d::CircleArc {
+                center_mm,
+                radius_mm,
+                end_angle_rad,
+                ..
+            } => Ok([
+                center_mm[0] + radius_mm * end_angle_rad.cos(),
+                center_mm[1] + radius_mm * end_angle_rad.sin(),
+            ]),
+            unsupported => bail!("unsupported profile curve {unsupported:?}"),
+        }
+    }
+
+    fn point2_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
     }
 
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
@@ -66,10 +178,7 @@ pub mod truck {
                 if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
                     bail!("Truck backend currently supports local Z extrusion only");
                 }
-                let points = profile.single_polygon_points().ok_or_else(|| {
-                    anyhow::anyhow!("Truck backend currently needs one line polygon")
-                })?;
-                extrude_polygon_z(&points, vector_mm[2])
+                extrude_profile_z(profile, vector_mm[2])
             }
             CadNode::Transform { transform, child } => {
                 let child = evaluate_node(model, *child)?;
@@ -136,6 +245,75 @@ pub mod truck {
             });
             model.add_root(root)?;
             Ok((model, root))
+        }
+
+        #[test]
+        fn evaluates_semicircular_profile_extrusion() -> Result<()> {
+            use crate::cad_ir::{Curve2d, ProfileLoop};
+
+            let mut model = CadModel::new();
+            let profile = Profile2d {
+                loops: vec![ProfileLoop {
+                    curves: vec![
+                        Curve2d::Line {
+                            start_mm: [-1.0, 0.0],
+                            end_mm: [1.0, 0.0],
+                        },
+                        Curve2d::CircleArc {
+                            center_mm: [0.0, 0.0],
+                            radius_mm: 1.0,
+                            start_angle_rad: 0.0,
+                            end_angle_rad: std::f64::consts::PI,
+                        },
+                    ],
+                }],
+            };
+            let root = model.add_node(CadNode::Extrude {
+                profile,
+                vector_mm: [0.0, 0.0, 2.0],
+            });
+            model.add_root(root)?;
+
+            let kernel = TruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_full_circle_profile_extrusion() -> Result<()> {
+            use crate::cad_ir::{Curve2d, ProfileLoop};
+
+            let mut model = CadModel::new();
+            let profile = Profile2d {
+                loops: vec![ProfileLoop {
+                    curves: vec![Curve2d::CircleArc {
+                        center_mm: [0.0, 0.0],
+                        radius_mm: 2.0,
+                        start_angle_rad: 0.0,
+                        end_angle_rad: std::f64::consts::TAU,
+                    }],
+                }],
+            };
+            let root = model.add_node(CadNode::Extrude {
+                profile,
+                vector_mm: [0.0, 0.0, 5.0],
+            });
+            model.add_root(root)?;
+
+            let kernel = TruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            let step = kernel.to_step(&evaluated)?;
+            assert!(step.starts_with("ISO-10303-21;"));
+            ruststep::parser::parse(&step)?;
+            Ok(())
         }
 
         #[test]
