@@ -1120,27 +1120,13 @@ fn analyze_solid(
         match record.name.as_str() {
             "ADVANCED_FACE" => {
                 faces.push(id);
-                if let Some(geometry) = nth_entity_ref(&record.parameter, 2) {
-                    if let Some(signature) = geometry_signature(geometry, entities, index) {
-                        face_geometry.push(signature);
-                    } else {
-                        return None;
-                    }
-                } else {
-                    return None;
-                }
+                let geometry = nth_entity_ref(&record.parameter, 2)?;
+                face_geometry.push(geometry_signature(geometry, entities, index)?);
             }
             "EDGE_CURVE" => {
                 edge_count += 1;
-                if let Some(geometry) = nth_entity_ref(&record.parameter, 3) {
-                    if let Some(signature) = geometry_signature(geometry, entities, index) {
-                        edge_geometry.push(signature);
-                    } else {
-                        return None;
-                    }
-                } else {
-                    return None;
-                }
+                let geometry = nth_entity_ref(&record.parameter, 3)?;
+                edge_geometry.push(geometry_signature(geometry, entities, index)?);
             }
             "ORIENTED_EDGE" => oriented_edge_count += 1,
             "VERTEX_POINT" => {

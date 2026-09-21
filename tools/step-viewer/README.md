@@ -2,11 +2,11 @@
 
 Topology-aware before/after viewer for investigating STEP rewrites without loading native OCCT.
 
-The generator parses STEP with `ruststep`, converts the selected owning shell through `truck-stepio`, tessellates with Truck, and emits one HTML file with the meshes embedded as OBJ text. The browser view uses Three.js for display.
+The generator parses STEP with `ruststep`, converts the selected owning shell through `monstertruck-io`, tessellates with Monstertruck, and emits one HTML file with the meshes embedded as OBJ text. The browser view uses Three.js for display.
 
 ## Build
 
-Reuse the repository target directory so Truck is not rebuilt into a second target tree:
+Reuse the repository target directory so Monstertruck is not rebuilt into a second target tree:
 
 ```sh
 CARGO_TARGET_DIR=target cargo build --release --manifest-path tools/step-viewer/Cargo.toml
@@ -38,6 +38,6 @@ Tessellation tolerance defaults to `0.01` STEP model units and can be changed wi
 
 ## Current scope
 
-The viewer operates on directly defined `OPEN_SHELL` / `CLOSED_SHELL` source geometry. It deliberately does not expand `MAPPED_ITEM` assembly placements yet. This is sufficient for inspecting step-redox transformations on source faces and bodies; mapped-instance world-space visualization can be added separately if needed.
+The viewer operates on directly defined `OPEN_SHELL` / `CLOSED_SHELL` source geometry. Monstertruck conversion uses its reported loader path and the viewer refuses any shell conversion that reports lost faces, wires, edges, or vertices. It deliberately does not expand `MAPPED_ITEM` assembly placements yet. This is sufficient for inspecting step-redox transformations on source faces and bodies; mapped-instance world-space visualization can be added separately if needed.
 
-The emitted HTML imports Three.js modules from jsDelivr when opened in a browser; the STEP parsing and tessellation path itself is pure Rust/Truck.
+The emitted HTML imports Three.js modules from jsDelivr when opened in a browser; the STEP parsing and tessellation path itself is pure Rust/Monstertruck.

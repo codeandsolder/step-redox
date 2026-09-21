@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use step_redox::cad_ir::{CadModel, CadNode, Profile2d, emit_kcl};
 use step_redox::cad_kernel::CadKernel;
-use step_redox::cad_kernel::truck::TruckKernel;
+use step_redox::cad_kernel::monstertruck::MonstertruckKernel;
 
 fn validate_kcl(kcl_text: &str) -> Result<String> {
     #[cfg(feature = "kcl-conformance")]
@@ -30,18 +30,18 @@ fn main() -> Result<()> {
     model.add_root(body)?;
 
     let kcl_text = validate_kcl(&emit_kcl(&model)?)?;
-    let kernel = TruckKernel;
+    let kernel = MonstertruckKernel;
     let evaluated = kernel.evaluate(&model, body)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent {
-        bail!("Truck solid is inconsistent");
+        bail!("Monstertruck solid is inconsistent");
     }
     let step = kernel.to_step(&evaluated)?;
 
     std::fs::write("box.kcl", &kcl_text)?;
     std::fs::write("box.step", step)?;
     println!(
-        "ok: kcl_bytes={} truck_faces={} step_bytes={}",
+        "ok: kcl_bytes={} monstertruck_faces={} step_bytes={}",
         kcl_text.len(),
         summary.faces,
         std::fs::metadata("box.step")?.len()

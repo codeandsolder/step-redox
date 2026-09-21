@@ -21,18 +21,18 @@ pub trait CadKernel {
     fn to_step(&self, evaluated: &Self::Evaluated) -> Result<String>;
 }
 
-#[cfg(feature = "cad-kernel-truck")]
-pub mod truck {
+#[cfg(feature = "cad-kernel-monstertruck")]
+pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{CadModel, CadNode, Curve2d, NodeId, Profile2d};
     use anyhow::{Result, bail};
-    use truck_modeling::*;
-    use truck_stepio::out::{self, StepDesign};
+    use monstertruck_modeling::*;
+    use monstertruck_io::step::save::{self, CompleteStepDisplay};
 
     #[derive(Debug, Default, Clone, Copy)]
-    pub struct TruckKernel;
+    pub struct MonstertruckKernel;
 
-    /// Opaque wrapper: Truck topology does not escape the backend module.
+    /// Opaque wrapper: Monstertruck topology does not escape the backend module.
     pub struct EvaluatedShape {
         solid: Solid,
     }
@@ -42,7 +42,7 @@ pub mod truck {
             bail!("extrusion length must be finite and nonzero");
         }
         if profile.loops.len() != 1 {
-            bail!("Truck backend currently supports one profile loop");
+            bail!("Monstertruck backend currently supports one profile loop");
         }
         let curves = &profile.loops[0].curves;
         if curves.is_empty() {
@@ -78,7 +78,7 @@ pub mod truck {
         };
 
         let face: Face = builder::try_attach_plane(vec![wire])?;
-        Ok(builder::tsweep(&face, Vector3::new(0.0, 0.0, length_mm)))
+        Ok(builder::extrude(&face, Vector3::new(0.0, 0.0, length_mm)))
     }
 
     fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
@@ -128,7 +128,7 @@ pub mod truck {
                     ));
                 }
                 unsupported => {
-                    bail!("Truck backend does not yet evaluate profile curve {unsupported:?}")
+                    bail!("Monstertruck backend does not yet evaluate profile curve {unsupported:?}")
                 }
             }
         }
@@ -176,7 +176,7 @@ pub mod truck {
         match model.node(root)? {
             CadNode::Extrude { profile, vector_mm } => {
                 if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
-                    bail!("Truck backend currently supports local Z extrusion only");
+                    bail!("Monstertruck backend currently supports local Z extrusion only");
                 }
                 extrude_profile_z(profile, vector_mm[2])
             }
@@ -192,12 +192,12 @@ pub mod truck {
                 Ok(builder::transformed(&child, matrix))
             }
             unsupported => {
-                bail!("Truck backend does not yet evaluate node {root:?}: {unsupported:?}")
+                bail!("Monstertruck backend does not yet evaluate node {root:?}: {unsupported:?}")
             }
         }
     }
 
-    impl CadKernel for TruckKernel {
+    impl CadKernel for MonstertruckKernel {
         type Evaluated = EvaluatedShape;
 
         fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated> {
@@ -218,13 +218,12 @@ pub mod truck {
 
         fn to_step(&self, evaluated: &Self::Evaluated) -> Result<String> {
             let compressed = evaluated.solid.compress();
-            let design = StepDesign::from_model(out::StepModel::from(&compressed));
-            Ok(out::StepDisplay::new(
-                out::StepHeaderDescriptor {
-                    organization_system: "step-redox Truck backend".into(),
+            Ok(CompleteStepDisplay::new(
+                save::StepModel::from(&compressed),
+                save::StepHeaderDescriptor {
+                    organization_system: "step-redox Monstertruck backend".into(),
                     ..Default::default()
                 },
-                design,
             )
             .to_string())
         }
@@ -274,7 +273,7 @@ pub mod truck {
             });
             model.add_root(root)?;
 
-            let kernel = TruckKernel;
+            let kernel = MonstertruckKernel;
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -305,7 +304,7 @@ pub mod truck {
             });
             model.add_root(root)?;
 
-            let kernel = TruckKernel;
+            let kernel = MonstertruckKernel;
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -331,7 +330,7 @@ pub mod truck {
             });
             model.add_root(patterned)?;
 
-            let error = match TruckKernel.evaluate(&model, patterned) {
+            let error = match MonstertruckKernel.evaluate(&model, patterned) {
                 Ok(_) => panic!("unimplemented pattern unexpectedly evaluated"),
                 Err(error) => error,
             };
@@ -340,9 +339,9 @@ pub mod truck {
         }
 
         #[test]
-        fn evaluates_box_without_exposing_truck_topology() -> Result<()> {
+        fn evaluates_box_without_exposing_monstertruck_topology() -> Result<()> {
             let (model, root) = box_model()?;
-            let kernel = TruckKernel;
+            let kernel = MonstertruckKernel;
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
