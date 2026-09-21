@@ -6,6 +6,8 @@ use std::fmt::Write as _;
 
 mod bezier_recovery;
 mod brep;
+pub mod cad_ir;
+pub mod cad_kernel;
 pub mod compatibility;
 mod curve_replicas;
 mod face_coalesce;

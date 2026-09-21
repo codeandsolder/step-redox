@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 
+[features]
+default = []
+cad-kernel-truck = ["dep:truck-modeling", "dep:truck-stepio"]
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -11,6 +15,5 @@ encoding_rs = "0.8.41"
 ruststep = "0.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-
-[dev-dependencies]
-truck-stepio = "0.3.0"
+truck-modeling = { git = "https://github.com/ricosjp/truck.git", rev = "8d03d8f7900d6aaff784d02092bf5126c1425749", optional = true }
+truck-stepio = { git = "https://github.com/ricosjp/truck.git", rev = "8d03d8f7900d6aaff784d02092bf5126c1425749", optional = true }

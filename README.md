@@ -65,6 +65,24 @@ A browser/WASM prototype lives under `web/`, including an experimental
 periodic bodies, and higher-level recovered count parameters; bidirectional
 periodic-body growth/shrink are implemented in `periodic_resize.rs`.
 
+## Canonical CAD recovery
+
+The long-term representation is a backend-neutral constructive DAG rather than an
+ever-smarter mutable STEP entity graph. `cad_ir` now provides the first slice of that
+model: analytic/curve profiles, extrude/revolve/sweep/boolean/transform/pattern nodes,
+assemblies, explicit provenance/proof status, exact B-rep fallbacks, and a structural
+complexity score that counts shared DAG nodes once. KCL is the intended human-editable
+serialization; the emitter currently lowers only proven polygon extrusion, translation,
+and linear-pattern subsets and fails closed on everything else.
+
+The first local evaluation backend is upstream Rust-native Truck pinned to a known-good
+git revision behind the optional `cad-kernel-truck` feature. Truck topology is wrapped in
+an opaque evaluated-shape type and does not escape the adapter. The backend currently
+evaluates only a single polygonal Z extrusion; extending the IR and extending a backend
+are intentionally separate operations. A 10 x 6 x 2 mm smoke model independently
+validated in OpenCascade as one valid six-face solid with 120 mm^3 volume and 184 mm^2
+surface area. The architecture spike is in `experiments/kcl-truck-spike/`.
+
 ## Validation and CI
 
 The regression harness under `validation/` downloads public upstream CAD fixtures
