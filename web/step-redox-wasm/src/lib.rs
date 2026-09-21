@@ -51,6 +51,7 @@ pub fn optimize_step(input: &[u8], profile_name: &str) -> Result<StepResult, JsV
         "compatibility": cleaned.compatibility,
         "patterns": cleaned.patterns,
         "periodic_bodies": cleaned.periodic_bodies,
+        "count_parameters": cleaned.count_parameters,
     }))
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(StepResult {
@@ -78,6 +79,39 @@ pub fn resize_linear_pattern(
         "compatibility": edited.compatibility,
         "patterns": edited.patterns,
         "periodic_bodies": edited.periodic_bodies,
+        "count_parameters": edited.count_parameters,
+    }))
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(StepResult {
+        bytes: edited.bytes,
+        report_json,
+    })
+}
+
+
+#[wasm_bindgen]
+pub fn resize_count_parameter(
+    input: &[u8],
+    parameter_index: usize,
+    new_sites: usize,
+) -> Result<StepResult, JsValue> {
+    let mut options = step_redox::Options::for_profile(step_redox::OutputProfile::Compact);
+    // Keep the editable semantic graph above low-level curve-replica factoring.
+    options.experimental_instance_translated_bspline_curves = false;
+    let semantic = step_redox::clean_bytes(input, &options)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let edited = step_redox::expand_count_parameter_bytes(
+        &semantic.bytes,
+        parameter_index,
+        new_sites,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let report_json = serde_json::to_string(&json!({
+        "resize": edited.resize,
+        "compatibility": edited.compatibility,
+        "patterns": edited.patterns,
+        "periodic_bodies": edited.periodic_bodies,
+        "count_parameters": edited.count_parameters,
     }))
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(StepResult {

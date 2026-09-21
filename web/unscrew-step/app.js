@@ -1,4 +1,4 @@
-import init, { optimize_step, resize_linear_pattern } from "./pkg/step_redox_wasm.js";
+import init, { optimize_step, resize_linear_pattern, resize_count_parameter } from "./pkg/step_redox_wasm.js";
 
 let wasmReady = null;
 let sourceFile = null;
@@ -72,7 +72,38 @@ function renderCompatibility(c) {
   }
 }
 
-function renderPatterns(patterns) {
+function renderCountParameters(parameters) {
+  const panel = $("countParamsPanel");
+  const host = $("countParams");
+  host.replaceChildren();
+  const editable = parameters
+    .map((p, index) => ({ p, index }))
+    .filter(({ p }) => p.body_grammar_proven);
+  panel.hidden = !editable.length;
+  editable.forEach(({ p, index }) => {
+    const row = document.createElement("div");
+    row.className = "pattern countParameter";
+    row.innerHTML = `
+      <div>
+        <strong>Parametric count: ${p.total_instances} instances</strong>
+        <div class="meta">
+          <span>${p.sites} sites</span>
+          <span>${p.instances_per_site}/site</span>
+          <span>pitch ${Number(p.pitch_mm).toFixed(6)} mm</span>
+          <span>${p.periodic_bodies.length} coupled body grammar${p.periodic_bodies.length === 1 ? "" : "s"}</span>
+          <span>${p.instance_patterns.length} coupled row${p.instance_patterns.length === 1 ? "" : "s"}</span>
+        </div>
+      </div>
+      <div class="edit">
+        <input class="sites" type="number" min="${p.sites + 1}" step="1" value="${p.sites}" aria-label="site count">
+        <button class="apply">Regenerate</button>
+      </div>`;
+    row.querySelector(".apply").addEventListener("click", () => editCountParameter(index, row));
+    host.append(row);
+  });
+}
+
+function renderPatterns(patterns, coupledPatternIndices = new Set()) {
   const panel = $("patternsPanel");
   const host = $("patterns");
   host.replaceChildren();
@@ -80,7 +111,8 @@ function renderPatterns(patterns) {
   patterns.forEach((p, index) => {
     const row = document.createElement("div");
     row.className = "pattern";
-    const safeLinear = p.dimension === 1 && p.fill_ratio === 1 && p.grid_shape?.[0] === p.item_ids.length;
+    const coupled = coupledPatternIndices.has(index);
+    const safeLinear = !coupled && p.dimension === 1 && p.fill_ratio === 1 && p.grid_shape?.[0] === p.item_ids.length;
     row.innerHTML = `
       <div>
         <strong>Pattern ${index + 1}: ${p.item_ids.length} instances</strong>
@@ -89,6 +121,7 @@ function renderPatterns(patterns) {
           <span>pitch ${p.pitch.map(x => Number(x).toFixed(6)).join(" × ")} mm</span>
           <span>grid ${p.grid_shape.join(" × ")}</span>
           <span>residual ${Number(p.max_residual_mm).toExponential(2)} mm</span>
+          ${coupled ? "<span>coupled to parametric body</span>" : ""}
         </div>
       </div>
       <div class="edit">
@@ -100,7 +133,7 @@ function renderPatterns(patterns) {
             <option value="end">end</option>
           </select>
           <button class="apply">Apply</button>
-        ` : "<span>read-only pattern</span>"}
+        ` : `<span>${coupled ? "edit through count parameter" : "read-only pattern"}</span>`}
       </div>`;
     if (safeLinear) {
       row.querySelector(".apply").addEventListener("click", () => editPattern(index, row));
@@ -116,9 +149,12 @@ function renderReport(report, inputSize, outputSize) {
   $("ratio").textContent = `${(100 * outputSize / inputSize).toFixed(2)}%`;
   const s = report.stats;
   $("entities").textContent = s ? `${s.input_entities.toLocaleString()} → ${s.output_entities.toLocaleString()}` : "—";
-  $("recoverySummary").textContent = s ? recoveryText(s) : "Pattern edit";
+  $("recoverySummary").textContent = s ? recoveryText(s) : "Semantic edit";
   renderCompatibility(report.compatibility);
-  renderPatterns(report.patterns || []);
+  const parameters = report.count_parameters || [];
+  renderCountParameters(parameters);
+  const coupled = new Set(parameters.flatMap(p => p.body_grammar_proven ? p.instance_patterns : []));
+  renderPatterns(report.patterns || [], coupled);
   $("report").textContent = JSON.stringify(report, null, 2);
   result.hidden = false;
 }
@@ -146,6 +182,29 @@ run.addEventListener("click", async () => {
     run.disabled = false;
   }
 });
+
+async function editCountParameter(index, row) {
+  if (!currentBytes) return;
+  const sites = Number(row.querySelector(".sites").value);
+  if (!Number.isInteger(sites) || sites < 1) return;
+  setStatus(`Regenerating coupled body + instance rows to ${sites} sites locally…`);
+  try {
+    await ensureWasm();
+    const beforeSize = currentBytes.length;
+    const out = resize_count_parameter(currentBytes, index, sites);
+    currentBytes = out.bytes;
+    const report = JSON.parse(out.reportJson);
+    renderReport(report, beforeSize, currentBytes.length);
+    const parameter = report.count_parameters?.find(p => p.body_grammar_proven && p.sites === sites);
+    const total = parameter?.total_instances;
+    setStatus(total
+      ? `Count updated atomically: ${sites} sites / ${total} instances, including the coupled body.`
+      : `Count updated atomically to ${sites} sites.`);
+  } catch (e) {
+    console.error(e);
+    setStatus(String(e), true);
+  }
+}
 
 async function editPattern(index, row) {
   if (!currentBytes) return;

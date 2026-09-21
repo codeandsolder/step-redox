@@ -170,6 +170,31 @@ def bbox_values(box: Bnd_Box):
             return [float(value) for value in values[:6]]
     raise RuntimeError("unsupported OCP Bnd_Box binding")
 
+def solid_inventory(shape):
+    solids = []
+    ex = TopExp_Explorer(shape, TopAbs_SOLID)
+    while ex.More():
+        solid = TopoDS.Solid(ex.Current())
+        volume = GProp_GProps()
+        BRepGProp.VolumeProperties_s(solid, volume)
+        surface = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(solid, surface)
+        box = Bnd_Box()
+        BRepBndLib.Add_s(solid, box, True)
+        bbox = bbox_values(box)
+        solids.append({
+            "volume": float(volume.Mass()),
+            "area": float(surface.Mass()),
+            "bbox_center": [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)],
+            "bbox_extent": [bbox[i + 3] - bbox[i] for i in range(3)],
+            "faces": count(solid, TopAbs_FACE),
+            "edges": count(solid, TopAbs_EDGE),
+            "vertices": count(solid, TopAbs_VERTEX),
+        })
+        ex.Next()
+    return solids
+
+
 def analyze(path: Path):
     shape, roots, transferred = load_step(path)
     volume = GProp_GProps()
@@ -183,6 +208,7 @@ def analyze(path: Path):
     bbox = bbox_values(box)
     center = [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)]
     extent = [bbox[i + 3] - bbox[i] for i in range(3)]
+    inventory = solid_inventory(shape)
     report = {
         "path": str(path),
         "bytes": path.stat().st_size,
@@ -202,6 +228,9 @@ def analyze(path: Path):
         "vertices": count(shape, TopAbs_VERTEX),
         "solids": count(shape, TopAbs_SOLID),
         "shells": count(shape, TopAbs_SHELL),
+        "solid_volume_sum": sum(solid["volume"] for solid in inventory),
+        "solid_area_sum": sum(solid["area"] for solid in inventory),
+        "solid_inventory": inventory,
     }
     return report, shape
 
@@ -321,6 +350,124 @@ def rel_error(a, b):
     return abs(a - b) / max(abs(a), abs(b), 1e-30)
 
 
+def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
+    checks = []
+    if not any(
+        key in thresholds
+        for key in (
+            "solid_topology_exact",
+            "solid_center_abs_mm",
+            "solid_bbox_extent_abs_mm",
+            "solid_volume_rel",
+            "solid_area_rel",
+        )
+    ):
+        return checks
+
+    if len(ref_solids) != len(cand_solids):
+        checks.append({
+            "name": "solid_inventory_count",
+            "value": len(cand_solids) - len(ref_solids),
+            "reference": len(ref_solids),
+            "candidate": len(cand_solids),
+            "limit": 0,
+            "pass": False,
+        })
+        return checks
+
+    unmatched = set(range(len(cand_solids)))
+    worst_center = 0.0
+    worst_extent = 0.0
+    worst_volume = 0.0
+    worst_area = 0.0
+    topology_mismatches = 0
+
+    # Match the most distinctive/largest solids first so repeated contact
+    # families cannot steal a unique housing candidate.
+    order = sorted(
+        range(len(ref_solids)),
+        key=lambda i: (
+            ref_solids[i]["faces"],
+            ref_solids[i]["volume"],
+            ref_solids[i]["area"],
+        ),
+        reverse=True,
+    )
+
+    for ref_index in order:
+        ref = ref_solids[ref_index]
+        candidates = []
+        for cand_index in unmatched:
+            cand = cand_solids[cand_index]
+            topology_same = (
+                ref["faces"] == cand["faces"]
+                and ref["edges"] == cand["edges"]
+                and ref["vertices"] == cand["vertices"]
+            )
+            ref_center = np.asarray(ref["bbox_center"])
+            cand_center = np.asarray(cand["bbox_center"]) + shift
+            center_delta = float(np.linalg.norm(ref_center - cand_center))
+            extent_delta = float(np.max(np.abs(
+                np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
+            )))
+            volume_delta = rel_error(ref["volume"], cand["volume"])
+            area_delta = rel_error(ref["area"], cand["area"])
+            # Prefer topology identity overwhelmingly, then local position and
+            # geometry. This remains deterministic for repeated identical parts.
+            score = (
+                (0.0 if topology_same else 1.0e9)
+                + center_delta * 1.0e6
+                + extent_delta * 1.0e5
+                + volume_delta * 1.0e4
+                + area_delta * 1.0e4
+            )
+            candidates.append((
+                score,
+                cand_index,
+                topology_same,
+                center_delta,
+                extent_delta,
+                volume_delta,
+                area_delta,
+            ))
+
+        if not candidates:
+            raise RuntimeError("solid inventory matcher exhausted candidates")
+        _, cand_index, topology_same, center_delta, extent_delta, volume_delta, area_delta = min(
+            candidates, key=lambda row: (row[0], row[1])
+        )
+        unmatched.remove(cand_index)
+        topology_mismatches += 0 if topology_same else 1
+        worst_center = max(worst_center, center_delta)
+        worst_extent = max(worst_extent, extent_delta)
+        worst_volume = max(worst_volume, volume_delta)
+        worst_area = max(worst_area, area_delta)
+
+    if thresholds.get("solid_topology_exact", False):
+        checks.append({
+            "name": "solid_topology_mismatches",
+            "value": topology_mismatches,
+            "limit": 0,
+            "pass": topology_mismatches == 0,
+        })
+
+    for name, value, unit in [
+        ("solid_center_abs_mm", worst_center, "mm"),
+        ("solid_bbox_extent_abs_mm", worst_extent, "mm"),
+        ("solid_volume_rel", worst_volume, ""),
+        ("solid_area_rel", worst_area, ""),
+    ]:
+        if name in thresholds:
+            checks.append({
+                "name": name,
+                "value": value,
+                "limit": thresholds[name],
+                "unit": unit,
+                "pass": value <= thresholds[name],
+            })
+    return checks
+
+
 def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
     shift = align_translation(ref, cand, alignment)
     checks = []
@@ -348,6 +495,8 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         ("volume", "volume_rel"),
         ("area", "area_rel"),
         ("edge_length", "edge_length_rel"),
+        ("solid_volume_sum", "solid_volume_sum_rel"),
+        ("solid_area_sum", "solid_area_sum_rel"),
     ]:
         if config_key in thresholds:
             add(config_key, rel_error(ref[metric], cand[metric]), thresholds[config_key])
@@ -374,6 +523,13 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         denom = max(float(np.linalg.norm(a)), float(np.linalg.norm(b)), 1e-30)
         add("inertia_rel", float(np.linalg.norm(a - b) / denom), thresholds["inertia_rel"])
 
+    checks.extend(compare_solid_inventory(
+        ref.get("solid_inventory", []),
+        cand.get("solid_inventory", []),
+        shift,
+        thresholds,
+    ))
+
     return shift, checks
 
 
@@ -382,6 +538,7 @@ def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: d
     ref_tris = tessellate(ref_shape)
     cand_tris = tessellate(cand_shape) + np.asarray(shift)[None, None, :]
     results = []
+    contact_images = []
     for view_name in views:
         frame = projection_frame(ref_tris, VIEWS[view_name])
         ref_img = render_triangles(ref_tris, frame)
@@ -414,17 +571,18 @@ def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: d
             and silhouette_xor <= thresholds.get("silhouette_xor", 1.0)
         )
         results.append(result)
+        contact_images.append((view_name, ref_img, cand_img, diff))
 
-    if results:
+    if contact_images:
         thumb = 220
         label_h = 24
-        sheet = Image.new("L", (thumb * 3, (thumb + label_h) * len(results)), 255)
+        sheet = Image.new("L", (thumb * 3, (thumb + label_h) * len(contact_images)), 255)
         draw = ImageDraw.Draw(sheet)
-        for row, result in enumerate(results):
+        for row, (view_name, ref_img, cand_img, diff_img) in enumerate(contact_images):
             y = row * (thumb + label_h)
-            draw.text((6, y + 5), result["view"], fill=0)
-            for col, key in enumerate(["reference", "candidate", "diff"]):
-                image = Image.open(result[key]).convert("L")
+            draw.text((6, y + 5), view_name, fill=0)
+            for col, image in enumerate((ref_img, cand_img, diff_img)):
+                image = image.copy()
                 image.thumbnail((thumb, thumb), Image.Resampling.LANCZOS)
                 x = col * thumb + (thumb - image.width) // 2
                 yy = y + label_h + (thumb - image.height) // 2
@@ -467,15 +625,25 @@ def run_manifest(
     step_count_resize: Path | None = None,
 ):
     manifest = json.loads(manifest_path.read_text())
+    cases = [
+        case for case in manifest.get("cases", [])
+        if case.get("enabled", True) is not False
+    ]
+    needed_fixtures = {
+        fixture
+        for case in cases
+        for fixture in (
+            case["input_fixture"],
+            case.get("reference_fixture", case["input_fixture"]),
+        )
+    }
     fixtures = {
-        name: fetch_fixture(name, spec, cache)
-        for name, spec in manifest["fixtures"].items()
+        name: fetch_fixture(name, manifest["fixtures"][name], cache)
+        for name in sorted(needed_fixtures)
     }
     out.mkdir(parents=True, exist_ok=True)
     results = []
-    for case in manifest.get("cases", []):
-        if case.get("enabled", True) is False:
-            continue
+    for case in cases:
         name = case["name"]
         case_dir = out / name
         case_dir.mkdir(parents=True, exist_ok=True)

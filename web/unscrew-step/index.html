@@ -65,11 +65,20 @@
         <div id="compatibility" class="compatibility"></div>
       </section>
 
-      <section id="patternsPanel" class="panel" hidden>
-        <h2>Editable regular patterns</h2>
+      <section id="countParamsPanel" class="panel" hidden>
+        <h2>Parametric count</h2>
         <p>
-          Controls appear only for patterns proven to be exact contiguous lattices.
-          Editing a pattern does not automatically resize unrelated surrounding bodies.
+          Shown only when step-redox proves the repeated body and its instance rows share one count.
+          Regeneration updates the housing and every coupled row atomically.
+        </p>
+        <div id="countParams"></div>
+      </section>
+
+      <section id="patternsPanel" class="panel" hidden>
+        <h2>Recovered regular patterns</h2>
+        <p>
+          Exact contiguous lattices are listed here. Rows coupled to a proven body are edited through
+          the parametric count above; standalone patterns can still be edited independently.
         </p>
         <div id="patterns"></div>
       </section>

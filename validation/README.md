@@ -15,10 +15,14 @@ case recovers the count grammar from an upstream 48-contact header, generates
 - OCCT import and BRepCheck validity
 - solid, shell, face, edge, and vertex counts
 - bounding-box center and extents
-- volume, surface area, total edge length
+- compound-level volume, surface area, total edge length
+- per-solid topology, position, extents, volume, and area
+- summed per-solid material volume/area for multi-solid assemblies
 - center of mass and inertia tensor
 - deterministic software renders from +X, -X, +Y, -Y, +Z, -Z, and two isometric views
 - render mean absolute error, changed-pixel fraction, and silhouette XOR
+
+For mapped multi-solid assemblies, OpenCascade's one-shot compound volume can differ by several ppm even when every imported solid matches independently to numerical noise. The harness therefore keeps the compound integral visible but uses the summed per-solid volume as the stricter occupied-material invariant.
 
 OCCT performs tessellation, but rendering is done in software with Pillow.
 There is no OpenGL/GPU/display-server dependency, so CI images should be

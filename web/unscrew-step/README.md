@@ -1,7 +1,12 @@
 # Unscrew your STEP browser prototype
 
 This is intentionally a static site. STEP parsing, semantic recovery, compact/compat
-output and safe instance-pattern edits run in WebAssembly in the user's browser.
+output and editing run in WebAssembly in the user's browser.
+
+When step-redox proves that a periodic body and one or more instance rows share a
+single count parameter, the UI exposes one atomic count control. Regeneration
+updates the body and every coupled row together; those rows are then read-only in
+the lower-level pattern panel so the UI cannot create a half-resized component.
 
 Build the bindings:
 
