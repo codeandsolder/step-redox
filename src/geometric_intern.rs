@@ -240,7 +240,11 @@ fn direction(
     if coords.len() != 3 {
         return None;
     }
-    Some([number(&coords[0])?, number(&coords[1])?, number(&coords[2])?])
+    Some([
+        number(&coords[0])?,
+        number(&coords[1])?,
+        number(&coords[2])?,
+    ])
 }
 
 fn nth_ref(parameter: &Parameter, idx: usize) -> Option<u64> {

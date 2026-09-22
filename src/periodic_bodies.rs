@@ -102,14 +102,9 @@ pub fn detect_periodic_bodies(
 
             for face in face_ids.iter().copied() {
                 all_face_ids.push(face);
-                let Some(info) = analyze_planar_line_face(
-                    face,
-                    candidate.axis,
-                    v,
-                    w,
-                    entities,
-                    &index,
-                ) else {
+                let Some(info) =
+                    analyze_planar_line_face(face, candidate.axis, v, w, entities, &index)
+                else {
                     continue;
                 };
                 let projected_ticks = (info.projected / GEOM_TOL_MM).round() as i64;
@@ -179,8 +174,8 @@ pub fn detect_periodic_bodies(
                 continue;
             }
 
-            let min_stretch = (candidate.sites.saturating_sub(1)) as f64 * candidate.pitch
-                - GEOM_TOL_MM;
+            let min_stretch =
+                (candidate.sites.saturating_sub(1)) as f64 * candidate.pitch - GEOM_TOL_MM;
             let mut stretch = Vec::new();
             let mut fixed = Vec::new();
             for face in all_face_ids {
@@ -229,10 +224,12 @@ pub fn detect_periodic_bodies(
             .cmp(&a.repeat_faces)
             .then_with(|| a.solid_id.cmp(&b.solid_id))
     });
-    out.dedup_by(|a, b| a.solid_id == b.solid_id
-        && a.sites == b.sites
-        && (a.pitch_mm - b.pitch_mm).abs() <= GEOM_TOL_MM
-        && parallel(a.axis, b.axis));
+    out.dedup_by(|a, b| {
+        a.solid_id == b.solid_id
+            && a.sites == b.sites
+            && (a.pitch_mm - b.pitch_mm).abs() <= GEOM_TOL_MM
+            && parallel(a.axis, b.axis)
+    });
     out
 }
 
@@ -357,8 +354,14 @@ fn analyze_planar_line_face(
         (lo[1] + hi[1]) * 0.5,
         (lo[2] + hi[2]) * 0.5,
     ];
-    let projected_values = points.iter().map(|&point| dot(point, axis)).collect::<Vec<_>>();
-    let min_projected = projected_values.iter().copied().fold(f64::INFINITY, f64::min);
+    let projected_values = points
+        .iter()
+        .map(|&point| dot(point, axis))
+        .collect::<Vec<_>>();
+    let min_projected = projected_values
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
     let max_projected = projected_values
         .iter()
         .copied()

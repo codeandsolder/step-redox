@@ -45,12 +45,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let input =
         std::fs::read(&cli.input).with_context(|| format!("read {}", cli.input.display()))?;
-    let edited = step_redox::resize_linear_pattern_bytes(
-        &input,
-        cli.pattern,
-        cli.count,
-        cli.anchor.into(),
-    )?;
+    let edited =
+        step_redox::resize_linear_pattern_bytes(&input, cli.pattern, cli.count, cli.anchor.into())?;
     std::fs::write(&cli.output, &edited.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;
 

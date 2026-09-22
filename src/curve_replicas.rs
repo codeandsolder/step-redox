@@ -237,12 +237,7 @@ fn parse_curve(
     }
     for p in &xyz {
         let r = sub(*p, p0);
-        key.push_str(&format!(
-            "{},{},{};",
-            quant(r[0]),
-            quant(r[1]),
-            quant(r[2])
-        ));
+        key.push_str(&format!("{},{},{};", quant(r[0]), quant(r[1]), quant(r[2])));
     }
 
     Some(CurveInfo {
@@ -354,7 +349,6 @@ fn rewrite_param(param: &mut Parameter, alias: &HashMap<u64, u64>) {
         _ => {}
     }
 }
-
 
 #[cfg(test)]
 mod tests {

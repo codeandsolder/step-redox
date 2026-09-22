@@ -9,11 +9,10 @@ mod brep;
 pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
-pub mod formed_sheet;
-pub mod solid_extrusions;
 pub mod compatibility;
 mod curve_replicas;
 mod face_coalesce;
+pub mod formed_sheet;
 mod geometric_intern;
 mod instances;
 mod line_recovery;
@@ -24,6 +23,7 @@ pub mod periodic_bodies;
 pub mod periodic_chains;
 pub mod periodic_resize;
 mod planar_features;
+pub mod solid_extrusions;
 mod spherical_caps;
 mod surface_recovery;
 
@@ -208,8 +208,7 @@ pub fn detect_formed_sheet_evidence_bytes(
     input: &[u8],
 ) -> Result<Vec<formed_sheet::FormedSheetEvidence>> {
     let (input_text, _) = decode_input(input)?;
-    let exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -232,8 +231,7 @@ pub fn detect_solid_extrusions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
     let (input_text, _) = decode_input(input)?;
-    let exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -258,8 +256,7 @@ pub fn detect_periodic_chains_bytes(
     input: &[u8],
 ) -> Result<Vec<periodic_chains::PeriodicChainPattern>> {
     let (input_text, _) = decode_input(input)?;
-    let exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -280,12 +277,7 @@ pub fn resize_periodic_chain_bytes(
     chain_index: usize,
     new_sites: usize,
 ) -> Result<PeriodicChainEditOutput> {
-    resize_periodic_chain_bytes_with_anchor(
-        input,
-        chain_index,
-        new_sites,
-        CountAnchor::Start,
-    )
+    resize_periodic_chain_bytes_with_anchor(input, chain_index, new_sites, CountAnchor::Start)
 }
 
 /// Resize one proven periodic fused-solid chain with explicit placement anchoring.
@@ -332,12 +324,8 @@ pub fn resize_periodic_chain_bytes_with_anchor(
         original.sites - half
     };
 
-    let first = resize_periodic_chain_bytes_one_side(
-        input,
-        chain_index,
-        mid_sites,
-        CountAnchor::Start,
-    )?;
+    let first =
+        resize_periodic_chain_bytes_one_side(input, chain_index, mid_sites, CountAnchor::Start)?;
     let followup_index =
         find_matching_periodic_chain(&first.periodic_chains, mid_sites, &original)?;
     let mut second = resize_periodic_chain_bytes_one_side(
@@ -357,8 +345,7 @@ pub fn resize_periodic_chain_bytes_with_anchor(
     combined.welded_edges = first.resize.welded_edges + second.resize.welded_edges;
     combined.rebuilt_stretch_faces =
         first.resize.rebuilt_stretch_faces + second.resize.rebuilt_stretch_faces;
-    combined.new_stretch_edges =
-        first.resize.new_stretch_edges + second.resize.new_stretch_edges;
+    combined.new_stretch_edges = first.resize.new_stretch_edges + second.resize.new_stretch_edges;
     combined.added_entities = first.resize.added_entities + second.resize.added_entities;
     combined.pruned_entities = first.resize.pruned_entities + second.resize.pruned_entities;
     combined.entity_delta = first.resize.entity_delta + second.resize.entity_delta;
@@ -427,8 +414,7 @@ fn resize_periodic_chain_bytes_one_side(
     // after the initial compact cleanup.
     let _ = geometric_intern::intern_geometric_supports(&mut section.entities);
     let _ = intern_section(&mut section.entities);
-    let detached_vertices =
-        periodic_resize::prune_detached_vertex_points(&mut section.entities);
+    let detached_vertices = periodic_resize::prune_detached_vertex_points(&mut section.entities);
     resize.pruned_entities += detached_vertices;
     resize.added_entities = section.entities.len().saturating_sub(source_entity_count);
     resize.entity_delta = section.entities.len() as isize - source_entity_count as isize;
@@ -483,9 +469,7 @@ pub fn expand_periodic_chain_bytes(
         .map(|chain| chain.sites)
         .ok_or_else(|| anyhow::anyhow!("periodic chain index {chain_index} not found"))?;
     if new_sites <= old_sites {
-        bail!(
-            "periodic-chain expansion requires growth ({old_sites} -> {new_sites})"
-        );
+        bail!("periodic-chain expansion requires growth ({old_sites} -> {new_sites})");
     }
     resize_periodic_chain_bytes(input, chain_index, new_sites)
 }
@@ -818,8 +802,7 @@ fn reverse_periodic_body(
 
 fn detect_count_parameters_bytes(input: &[u8]) -> Result<Vec<parameters::RecoveredCountParameter>> {
     let (input_text, _) = decode_input(input)?;
-    let exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }

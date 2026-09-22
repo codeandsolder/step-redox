@@ -242,7 +242,8 @@ fn validate_recovered_profile_curve(curve: &RecoveredProfileCurve) -> Result<()>
             let Some(min_control_points) = degree.checked_add(1) else {
                 bail!("recovered B-spline degree overflows dimensions");
             };
-            let Some(expected_knots) = control_points_mm.len().checked_add(min_control_points) else {
+            let Some(expected_knots) = control_points_mm.len().checked_add(min_control_points)
+            else {
                 bail!("recovered B-spline knot count overflows dimensions");
             };
             let endpoint_clamped = min_control_points.checked_mul(2).is_some_and(|min_knots| {

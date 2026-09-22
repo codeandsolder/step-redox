@@ -177,7 +177,6 @@ pub fn detect_instance_patterns(
     out
 }
 
-
 pub(crate) fn resize_filled_linear_pattern(
     entities: &mut Vec<EntityInstance>,
     pattern: &InstancePattern,
@@ -218,7 +217,11 @@ pub(crate) fn resize_filled_linear_pattern(
     for &item in &pattern.item_ids {
         let record = simple_record(
             entities
-                .get(*index.get(&item).ok_or_else(|| anyhow::anyhow!("missing mapped item #{item}"))?)
+                .get(
+                    *index
+                        .get(&item)
+                        .ok_or_else(|| anyhow::anyhow!("missing mapped item #{item}"))?,
+                )
                 .ok_or_else(|| anyhow::anyhow!("mapped item #{item} is complex"))?,
         )
         .ok_or_else(|| anyhow::anyhow!("mapped item #{item} is complex"))?;
@@ -235,7 +238,11 @@ pub(crate) fn resize_filled_linear_pattern(
             .ok_or_else(|| anyhow::anyhow!("mapped item #{item} has no placement target"))?;
         let target_record = simple_record(
             entities
-                .get(*index.get(&target).ok_or_else(|| anyhow::anyhow!("missing target #{target}"))?)
+                .get(
+                    *index
+                        .get(&target)
+                        .ok_or_else(|| anyhow::anyhow!("missing target #{target}"))?,
+                )
                 .ok_or_else(|| anyhow::anyhow!("target #{target} is complex"))?,
         )
         .ok_or_else(|| anyhow::anyhow!("target #{target} is complex"))?;
@@ -250,8 +257,7 @@ pub(crate) fn resize_filled_linear_pattern(
         }
         match &template_axis_tail {
             None => template_axis_tail = Some((target_params[2].clone(), target_params[3].clone())),
-            Some((axis, refdir))
-                if *axis == target_params[2] && *refdir == target_params[3] => {}
+            Some((axis, refdir)) if *axis == target_params[2] && *refdir == target_params[3] => {}
             Some(_) => bail!("pattern placements do not share exact axis/ref-direction references"),
         }
         old_targets.push(target);
@@ -305,17 +311,13 @@ pub(crate) fn resize_filled_linear_pattern(
                 pattern.origin,
                 scale(basis, old_count.saturating_sub(1) as f64),
             );
-            add(
-                old_end,
-                scale(basis, -(new_count.saturating_sub(1) as f64)),
-            )
+            add(old_end, scale(basis, -(new_count.saturating_sub(1) as f64)))
         }
     };
 
-    let (axis_param, refdir_param) = template_axis_tail
-        .ok_or_else(|| anyhow::anyhow!("missing placement template"))?;
-    let assignments = style_assignments
-        .ok_or_else(|| anyhow::anyhow!("missing style template"))?;
+    let (axis_param, refdir_param) =
+        template_axis_tail.ok_or_else(|| anyhow::anyhow!("missing placement template"))?;
+    let assignments = style_assignments.ok_or_else(|| anyhow::anyhow!("missing style template"))?;
 
     let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
     let reused = old_count.min(new_count);
@@ -360,9 +362,9 @@ pub(crate) fn resize_filled_linear_pattern(
             params[2] = entity_ref(placement);
             new_items.push(item);
             new_styles.push(
-                *old_style_ids
-                    .get(site)
-                    .ok_or_else(|| anyhow::anyhow!("missing style for reused pattern site {site}"))?,
+                *old_style_ids.get(site).ok_or_else(|| {
+                    anyhow::anyhow!("missing style for reused pattern site {site}")
+                })?,
             );
         } else {
             let item = push_simple(
@@ -400,15 +402,13 @@ pub(crate) fn resize_filled_linear_pattern(
         let idx = *current_index
             .get(&pattern.parent_representation)
             .ok_or_else(|| anyhow::anyhow!("parent representation disappeared"))?;
-        rewrite_ref_sequence(
-            &mut entities[idx],
-            1,
-            &pattern.item_ids,
-            &new_items,
-        )?;
+        rewrite_ref_sequence(&mut entities[idx], 1, &pattern.item_ids, &new_items)?;
     }
 
-    let old_style_set = old_style_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+    let old_style_set = old_style_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
     for entity in entities.iter_mut() {
         let Some(record) = simple_record_mut(entity) else {
             continue;
@@ -497,9 +497,11 @@ fn rewrite_ref_sequence(
     old_ids: &[u64],
     new_ids: &[u64],
 ) -> Result<()> {
-    let old_set = old_ids.iter().copied().collect::<std::collections::HashSet<_>>();
-    let record = simple_record_mut(entity)
-        .ok_or_else(|| anyhow::anyhow!("entity is complex"))?;
+    let old_set = old_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let record = simple_record_mut(entity).ok_or_else(|| anyhow::anyhow!("entity is complex"))?;
     let Parameter::List(params) = &mut record.parameter else {
         bail!("entity parameters are not a list");
     };
@@ -815,9 +817,7 @@ fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<Vec<u64>>> 
         .collect()
 }
 
-fn style_records_by_target(
-    entities: &[EntityInstance],
-) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
+fn style_records_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
     let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
     for entity in entities {
         let id = entity_id(entity);

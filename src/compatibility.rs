@@ -50,8 +50,7 @@ pub fn audit_entities(entities: &[EntityInstance]) -> CompatibilityAudit {
     let get = |name: &str| counts.get(name).copied().unwrap_or(0);
     let structural_risk_total = counts.values().sum();
     let has_mapped_items = get("MAPPED_ITEM") > 0 || get("REPRESENTATION_MAP") > 0;
-    let has_curve_or_surface_replicas =
-        get("CURVE_REPLICA") > 0 || get("SURFACE_REPLICA") > 0;
+    let has_curve_or_surface_replicas = get("CURVE_REPLICA") > 0 || get("SURFACE_REPLICA") > 0;
     let has_assembly_relationships = [
         "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
         "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",

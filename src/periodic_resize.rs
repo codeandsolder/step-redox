@@ -1023,7 +1023,10 @@ pub fn expand_periodic_chain_positive(
     }
     chain_require_supported_seam_edges(
         &graph,
-        source_unit_left.iter().chain(source_unit_right.iter()).copied(),
+        source_unit_left
+            .iter()
+            .chain(source_unit_right.iter())
+            .copied(),
     )?;
 
     let mut seam_pairs = Vec::<(u64, u64)>::new();
@@ -1388,12 +1391,14 @@ pub fn shrink_periodic_chain_positive(
         .copied()
         .collect::<HashSet<_>>();
 
-    let unit_faces = chain.gap_face_ids[remove_gap_start].len()
-        + chain.site_face_ids[remove_site_start].len();
+    let unit_faces =
+        chain.gap_face_ids[remove_gap_start].len() + chain.site_face_ids[remove_site_start].len();
 
     if remove_faces.is_empty()
         || kept_faces.iter().any(|face| tail_faces.contains(face))
-        || remove_faces.iter().any(|face| kept_faces.contains(face) || tail_faces.contains(face))
+        || remove_faces
+            .iter()
+            .any(|face| kept_faces.contains(face) || tail_faces.contains(face))
     {
         bail!("periodic chain shrink partition overlaps or removes no periodic unit");
     }
@@ -1497,7 +1502,10 @@ pub fn shrink_periodic_chain_positive(
     }
     chain_require_supported_seam_edges(
         &graph,
-        source_kept_right.iter().chain(source_tail_left.iter()).copied(),
+        source_kept_right
+            .iter()
+            .chain(source_tail_left.iter())
+            .copied(),
     )?;
 
     let mapped_tail_left = source_tail_left
@@ -1509,8 +1517,7 @@ pub fn shrink_periodic_chain_positive(
                 .ok_or_else(|| anyhow!("translated tail missing left seam edge #{edge}"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let seam_pairs =
-        chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
+    let seam_pairs = chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
 
     let mut prune_roots = remove_faces.clone();
     prune_roots.extend(tail_faces.iter().copied());
@@ -1765,9 +1772,7 @@ fn chain_rational_single_span_key(
         .and_then(entity_ref_list)
         .ok_or_else(|| anyhow!("complex seam curve #{curve} has invalid pole list"))?;
     if poles.len() != degree as usize + 1 {
-        bail!(
-            "complex seam curve #{curve} is not a single-span Bezier-equivalent spline"
-        );
+        bail!("complex seam curve #{curve} is not a single-span Bezier-equivalent spline");
     }
     if !matches!(bp.get(2), Some(Parameter::Enumeration(value)) if value == "UNSPECIFIED")
         || !matches!(bp.get(3), Some(Parameter::Enumeration(value)) if value == "F")
@@ -1777,7 +1782,8 @@ fn chain_rational_single_span_key(
     }
 
     let knots = chain_complex_record(records, "B_SPLINE_CURVE_WITH_KNOTS")?;
-    let kp = list_params(knots).ok_or_else(|| anyhow!("B_SPLINE_CURVE_WITH_KNOTS params invalid"))?;
+    let kp =
+        list_params(knots).ok_or_else(|| anyhow!("B_SPLINE_CURVE_WITH_KNOTS params invalid"))?;
     if kp.len() != 3 {
         bail!("complex seam curve #{curve} has unexpected knot-record arity");
     }
@@ -1813,7 +1819,8 @@ fn chain_rational_single_span_key(
     }
 
     let rational = chain_complex_record(records, "RATIONAL_B_SPLINE_CURVE")?;
-    let rp = list_params(rational).ok_or_else(|| anyhow!("RATIONAL_B_SPLINE_CURVE params invalid"))?;
+    let rp =
+        list_params(rational).ok_or_else(|| anyhow!("RATIONAL_B_SPLINE_CURVE params invalid"))?;
     let weights = match rp {
         [Parameter::List(items)] => items
             .iter()
@@ -2700,7 +2707,9 @@ impl<'a> GraphEditor<'a> {
         let mut unused = edges.clone();
         let mut cycles = Vec::new();
         while !unused.is_empty() {
-            let edge0 = *unused.iter().min()
+            let edge0 = *unused
+                .iter()
+                .min()
                 .ok_or_else(|| anyhow!("target boundary edge set unexpectedly empty"))?;
             let [start_vertex, _] = self.edge_vertices(edge0)?;
             let mut current_vertex = start_vertex;
@@ -2992,63 +3001,58 @@ mod tests {
                 ],
             )
         };
-        let curve = |id: u64, knot0: f64, knot1: f64, inner_weight: f64| {
-            EntityInstance::Complex {
-                id,
-                subsuper: ruststep::ast::SubSuperRecord(vec![
-                    Record {
-                        name: "BOUNDED_CURVE".to_string(),
-                        parameter: Parameter::List(Vec::new()),
-                    },
-                    Record {
-                        name: "B_SPLINE_CURVE".to_string(),
-                        parameter: Parameter::List(vec![
-                            Parameter::Integer(3),
-                            Parameter::List(vec![
-                                entity_ref(1),
-                                entity_ref(2),
-                                entity_ref(3),
-                                entity_ref(4),
-                            ]),
-                            Parameter::Enumeration("UNSPECIFIED".to_string()),
-                            Parameter::Enumeration("F".to_string()),
-                            Parameter::Enumeration("F".to_string()),
+        let curve = |id: u64, knot0: f64, knot1: f64, inner_weight: f64| EntityInstance::Complex {
+            id,
+            subsuper: ruststep::ast::SubSuperRecord(vec![
+                Record {
+                    name: "BOUNDED_CURVE".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+                Record {
+                    name: "B_SPLINE_CURVE".to_string(),
+                    parameter: Parameter::List(vec![
+                        Parameter::Integer(3),
+                        Parameter::List(vec![
+                            entity_ref(1),
+                            entity_ref(2),
+                            entity_ref(3),
+                            entity_ref(4),
                         ]),
-                    },
-                    Record {
-                        name: "B_SPLINE_CURVE_WITH_KNOTS".to_string(),
-                        parameter: Parameter::List(vec![
-                            Parameter::List(vec![Parameter::Integer(4), Parameter::Integer(4)]),
-                            Parameter::List(vec![
-                                Parameter::Real(knot0),
-                                Parameter::Real(knot1),
-                            ]),
-                            Parameter::Enumeration("UNSPECIFIED".to_string()),
-                        ]),
-                    },
-                    Record {
-                        name: "CURVE".to_string(),
-                        parameter: Parameter::List(Vec::new()),
-                    },
-                    Record {
-                        name: "GEOMETRIC_REPRESENTATION_ITEM".to_string(),
-                        parameter: Parameter::List(Vec::new()),
-                    },
-                    Record {
-                        name: "RATIONAL_B_SPLINE_CURVE".to_string(),
-                        parameter: Parameter::List(vec![Parameter::List(vec![
-                            Parameter::Real(1.0),
-                            Parameter::Real(inner_weight),
-                            Parameter::Real(inner_weight),
-                            Parameter::Real(1.0),
-                        ])]),
-                    },
-                    Record {
-                        name: "REPRESENTATION_ITEM".to_string(),
-                        parameter: Parameter::List(vec![Parameter::String(String::new())]),
-                    },
-                ]),
-            }
+                        Parameter::Enumeration("UNSPECIFIED".to_string()),
+                        Parameter::Enumeration("F".to_string()),
+                        Parameter::Enumeration("F".to_string()),
+                    ]),
+                },
+                Record {
+                    name: "B_SPLINE_CURVE_WITH_KNOTS".to_string(),
+                    parameter: Parameter::List(vec![
+                        Parameter::List(vec![Parameter::Integer(4), Parameter::Integer(4)]),
+                        Parameter::List(vec![Parameter::Real(knot0), Parameter::Real(knot1)]),
+                        Parameter::Enumeration("UNSPECIFIED".to_string()),
+                    ]),
+                },
+                Record {
+                    name: "CURVE".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+                Record {
+                    name: "GEOMETRIC_REPRESENTATION_ITEM".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+                Record {
+                    name: "RATIONAL_B_SPLINE_CURVE".to_string(),
+                    parameter: Parameter::List(vec![Parameter::List(vec![
+                        Parameter::Real(1.0),
+                        Parameter::Real(inner_weight),
+                        Parameter::Real(inner_weight),
+                        Parameter::Real(1.0),
+                    ])]),
+                },
+                Record {
+                    name: "REPRESENTATION_ITEM".to_string(),
+                    parameter: Parameter::List(vec![Parameter::String(String::new())]),
+                },
+            ]),
         };
         let edge = |id, curve| {
             simple(
@@ -3142,7 +3146,6 @@ mod tests {
     }
 }
 
-
 fn entity_descendant_closure(
     entities: &[EntityInstance],
     seeds: &HashSet<u64>,
@@ -3161,7 +3164,6 @@ fn entity_descendant_closure(
     }
     Ok(descendants)
 }
-
 
 /// Remove detached topological vertex roots left after later support/value
 /// interning. A bare VERTEX_POINT with no inbound STEP reference cannot
