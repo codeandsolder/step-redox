@@ -24,3 +24,9 @@ path = "fuzz_targets/solid_extrusions.rs"
 test = false
 doc = false
 bench = false
+[[bin]]
+name = "solid_revolutions"
+path = "fuzz_targets/solid_revolutions.rs"
+test = false
+doc = false
+bench = false

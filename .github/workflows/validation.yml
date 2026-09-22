@@ -28,6 +28,9 @@ jobs:
       - name: Fuzz solid extrusion recovery
         run: cargo +nightly fuzz run solid_extrusions -- -runs=10000 -dict=fuzz/step.dict
 
+      - name: Fuzz solid revolution recovery
+        run: cargo +nightly fuzz run solid_revolutions -- -runs=10000 -dict=fuzz/step.dict
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -77,8 +80,8 @@ jobs:
       - name: Validate Monstertruck CAD backend
         run: |
           cargo test --lib --release --locked --features cad-kernel-monstertruck
-          cargo clippy --lib --locked --features cad-kernel-monstertruck -- -D warnings
-          cargo clippy --bin step-revolution-scan --locked --features cad-kernel-monstertruck -- -D warnings
+          cargo clippy --lib --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+          cargo clippy --bin step-revolution-scan --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
 
       - name: Validate Monstertruck tooling
         run: |
