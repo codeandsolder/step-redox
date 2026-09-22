@@ -127,6 +127,23 @@ fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Pr
                 start_angle_rad: *start_angle_rad,
                 end_angle_rad: *end_angle_rad,
             },
+            RecoveredProfileCurve::Bezier {
+                control_points_mm, ..
+            } => Curve2d::Bezier {
+                control_points_mm: control_points_mm.clone(),
+            },
+            RecoveredProfileCurve::BSpline {
+                degree,
+                control_points_mm,
+                knots,
+                weights,
+                ..
+            } => Curve2d::BSpline {
+                degree: *degree,
+                control_points_mm: control_points_mm.clone(),
+                knots: knots.clone(),
+                weights: weights.clone(),
+            },
         })
         .collect::<Vec<_>>();
     Ok(Profile2d {
@@ -137,6 +154,9 @@ fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Pr
 fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
     if extrusion.profile_curves.is_empty() {
         bail!("solid extrusion needs at least one profile curve");
+    }
+    for curve in &extrusion.profile_curves {
+        validate_recovered_profile_curve(curve)?;
     }
     if !extrusion.height_mm.is_finite() || extrusion.height_mm <= 0.0 {
         bail!("solid extrusion height must be finite and positive");
@@ -171,6 +191,89 @@ fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
     let handedness = dot(cross(extrusion.x_axis, extrusion.y_axis), extrusion.z_axis);
     if (handedness - 1.0).abs() > 1.0e-10 {
         bail!("solid extrusion frame is not right-handed");
+    }
+    Ok(())
+}
+
+fn validate_recovered_profile_curve(curve: &RecoveredProfileCurve) -> Result<()> {
+    if curve.source_edge_ids().is_empty() {
+        bail!("recovered profile curve has no source edges");
+    }
+
+    let finite_point = |point: &[f64; 2]| point.iter().all(|value| value.is_finite());
+    match curve {
+        RecoveredProfileCurve::Line {
+            start_mm, end_mm, ..
+        } => {
+            if !finite_point(start_mm) || !finite_point(end_mm) || start_mm == end_mm {
+                bail!("recovered line has invalid endpoints");
+            }
+        }
+        RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            end_angle_rad,
+            ..
+        } => {
+            if !finite_point(center_mm)
+                || !radius_mm.is_finite()
+                || *radius_mm <= 0.0
+                || !start_angle_rad.is_finite()
+                || !end_angle_rad.is_finite()
+            {
+                bail!("recovered circle arc has invalid geometry");
+            }
+        }
+        RecoveredProfileCurve::Bezier {
+            control_points_mm, ..
+        } => {
+            if control_points_mm.len() < 2 || !control_points_mm.iter().all(finite_point) {
+                bail!("recovered Bezier curve has invalid control points");
+            }
+        }
+        RecoveredProfileCurve::BSpline {
+            degree,
+            control_points_mm,
+            knots,
+            weights,
+            ..
+        } => {
+            let Some(min_control_points) = degree.checked_add(1) else {
+                bail!("recovered B-spline degree overflows dimensions");
+            };
+            let Some(expected_knots) = control_points_mm.len().checked_add(min_control_points) else {
+                bail!("recovered B-spline knot count overflows dimensions");
+            };
+            let endpoint_clamped = min_control_points.checked_mul(2).is_some_and(|min_knots| {
+                knots.len() >= min_knots
+                    && knots[..min_control_points]
+                        .iter()
+                        .all(|knot| *knot == knots[0])
+                    && knots[knots.len() - min_control_points..]
+                        .iter()
+                        .all(|knot| *knot == knots[knots.len() - 1])
+            });
+            if *degree == 0
+                || control_points_mm.len() < min_control_points
+                || knots.len() != expected_knots
+                || !control_points_mm.iter().all(finite_point)
+                || !knots.iter().all(|value| value.is_finite())
+                || knots.windows(2).any(|pair| pair[0] > pair[1])
+                || knots.first() == knots.last()
+                || !endpoint_clamped
+            {
+                bail!("recovered B-spline has invalid dimensions or knots");
+            }
+            if let Some(weights) = weights
+                && (weights.len() != control_points_mm.len()
+                    || weights
+                        .iter()
+                        .any(|weight| !weight.is_finite() || *weight <= 0.0))
+            {
+                bail!("recovered B-spline has invalid weights");
+            }
+        }
     }
     Ok(())
 }
@@ -573,6 +676,56 @@ mod tests {
             Some(2.0e-12)
         );
         Ok(())
+    }
+
+    #[test]
+    fn malformed_spline_extrusions_fail_closed() {
+        let base = RecoveredSolidExtrusion {
+            solid_id: 10,
+            cap_face_ids: [20, 21],
+            side_face_ids: vec![30],
+            profile_curves: vec![RecoveredProfileCurve::Bezier {
+                source_edge_ids: vec![100],
+                control_points_mm: Vec::new(),
+            }],
+            origin_mm: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+            height_mm: 1.0,
+            max_residual_mm: 0.0,
+        };
+        assert!(recover_solid_extrusion_fragment(&base).is_err());
+
+        let mut invalid_bspline = base;
+        invalid_bspline.profile_curves = vec![RecoveredProfileCurve::BSpline {
+            source_edge_ids: vec![101],
+            degree: 2,
+            control_points_mm: vec![[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+            knots: vec![0.0, 0.0, 1.0],
+            weights: Some(vec![1.0, -1.0, 1.0]),
+        }];
+        assert!(recover_solid_extrusion_fragment(&invalid_bspline).is_err());
+
+        let mut overflowing_degree = invalid_bspline;
+        overflowing_degree.profile_curves = vec![RecoveredProfileCurve::BSpline {
+            source_edge_ids: vec![102],
+            degree: usize::MAX,
+            control_points_mm: vec![[0.0, 0.0], [1.0, 1.0]],
+            knots: Vec::new(),
+            weights: None,
+        }];
+        assert!(recover_solid_extrusion_fragment(&overflowing_degree).is_err());
+
+        let mut unclamped = overflowing_degree;
+        unclamped.profile_curves = vec![RecoveredProfileCurve::BSpline {
+            source_edge_ids: vec![103],
+            degree: 2,
+            control_points_mm: vec![[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+            knots: vec![0.0, 0.1, 0.2, 0.8, 0.9, 1.0],
+            weights: None,
+        }];
+        assert!(recover_solid_extrusion_fragment(&unclamped).is_err());
     }
 
     #[test]

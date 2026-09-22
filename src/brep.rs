@@ -1,7 +1,8 @@
 use crate::instances::{
     cartesian_point, entity_ref, entity_ref_value, number, simple_record, simple_record_mut,
 };
-use ruststep::ast::{EntityInstance, Parameter};
+use crate::surface_recovery;
+use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
 use std::collections::{HashMap, HashSet};
 
 const DIRECTION_TOLERANCE: f64 = 1.0e-15;
@@ -20,10 +21,26 @@ pub(crate) struct CylinderSupport {
     pub radius_mm: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BSplineSupport {
+    pub degree: usize,
+    pub control_points_mm: Vec<[f64; 3]>,
+    pub knots: Vec<f64>,
+    pub weights: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SplineExtrusionSupport {
+    pub profile: BSplineSupport,
+    pub extrusion_mm: [f64; 3],
+    pub max_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SurfaceSupport {
     Plane(PlaneSupport),
     Cylinder(CylinderSupport),
+    SplineExtrusion(SplineExtrusionSupport),
     Other { entity_id: u64 },
 }
 
@@ -41,14 +58,15 @@ pub(crate) struct CircleSupport {
     pub radius_mm: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CurveSupport {
     Line(LineSupport),
     Circle(CircleSupport),
+    BSpline(BSplineSupport),
     Other { entity_id: u64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OrientedEdgeUse {
     pub oriented_edge_id: u64,
     pub edge_id: u64,
@@ -201,55 +219,58 @@ pub(crate) fn surface_support(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> SurfaceSupport {
-    let Some(record) = index
+    if let Some(record) = index
         .get(&surface_id)
         .and_then(|&idx| simple_record(&entities[idx]))
-    else {
-        return SurfaceSupport::Other {
-            entity_id: surface_id,
-        };
-    };
-    let Parameter::List(params) = &record.parameter else {
-        return SurfaceSupport::Other {
-            entity_id: surface_id,
-        };
-    };
-
-    match record.name.as_str() {
-        "PLANE" => {
-            let support = (|| {
-                let placement = entity_ref_value(params.get(1)?)?;
-                let (origin_mm, normal, _) = axis2_placement_3d(placement, entities, index)?;
-                Some(PlaneSupport { origin_mm, normal })
-            })();
-            support
-                .map(SurfaceSupport::Plane)
-                .unwrap_or(SurfaceSupport::Other {
-                    entity_id: surface_id,
-                })
+        && let Parameter::List(params) = &record.parameter
+    {
+        match record.name.as_str() {
+            "PLANE" => {
+                let support = (|| {
+                    let placement = entity_ref_value(params.get(1)?)?;
+                    let (origin_mm, normal, _) = axis2_placement_3d(placement, entities, index)?;
+                    Some(PlaneSupport { origin_mm, normal })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Plane(support);
+                }
+            }
+            "CYLINDRICAL_SURFACE" => {
+                let support = (|| {
+                    let placement = entity_ref_value(params.get(1)?)?;
+                    let (axis_origin_mm, axis, x_direction) =
+                        axis2_placement_3d(placement, entities, index)?;
+                    Some(CylinderSupport {
+                        axis_origin_mm,
+                        axis,
+                        x_direction,
+                        radius_mm: number(params.get(2)?)?,
+                    })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Cylinder(support);
+                }
+            }
+            _ => {}
         }
-        "CYLINDRICAL_SURFACE" => {
-            let support = (|| {
-                let placement = entity_ref_value(params.get(1)?)?;
-                let (axis_origin_mm, axis, x_direction) =
-                    axis2_placement_3d(placement, entities, index)?;
-                Some(CylinderSupport {
-                    axis_origin_mm,
-                    axis,
-                    x_direction,
-                    radius_mm: number(params.get(2)?)?,
-                })
-            })();
-            support
-                .map(SurfaceSupport::Cylinder)
-                .unwrap_or(SurfaceSupport::Other {
-                    entity_id: surface_id,
-                })
-        }
-        _ => SurfaceSupport::Other {
-            entity_id: surface_id,
-        },
     }
+
+    surface_recovery::analyze_v_extrusion_surface(surface_id, entities, index, 1.0e-7)
+        .map(|evidence| {
+            SurfaceSupport::SplineExtrusion(SplineExtrusionSupport {
+                profile: BSplineSupport {
+                    degree: evidence.degree,
+                    control_points_mm: evidence.control_points_mm,
+                    knots: evidence.knots,
+                    weights: evidence.weights.and_then(normalize_weights),
+                },
+                extrusion_mm: evidence.extrusion_mm,
+                max_residual_mm: evidence.max_residual_mm,
+            })
+        })
+        .unwrap_or(SurfaceSupport::Other {
+            entity_id: surface_id,
+        })
 }
 
 pub(crate) fn curve_support(
@@ -257,70 +278,345 @@ pub(crate) fn curve_support(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> CurveSupport {
-    let Some(record) = index
-        .get(&curve_id)
-        .and_then(|&idx| simple_record(&entities[idx]))
-    else {
-        return CurveSupport::Other {
-            entity_id: curve_id,
-        };
-    };
-    let Parameter::List(params) = &record.parameter else {
-        return CurveSupport::Other {
-            entity_id: curve_id,
-        };
-    };
+    curve_support_inner(curve_id, entities, index, 0)
+}
 
-    match record.name.as_str() {
-        "LINE" => {
-            let support = (|| {
-                let origin_mm =
-                    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)?;
-                let vector_id = entity_ref_value(params.get(2)?)?;
-                let vector = simple_record(&entities[*index.get(&vector_id)?])?;
-                if vector.name != "VECTOR" {
-                    return None;
-                }
-                let Parameter::List(vector_params) = &vector.parameter else {
-                    return None;
-                };
-                let direction = direction_components(
-                    entity_ref_value(vector_params.get(1)?)?,
-                    entities,
-                    index,
-                )?;
-                Some(LineSupport {
-                    origin_mm,
-                    direction,
-                })
-            })();
-            support
-                .map(CurveSupport::Line)
-                .unwrap_or(CurveSupport::Other {
-                    entity_id: curve_id,
-                })
-        }
-        "CIRCLE" => {
-            let support = (|| {
-                let (center_mm, normal, x_direction) =
-                    axis2_placement_3d(entity_ref_value(params.get(1)?)?, entities, index)?;
-                Some(CircleSupport {
-                    center_mm,
-                    normal,
-                    x_direction,
-                    radius_mm: number(params.get(2)?)?,
-                })
-            })();
-            support
-                .map(CurveSupport::Circle)
-                .unwrap_or(CurveSupport::Other {
-                    entity_id: curve_id,
-                })
-        }
-        _ => CurveSupport::Other {
+fn curve_support_inner(
+    curve_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    wrapper_depth: usize,
+) -> CurveSupport {
+    if wrapper_depth >= 8 {
+        return CurveSupport::Other {
             entity_id: curve_id,
-        },
+        };
     }
+    let Some(&entity_index) = index.get(&curve_id) else {
+        return CurveSupport::Other {
+            entity_id: curve_id,
+        };
+    };
+    let entity = &entities[entity_index];
+
+    if let Some(record) = simple_record(entity)
+        && matches!(record.name.as_str(), "SURFACE_CURVE" | "SEAM_CURVE")
+        && let Parameter::List(params) = &record.parameter
+        && let Some(inner_curve) = params.get(1).and_then(entity_ref_value)
+        && inner_curve != curve_id
+    {
+        return curve_support_inner(inner_curve, entities, index, wrapper_depth + 1);
+    }
+
+    if let Some(record) = simple_record(entity)
+        && let Parameter::List(params) = &record.parameter
+    {
+        match record.name.as_str() {
+            "LINE" => {
+                let support = (|| {
+                    let origin_mm =
+                        cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)?;
+                    let vector_id = entity_ref_value(params.get(2)?)?;
+                    let vector = simple_record(&entities[*index.get(&vector_id)?])?;
+                    if vector.name != "VECTOR" {
+                        return None;
+                    }
+                    let Parameter::List(vector_params) = &vector.parameter else {
+                        return None;
+                    };
+                    let direction = direction_components(
+                        entity_ref_value(vector_params.get(1)?)?,
+                        entities,
+                        index,
+                    )?;
+                    Some(LineSupport {
+                        origin_mm,
+                        direction,
+                    })
+                })();
+                return support
+                    .map(CurveSupport::Line)
+                    .unwrap_or(CurveSupport::Other {
+                        entity_id: curve_id,
+                    });
+            }
+            "CIRCLE" => {
+                let support = (|| {
+                    let (center_mm, normal, x_direction) =
+                        axis2_placement_3d(entity_ref_value(params.get(1)?)?, entities, index)?;
+                    Some(CircleSupport {
+                        center_mm,
+                        normal,
+                        x_direction,
+                        radius_mm: number(params.get(2)?)?,
+                    })
+                })();
+                return support
+                    .map(CurveSupport::Circle)
+                    .unwrap_or(CurveSupport::Other {
+                        entity_id: curve_id,
+                    });
+            }
+            "BEZIER_CURVE" | "B_SPLINE_CURVE_WITH_KNOTS" => {
+                if let Some(spline) = parse_simple_bspline(record, entities, index) {
+                    return CurveSupport::BSpline(spline);
+                }
+            }
+            _ => {}
+        }
+    } else if let EntityInstance::Complex { subsuper, .. } = entity
+        && let Some(spline) = parse_complex_rational_bspline(subsuper, entities, index)
+    {
+        return CurveSupport::BSpline(spline);
+    }
+
+    CurveSupport::Other {
+        entity_id: curve_id,
+    }
+}
+
+fn parse_simple_bspline(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSupport> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    match record.name.as_str() {
+        "BEZIER_CURVE" => {
+            if params.len() != 6 {
+                return None;
+            }
+            let degree = positive_degree(params.get(1)?)?;
+            let order = degree.checked_add(1)?;
+            let control_points_mm = control_points_3d(params.get(2)?, entities, index)?;
+            if control_points_mm.len() != order
+                || !not_true_enum(params.get(4)?)
+                || !not_true_enum(params.get(5)?)
+            {
+                return None;
+            }
+            let mut knots = vec![0.0; order];
+            knots.extend(std::iter::repeat_n(1.0, order));
+            Some(BSplineSupport {
+                degree,
+                control_points_mm,
+                knots,
+                weights: None,
+            })
+        }
+        "B_SPLINE_CURVE_WITH_KNOTS" => {
+            if params.len() != 9 {
+                return None;
+            }
+            let degree = positive_degree(params.get(1)?)?;
+            let control_points_mm = control_points_3d(params.get(2)?, entities, index)?;
+            if !not_true_enum(params.get(4)?) || !not_true_enum(params.get(5)?) {
+                return None;
+            }
+            let multiplicities = positive_integer_list(params.get(6)?)?;
+            let values = finite_numeric_list(params.get(7)?)?;
+            let knots = normalized_expanded_knots(
+                degree,
+                control_points_mm.len(),
+                &multiplicities,
+                &values,
+            )?;
+            Some(BSplineSupport {
+                degree,
+                control_points_mm,
+                knots,
+                weights: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_complex_rational_bspline(
+    subsuper: &SubSuperRecord,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSupport> {
+    const REQUIRED: &[&str] = &[
+        "BOUNDED_CURVE",
+        "B_SPLINE_CURVE",
+        "B_SPLINE_CURVE_WITH_KNOTS",
+        "CURVE",
+        "GEOMETRIC_REPRESENTATION_ITEM",
+        "RATIONAL_B_SPLINE_CURVE",
+        "REPRESENTATION_ITEM",
+    ];
+    if subsuper.0.len() != REQUIRED.len()
+        || REQUIRED.iter().any(|name| {
+            subsuper
+                .0
+                .iter()
+                .filter(|record| record.name == *name)
+                .count()
+                != 1
+        })
+    {
+        return None;
+    }
+
+    let bspline = record_by_name(subsuper, "B_SPLINE_CURVE")?;
+    let Parameter::List(base) = &bspline.parameter else {
+        return None;
+    };
+    if base.len() != 5 {
+        return None;
+    }
+    let degree = positive_degree(base.first()?)?;
+    let control_points_mm = control_points_3d(base.get(1)?, entities, index)?;
+    if !not_true_enum(base.get(3)?) || !not_true_enum(base.get(4)?) {
+        return None;
+    }
+
+    let knot_record = record_by_name(subsuper, "B_SPLINE_CURVE_WITH_KNOTS")?;
+    let Parameter::List(knot_params) = &knot_record.parameter else {
+        return None;
+    };
+    if knot_params.len() != 3 {
+        return None;
+    }
+    let multiplicities = positive_integer_list(knot_params.first()?)?;
+    let values = finite_numeric_list(knot_params.get(1)?)?;
+    let knots =
+        normalized_expanded_knots(degree, control_points_mm.len(), &multiplicities, &values)?;
+
+    let rational = record_by_name(subsuper, "RATIONAL_B_SPLINE_CURVE")?;
+    let Parameter::List(rational_params) = &rational.parameter else {
+        return None;
+    };
+    let [Parameter::List(weight_params)] = rational_params.as_slice() else {
+        return None;
+    };
+    let raw_weights = weight_params
+        .iter()
+        .map(|parameter| number(parameter).filter(|weight| weight.is_finite() && *weight > 0.0))
+        .collect::<Option<Vec<_>>>()?;
+    if raw_weights.len() != control_points_mm.len() {
+        return None;
+    }
+
+    Some(BSplineSupport {
+        degree,
+        control_points_mm,
+        knots,
+        weights: Some(normalize_weights(raw_weights)?),
+    })
+}
+
+fn record_by_name<'a>(subsuper: &'a SubSuperRecord, name: &str) -> Option<&'a Record> {
+    let mut matches = subsuper.0.iter().filter(|record| record.name == name);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn positive_degree(parameter: &Parameter) -> Option<usize> {
+    match parameter {
+        Parameter::Integer(value) if *value >= 1 => usize::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn not_true_enum(parameter: &Parameter) -> bool {
+    matches!(parameter, Parameter::Enumeration(value) if value == "F" || value == "U")
+}
+
+fn control_points_3d(
+    parameter: &Parameter,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<[f64; 3]>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    let points = items
+        .iter()
+        .map(|item| cartesian_point(entity_ref_value(item)?, entities, index))
+        .collect::<Option<Vec<_>>>()?;
+    (!points.is_empty()
+        && points
+            .iter()
+            .flatten()
+            .all(|coordinate| coordinate.is_finite()))
+    .then_some(points)
+}
+
+fn positive_integer_list(parameter: &Parameter) -> Option<Vec<usize>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Parameter::Integer(value) if *value >= 1 => usize::try_from(*value).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| number(item).filter(|value| value.is_finite()))
+        .collect()
+}
+
+fn normalized_expanded_knots(
+    degree: usize,
+    control_points: usize,
+    multiplicities: &[usize],
+    values: &[f64],
+) -> Option<Vec<f64>> {
+    let order = degree.checked_add(1)?;
+    let expected_knots = control_points.checked_add(order)?;
+    let total_multiplicity = multiplicities
+        .iter()
+        .try_fold(0usize, |sum, &value| sum.checked_add(value))?;
+    if control_points < order
+        || multiplicities.len() != values.len()
+        || multiplicities.len() < 2
+        || multiplicities.first().copied()? != order
+        || multiplicities.last().copied()? != order
+        || total_multiplicity != expected_knots
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+    let start = *values.first()?;
+    let end = *values.last()?;
+    let span = end - start;
+    if !span.is_finite() || span <= 0.0 {
+        return None;
+    }
+    let mut knots = Vec::with_capacity(expected_knots);
+    for (&value, &multiplicity) in values.iter().zip(multiplicities) {
+        let normalized = (value - start) / span;
+        knots.extend(std::iter::repeat_n(normalized, multiplicity));
+    }
+    Some(knots)
+}
+
+fn normalize_weights(weights: Vec<f64>) -> Option<Vec<f64>> {
+    let scale = *weights.first()?;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let normalized = weights
+        .into_iter()
+        .map(|weight| weight / scale)
+        .collect::<Vec<_>>();
+    normalized
+        .iter()
+        .all(|weight| weight.is_finite() && *weight > 0.0)
+        .then_some(normalized)
 }
 
 pub(crate) fn axis2_placement_3d(

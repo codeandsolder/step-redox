@@ -20,6 +20,17 @@ pub(crate) struct VExtrusionStats {
     pub orphan_points_removed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VExtrusionEvidence {
+    pub surface_id: u64,
+    pub degree: usize,
+    pub control_points_mm: Vec<[f64; 3]>,
+    pub knots: Vec<f64>,
+    pub weights: Option<Vec<f64>>,
+    pub extrusion_mm: [f64; 3],
+    pub max_residual_mm: f64,
+}
+
 #[derive(Debug, Clone)]
 struct ParsedSurface {
     name: Parameter,
@@ -47,6 +58,7 @@ struct Candidate {
     u_knots: Parameter,
     knot_spec: Parameter,
     extrusion: [f64; 3],
+    max_residual_mm: f64,
     old_points: Vec<u64>,
 }
 
@@ -84,7 +96,9 @@ pub(crate) fn recover_v_extrusion_surfaces(entities: &mut Vec<EntityInstance>) -
         let Some(parsed) = parse_surface(surface_id, entities, &index) else {
             continue;
         };
-        let Some(candidate) = detect_v_extrusion(surface_id, &parsed, entities, &index) else {
+        let Some(candidate) =
+            detect_v_extrusion(surface_id, &parsed, entities, &index, GEOMETRY_TOLERANCE)
+        else {
             continue;
         };
         candidates.push(candidate);
@@ -223,7 +237,7 @@ fn parse_simple_bspline_surface(record: &Record) -> Option<ParsedSurface> {
     let u_degree = positive_degree(params.get(1)?)?;
     let v_degree = positive_degree(params.get(2)?)?;
     let control_points = parse_control_points(params.get(3)?)?;
-    if !is_false(params.get(6)?) || !canonical_unit_linear_v(params.get(9)?, params.get(11)?)? {
+    if !is_not_true(params.get(6)?) || !canonical_unit_linear_v(params.get(9)?, params.get(11)?)? {
         return None;
     }
 
@@ -270,7 +284,7 @@ fn parse_complex_rational_surface(subsuper: &SubSuperRecord) -> Option<ParsedSur
     // S(u,v) = C(u) + v * D, exactly the native extrusion parameterization.
     // A different knot interval would describe the same locus but a different
     // V parameter mapping and would require rewriting every trimming p-curve.
-    if !is_false(bspline_params.get(5)?)
+    if !is_not_true(bspline_params.get(5)?)
         || !canonical_unit_linear_v(knot_params.get(1)?, knot_params.get(3)?)?
     {
         return None;
@@ -344,12 +358,14 @@ fn parse_control_points(parameter: &Parameter) -> Option<Vec<Vec<u64>>> {
 }
 
 fn positive_degree(parameter: &Parameter) -> Option<usize> {
-    let degree = integer(parameter)?;
-    (degree > 0).then_some(degree as usize)
+    match integer(parameter)? {
+        degree if degree > 0 => usize::try_from(degree).ok(),
+        _ => None,
+    }
 }
 
-fn is_false(parameter: &Parameter) -> bool {
-    matches!(parameter, Parameter::Enumeration(value) if value == "F")
+fn is_not_true(parameter: &Parameter) -> bool {
+    matches!(parameter, Parameter::Enumeration(value) if value == "F" || value == "U")
 }
 
 fn detect_v_extrusion(
@@ -357,6 +373,7 @@ fn detect_v_extrusion(
     surface: &ParsedSurface,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
+    geometry_tolerance_mm: f64,
 ) -> Option<Candidate> {
     // Deliberately only recover the parameter-order-preserving case:
     // S(u,v) = profile(u) + v*D. U-sweep recovery would swap the
@@ -369,7 +386,11 @@ fn detect_v_extrusion(
         return None;
     }
 
+    if !geometry_tolerance_mm.is_finite() || geometry_tolerance_mm < 0.0 {
+        return None;
+    }
     let mut shared_delta = None;
+    let mut max_residual_mm = 0.0_f64;
     let mut profile_points = Vec::with_capacity(surface.control_points.len());
     let mut profile_weights = surface
         .weights
@@ -380,13 +401,15 @@ fn detect_v_extrusion(
         let p0 = cartesian_point(point_row[0], entities, index)?;
         let p1 = cartesian_point(point_row[1], entities, index)?;
         let delta = sub(p1, p0);
-        if norm(delta) <= GEOMETRY_TOLERANCE {
+        if norm(delta) <= geometry_tolerance_mm {
             return None;
         }
         if let Some(expected) = shared_delta {
-            if distance(delta, expected) > GEOMETRY_TOLERANCE {
+            let residual = distance(delta, expected);
+            if residual > geometry_tolerance_mm {
                 return None;
             }
+            max_residual_mm = max_residual_mm.max(residual);
         } else {
             shared_delta = Some(delta);
         }
@@ -416,8 +439,112 @@ fn detect_v_extrusion(
         u_knots: surface.u_knots.clone(),
         knot_spec: surface.knot_spec.clone(),
         extrusion: shared_delta?,
+        max_residual_mm,
         old_points,
     })
+}
+
+pub(crate) fn analyze_v_extrusion_surface(
+    surface_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    geometry_tolerance_mm: f64,
+) -> Option<VExtrusionEvidence> {
+    let parsed = parse_surface(surface_id, entities, index)?;
+    let candidate =
+        detect_v_extrusion(surface_id, &parsed, entities, index, geometry_tolerance_mm)?;
+    let control_points_mm = candidate
+        .profile_points
+        .iter()
+        .map(|&id| cartesian_point(id, entities, index))
+        .collect::<Option<Vec<_>>>()?;
+    let multiplicities = integer_parameter_list(&candidate.u_multiplicities)?;
+    let knot_values = numeric_parameter_list(&candidate.u_knots)?;
+    let knots = normalized_expanded_knots(
+        candidate.u_degree,
+        control_points_mm.len(),
+        &multiplicities,
+        &knot_values,
+    )?;
+    let weights = match candidate.profile_weights.as_ref() {
+        Some(items) => Some(
+            items
+                .iter()
+                .map(|item| number(item).filter(|value| value.is_finite() && *value > 0.0))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+
+    Some(VExtrusionEvidence {
+        surface_id,
+        degree: candidate.u_degree,
+        control_points_mm,
+        knots,
+        weights,
+        extrusion_mm: candidate.extrusion,
+        max_residual_mm: candidate.max_residual_mm,
+    })
+}
+
+fn integer_parameter_list(parameter: &Parameter) -> Option<Vec<usize>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| {
+            usize::try_from(integer(item)?)
+                .ok()
+                .filter(|value| *value > 0)
+        })
+        .collect()
+}
+
+fn numeric_parameter_list(parameter: &Parameter) -> Option<Vec<f64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| number(item).filter(|value| value.is_finite()))
+        .collect()
+}
+
+fn normalized_expanded_knots(
+    degree: usize,
+    control_points: usize,
+    multiplicities: &[usize],
+    knot_values: &[f64],
+) -> Option<Vec<f64>> {
+    let order = degree.checked_add(1)?;
+    let expected_knots = control_points.checked_add(order)?;
+    let total_multiplicity = multiplicities
+        .iter()
+        .try_fold(0usize, |sum, &value| sum.checked_add(value))?;
+    if degree == 0
+        || control_points < order
+        || multiplicities.len() != knot_values.len()
+        || multiplicities.len() < 2
+        || multiplicities.first().copied()? != order
+        || multiplicities.last().copied()? != order
+        || total_multiplicity != expected_knots
+        || knot_values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+    let start = *knot_values.first()?;
+    let end = *knot_values.last()?;
+    let span = end - start;
+    if !span.is_finite() || span <= 0.0 {
+        return None;
+    }
+    let mut expanded = Vec::with_capacity(expected_knots);
+    for (&value, &multiplicity) in knot_values.iter().zip(multiplicities) {
+        let normalized = (value - start) / span;
+        expanded.extend(std::iter::repeat_n(normalized, multiplicity));
+    }
+    Some(expanded)
 }
 
 #[allow(clippy::too_many_arguments)]
