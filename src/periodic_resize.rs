@@ -41,6 +41,18 @@ struct SsRow {
     edge: u64,
 }
 
+fn insert_stretch_edge(
+    stretch_edges: &mut HashMap<u64, HashSet<u64>>,
+    face: &u64,
+    edge: u64,
+) -> Result<()> {
+    stretch_edges
+        .get_mut(face)
+        .ok_or_else(|| anyhow!("missing target edge set for stretch face #{face}"))?
+        .insert(edge);
+    Ok(())
+}
+
 /// Expand a proven 1-D periodic body at its positive-axis end.
 ///
 /// This deliberately handles only growth for the first production increment.
@@ -237,7 +249,7 @@ pub fn expand_periodic_body_positive(
         let repeated = faces.iter().any(|face| repeat_faces.contains(face));
         if repeated {
             for stretch in faces.iter().filter(|face| stretch_faces.contains(face)) {
-                stretch_edges.get_mut(stretch).unwrap().insert(edge);
+                insert_stretch_edge(&mut stretch_edges, stretch, edge)?;
             }
         }
 
@@ -255,7 +267,7 @@ pub fn expand_periodic_body_positive(
                 .get(&source_edge)
                 .copied()
                 .ok_or_else(|| anyhow!("cell clone missing boundary edge #{source_edge}"))?;
-            stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+            insert_stretch_edge(&mut stretch_edges, &stretch, target_edge)?;
         }
     }
 
@@ -285,7 +297,7 @@ pub fn expand_periodic_body_positive(
             edge
         };
         for stretch in stretches {
-            stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+            insert_stretch_edge(&mut stretch_edges, &stretch, target_edge)?;
         }
     }
 
@@ -331,8 +343,8 @@ pub fn expand_periodic_body_positive(
             let nv = find_vertex(target_right)?;
             let edge = graph.make_edge_like(row.edge, va, nv)?;
             new_stretch_edges += 1;
-            stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
-            stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+            insert_stretch_edge(&mut stretch_edges, &pair.0, edge)?;
+            insert_stretch_edge(&mut stretch_edges, &pair.1, edge)?;
         }
 
         if short.is_empty() {
@@ -351,8 +363,8 @@ pub fn expand_periodic_body_positive(
         let gaps = &short[1..short.len() - 1];
 
         for row in std::iter::once(&left_end).chain(gaps.iter()) {
-            stretch_edges.get_mut(&pair.0).unwrap().insert(row.edge);
-            stretch_edges.get_mut(&pair.1).unwrap().insert(row.edge);
+            insert_stretch_edge(&mut stretch_edges, &pair.0, row.edge)?;
+            insert_stretch_edge(&mut stretch_edges, &pair.1, row.edge)?;
         }
 
         let prototype = gaps
@@ -368,8 +380,8 @@ pub fn expand_periodic_body_positive(
             let nvb = find_vertex(pvb)?;
             let edge = graph.make_edge_like(prototype.edge, nva, nvb)?;
             new_stretch_edges += 1;
-            stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
-            stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+            insert_stretch_edge(&mut stretch_edges, &pair.0, edge)?;
+            insert_stretch_edge(&mut stretch_edges, &pair.1, edge)?;
         }
 
         let [va, vb] = graph.edge_vertices(right_end.edge)?;
@@ -377,8 +389,8 @@ pub fn expand_periodic_body_positive(
         let nvb = find_vertex(add(graph.vertex_coord(vb)?, delta_total))?;
         let edge = graph.make_edge_like(right_end.edge, nva, nvb)?;
         new_stretch_edges += 1;
-        stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
-        stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+        insert_stretch_edge(&mut stretch_edges, &pair.0, edge)?;
+        insert_stretch_edge(&mut stretch_edges, &pair.1, edge)?;
     }
 
     for &face in &body.stretch_face_ids {
@@ -603,7 +615,7 @@ pub fn shrink_periodic_body_positive(
         let repeated = faces.iter().any(|face| kept_repeat_faces.contains(face));
         if repeated {
             for stretch in faces.iter().filter(|face| stretch_faces.contains(face)) {
-                stretch_edges.get_mut(stretch).unwrap().insert(edge);
+                insert_stretch_edge(&mut stretch_edges, stretch, edge)?;
             }
         }
     }
@@ -635,7 +647,7 @@ pub fn shrink_periodic_body_positive(
             edge
         };
         for stretch in stretches {
-            stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+            insert_stretch_edge(&mut stretch_edges, &stretch, target_edge)?;
         }
     }
 
@@ -682,8 +694,8 @@ pub fn shrink_periodic_body_positive(
             let nv = find_vertex(target_right)?;
             let edge = graph.make_edge_like(row.edge, va, nv)?;
             new_stretch_edges += 1;
-            stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
-            stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+            insert_stretch_edge(&mut stretch_edges, &pair.0, edge)?;
+            insert_stretch_edge(&mut stretch_edges, &pair.1, edge)?;
         }
 
         if short.is_empty() {
@@ -701,17 +713,11 @@ pub fn shrink_periodic_body_positive(
         let right_end = short[short.len() - 1];
         let gaps = &short[1..short.len() - 1];
 
-        stretch_edges
-            .get_mut(&pair.0)
-            .unwrap()
-            .insert(left_end.edge);
-        stretch_edges
-            .get_mut(&pair.1)
-            .unwrap()
-            .insert(left_end.edge);
+        insert_stretch_edge(&mut stretch_edges, &pair.0, left_end.edge)?;
+        insert_stretch_edge(&mut stretch_edges, &pair.1, left_end.edge)?;
         for row in gaps.iter().take(new_sites.saturating_sub(1)) {
-            stretch_edges.get_mut(&pair.0).unwrap().insert(row.edge);
-            stretch_edges.get_mut(&pair.1).unwrap().insert(row.edge);
+            insert_stretch_edge(&mut stretch_edges, &pair.0, row.edge)?;
+            insert_stretch_edge(&mut stretch_edges, &pair.1, row.edge)?;
         }
 
         let [va, vb] = graph.edge_vertices(right_end.edge)?;
@@ -719,8 +725,8 @@ pub fn shrink_periodic_body_positive(
         let nvb = find_vertex(add(graph.vertex_coord(vb)?, delta_total))?;
         let edge = graph.make_edge_like(right_end.edge, nva, nvb)?;
         new_stretch_edges += 1;
-        stretch_edges.get_mut(&pair.0).unwrap().insert(edge);
-        stretch_edges.get_mut(&pair.1).unwrap().insert(edge);
+        insert_stretch_edge(&mut stretch_edges, &pair.0, edge)?;
+        insert_stretch_edge(&mut stretch_edges, &pair.1, edge)?;
     }
 
     for &face in &body.stretch_face_ids {
@@ -1156,7 +1162,7 @@ pub fn expand_periodic_chain_positive(
                     .unwrap_or(edge);
                 target_edge = edge_map.get(&target_edge).copied().unwrap_or(target_edge);
                 for stretch in target_stretch {
-                    stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+                    insert_stretch_edge(&mut stretch_edges, &stretch, target_edge)?;
                 }
             }
             Ok(())
@@ -1194,7 +1200,7 @@ pub fn expand_periodic_chain_positive(
             .iter()
             .find(|(edge, _)| *edge == row.edge)
             .map(|(_, pair)| *pair)
-            .unwrap();
+            .ok_or_else(|| anyhow!("missing stretch-face pair for edge #{}", row.edge))?;
         let [mut va, mut vb] = graph.edge_vertices(row.edge)?;
         let mut pa = graph.vertex_coord(va)?;
         let mut pb = graph.vertex_coord(vb)?;
@@ -1215,8 +1221,8 @@ pub fn expand_periodic_chain_positive(
             new_stretch_edges += 1;
             graph.make_edge_like(row.edge, nva, nvb)?
         };
-        stretch_edges.get_mut(&pair[0]).unwrap().insert(target_edge);
-        stretch_edges.get_mut(&pair[1]).unwrap().insert(target_edge);
+        insert_stretch_edge(&mut stretch_edges, &pair[0], target_edge)?;
+        insert_stretch_edge(&mut stretch_edges, &pair[1], target_edge)?;
     }
 
     for &face in &chain.stretch_face_ids {
@@ -1570,7 +1576,7 @@ pub fn shrink_periodic_chain_positive(
                     .unwrap_or(edge);
                 target_edge = edge_map.get(&target_edge).copied().unwrap_or(target_edge);
                 for stretch in target_stretch {
-                    stretch_edges.get_mut(&stretch).unwrap().insert(target_edge);
+                    insert_stretch_edge(&mut stretch_edges, &stretch, target_edge)?;
                 }
             }
             Ok(())
@@ -1605,7 +1611,7 @@ pub fn shrink_periodic_chain_positive(
             .iter()
             .find(|(edge, _)| *edge == row.edge)
             .map(|(_, pair)| *pair)
-            .unwrap();
+            .ok_or_else(|| anyhow!("missing stretch-face pair for edge #{}", row.edge))?;
         let [mut va, mut vb] = graph.edge_vertices(row.edge)?;
         let mut pa = graph.vertex_coord(va)?;
         let mut pb = graph.vertex_coord(vb)?;
@@ -1626,8 +1632,8 @@ pub fn shrink_periodic_chain_positive(
             new_stretch_edges += 1;
             graph.make_edge_like(row.edge, nva, nvb)?
         };
-        stretch_edges.get_mut(&pair[0]).unwrap().insert(target_edge);
-        stretch_edges.get_mut(&pair[1]).unwrap().insert(target_edge);
+        insert_stretch_edge(&mut stretch_edges, &pair[0], target_edge)?;
+        insert_stretch_edge(&mut stretch_edges, &pair[1], target_edge)?;
     }
 
     for &face in &chain.stretch_face_ids {
@@ -2601,7 +2607,7 @@ impl<'a> GraphEditor<'a> {
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(index, _)| index)
-            .unwrap();
+            .ok_or_else(|| anyhow!("face #{face} target boundary has no scorable cycles"))?;
 
         let mut new_bounds = Vec::with_capacity(cycles.len());
         for (index, cycle) in cycles.iter_mut().enumerate() {
@@ -2694,7 +2700,8 @@ impl<'a> GraphEditor<'a> {
         let mut unused = edges.clone();
         let mut cycles = Vec::new();
         while !unused.is_empty() {
-            let edge0 = *unused.iter().min().unwrap();
+            let edge0 = *unused.iter().min()
+                .ok_or_else(|| anyhow!("target boundary edge set unexpectedly empty"))?;
             let [start_vertex, _] = self.edge_vertices(edge0)?;
             let mut current_vertex = start_vertex;
             let mut current_edge = edge0;

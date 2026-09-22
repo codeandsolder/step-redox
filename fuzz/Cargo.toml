@@ -1,0 +1,26 @@
+[package]
+name = "step-redox-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+step-redox = { path = ".." }
+
+[[bin]]
+name = "clean_idempotent"
+path = "fuzz_targets/clean_idempotent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "solid_extrusions"
+path = "fuzz_targets/solid_extrusions.rs"
+test = false
+doc = false
+bench = false

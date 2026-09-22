@@ -381,9 +381,9 @@ fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     }
 }
 
-fn list_params(record: &Record) -> Option<&Vec<Parameter>> {
+fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
-        Parameter::List(params) => Some(params),
+        Parameter::List(params) => Some(params.as_slice()),
         _ => None,
     }
 }
