@@ -46,8 +46,8 @@ pub fn recover_solid_extrusion_fragment(
     });
 
     let profile_edge_count = extrusion
-        .profile_curves
-        .iter()
+        .profile_loops()
+        .flatten()
         .map(|curve| curve.source_edge_ids().len())
         .sum::<usize>();
     let mut source_entity_ids =
@@ -57,8 +57,8 @@ pub fn recover_solid_extrusion_fragment(
     source_entity_ids.extend(extrusion.side_face_ids.iter().copied());
     source_entity_ids.extend(
         extrusion
-            .profile_curves
-            .iter()
+            .profile_loops()
+            .flatten()
             .flat_map(|curve| curve.source_edge_ids().iter().copied()),
     );
     source_entity_ids.sort_unstable();
@@ -105,58 +105,70 @@ pub fn recover_solid_extrusion_fragments(
 }
 
 fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
-    let curves = extrusion
-        .profile_curves
-        .iter()
-        .map(|curve| match curve {
-            RecoveredProfileCurve::Line {
-                start_mm, end_mm, ..
-            } => Curve2d::Line {
-                start_mm: *start_mm,
-                end_mm: *end_mm,
-            },
-            RecoveredProfileCurve::CircleArc {
-                center_mm,
-                radius_mm,
-                start_angle_rad,
-                end_angle_rad,
-                ..
-            } => Curve2d::CircleArc {
-                center_mm: *center_mm,
-                radius_mm: *radius_mm,
-                start_angle_rad: *start_angle_rad,
-                end_angle_rad: *end_angle_rad,
-            },
-            RecoveredProfileCurve::Bezier {
-                control_points_mm, ..
-            } => Curve2d::Bezier {
-                control_points_mm: control_points_mm.clone(),
-            },
-            RecoveredProfileCurve::BSpline {
-                degree,
-                control_points_mm,
-                knots,
-                weights,
-                ..
-            } => Curve2d::BSpline {
-                degree: *degree,
-                control_points_mm: control_points_mm.clone(),
-                knots: knots.clone(),
-                weights: weights.clone(),
-            },
+    let loops = extrusion
+        .profile_loops()
+        .map(|curves| {
+            let curves = curves
+                .iter()
+                .map(recovered_profile_curve_to_ir)
+                .collect::<Vec<_>>();
+            ProfileLoop { curves }
         })
         .collect::<Vec<_>>();
-    Ok(Profile2d {
-        loops: vec![ProfileLoop { curves }],
-    })
+    Ok(Profile2d { loops })
+}
+
+fn recovered_profile_curve_to_ir(curve: &RecoveredProfileCurve) -> Curve2d {
+    match curve {
+        RecoveredProfileCurve::Line {
+            start_mm, end_mm, ..
+        } => Curve2d::Line {
+            start_mm: *start_mm,
+            end_mm: *end_mm,
+        },
+        RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            end_angle_rad,
+            ..
+        } => Curve2d::CircleArc {
+            center_mm: *center_mm,
+            radius_mm: *radius_mm,
+            start_angle_rad: *start_angle_rad,
+            end_angle_rad: *end_angle_rad,
+        },
+        RecoveredProfileCurve::Bezier {
+            control_points_mm, ..
+        } => Curve2d::Bezier {
+            control_points_mm: control_points_mm.clone(),
+        },
+        RecoveredProfileCurve::BSpline {
+            degree,
+            control_points_mm,
+            knots,
+            weights,
+            ..
+        } => Curve2d::BSpline {
+            degree: *degree,
+            control_points_mm: control_points_mm.clone(),
+            knots: knots.clone(),
+            weights: weights.clone(),
+        },
+    }
 }
 
 fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
     if extrusion.profile_curves.is_empty() {
-        bail!("solid extrusion needs at least one profile curve");
+        bail!("solid extrusion needs a non-empty outer profile loop");
     }
-    for curve in &extrusion.profile_curves {
-        validate_recovered_profile_curve(curve)?;
+    for (loop_index, curves) in extrusion.profile_loops().enumerate() {
+        if curves.is_empty() {
+            bail!("solid extrusion profile loop {loop_index} is empty");
+        }
+        for curve in curves {
+            validate_recovered_profile_curve(curve)?;
+        }
     }
     if !extrusion.height_mm.is_finite() || extrusion.height_mm <= 0.0 {
         bail!("solid extrusion height must be finite and positive");
@@ -639,6 +651,7 @@ mod tests {
                     end_mm: [0.0, 0.0],
                 },
             ],
+            inner_profile_loops: Vec::new(),
             origin_mm: [12.0, -3.0, 7.0],
             x_axis: [0.0, 1.0, 0.0],
             y_axis: [0.0, 0.0, 1.0],
@@ -646,6 +659,9 @@ mod tests {
             height_mm: 5.0,
             max_residual_mm: 2.0e-12,
         };
+
+        let serialized = serde_json::to_value(&extrusion)?;
+        assert!(serialized.get("inner_profile_loops").is_none());
 
         let fragment = recover_solid_extrusion_fragment(&extrusion)?;
         let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
@@ -676,6 +692,51 @@ mod tests {
             fragment.model.provenance[&fragment.root].max_residual_mm,
             Some(2.0e-12)
         );
+
+        let mut holed = extrusion.clone();
+        holed.inner_profile_loops = vec![vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![200],
+                start_mm: [1.0, 0.5],
+                end_mm: [1.0, 1.5],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![201],
+                start_mm: [1.0, 1.5],
+                end_mm: [3.0, 1.5],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![202],
+                start_mm: [3.0, 1.5],
+                end_mm: [3.0, 0.5],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![203],
+                start_mm: [3.0, 0.5],
+                end_mm: [1.0, 0.5],
+            },
+        ]];
+        let holed_fragment = recover_solid_extrusion_fragment(&holed)?;
+        let CadNode::Transform { child, .. } = holed_fragment.model.node(holed_fragment.root)?
+        else {
+            panic!("expected transform root");
+        };
+        let CadNode::Extrude { profile, .. } = holed_fragment.model.node(*child)? else {
+            panic!("expected local extrusion child");
+        };
+        assert_eq!(profile.loops.len(), 2);
+        for source_id in 200..=203 {
+            assert!(
+                holed_fragment.model.provenance[&holed_fragment.root]
+                    .source_entity_ids
+                    .contains(&source_id)
+            );
+        }
+        assert!(
+            serde_json::to_value(&holed)?
+                .get("inner_profile_loops")
+                .is_some()
+        );
         Ok(())
     }
 
@@ -689,6 +750,7 @@ mod tests {
                 source_edge_ids: vec![100],
                 control_points_mm: Vec::new(),
             }],
+            inner_profile_loops: Vec::new(),
             origin_mm: [0.0, 0.0, 0.0],
             x_axis: [1.0, 0.0, 0.0],
             y_axis: [0.0, 1.0, 0.0],
@@ -697,6 +759,22 @@ mod tests {
             max_residual_mm: 0.0,
         };
         assert!(recover_solid_extrusion_fragment(&base).is_err());
+
+        let mut empty_inner_loop = base.clone();
+        empty_inner_loop.profile_curves = vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![104],
+                start_mm: [0.0, 0.0],
+                end_mm: [1.0, 0.0],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: vec![105],
+                start_mm: [1.0, 0.0],
+                end_mm: [0.0, 0.0],
+            },
+        ];
+        empty_inner_loop.inner_profile_loops = vec![Vec::new()];
+        assert!(recover_solid_extrusion_fragment(&empty_inner_loop).is_err());
 
         let mut invalid_bspline = base;
         invalid_bspline.profile_curves = vec![RecoveredProfileCurve::BSpline {

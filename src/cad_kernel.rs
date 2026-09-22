@@ -41,44 +41,47 @@ pub mod monstertruck {
         if !length_mm.is_finite() || length_mm == 0.0 {
             bail!("extrusion length must be finite and nonzero");
         }
-        if profile.loops.len() != 1 {
-            bail!("Monstertruck backend currently supports one profile loop");
+        if profile.loops.is_empty() {
+            bail!("profile must contain at least one loop");
         }
-        let curves = &profile.loops[0].curves;
+        let wires = profile
+            .loops
+            .iter()
+            .map(|loop_| profile_loop_wire(&loop_.curves))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(profile::solid_from_planar_profile(
+            wires,
+            Vector3::new(0.0, 0.0, length_mm),
+        )?)
+    }
+
+    fn profile_loop_wire(curves: &[Curve2d]) -> Result<Wire> {
         if curves.is_empty() {
             bail!("profile loop must contain at least one curve");
         }
-
-        let wire: Wire = if curves.len() == 1 {
-            match &curves[0] {
-                Curve2d::CircleArc {
-                    center_mm,
-                    radius_mm,
-                    start_angle_rad,
-                    end_angle_rad,
-                } if ((end_angle_rad - start_angle_rad).abs() - std::f64::consts::TAU).abs()
-                    <= 1.0e-9 =>
-                {
-                    let start = Point3::new(
-                        center_mm[0] + radius_mm * start_angle_rad.cos(),
-                        center_mm[1] + radius_mm * start_angle_rad.sin(),
-                        0.0,
-                    );
-                    primitive::circle(
-                        start,
-                        Point3::new(center_mm[0], center_mm[1], 0.0),
-                        Vector3::new(0.0, 0.0, 1.0),
-                        2,
-                    )
-                }
-                _ => profile_wire(curves)?,
-            }
-        } else {
-            profile_wire(curves)?
-        };
-
-        let face: Face = builder::try_attach_plane(vec![wire])?;
-        Ok(builder::extrude(&face, Vector3::new(0.0, 0.0, length_mm)))
+        if curves.len() == 1
+            && let Curve2d::CircleArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                end_angle_rad,
+            } = &curves[0]
+            && ((end_angle_rad - start_angle_rad).abs() - std::f64::consts::TAU).abs() <= 1.0e-9
+        {
+            let start = Point3::new(
+                center_mm[0] + radius_mm * start_angle_rad.cos(),
+                center_mm[1] + radius_mm * start_angle_rad.sin(),
+                0.0,
+            );
+            return Ok(primitive::circle(
+                start,
+                Point3::new(center_mm[0], center_mm[1], 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                2,
+            ));
+        }
+        profile_wire(curves)
     }
 
     fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
@@ -404,6 +407,89 @@ pub mod monstertruck {
                 },
                 "RATIONAL_B_SPLINE_CURVE",
             )
+        }
+
+        #[test]
+        fn roundtrips_holed_extrusion_through_recovery() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile = Profile2d {
+                loops: vec![
+                    ProfileLoop {
+                        curves: vec![
+                            Curve2d::Line {
+                                start_mm: [0.0, 0.0],
+                                end_mm: [8.0, 0.0],
+                            },
+                            Curve2d::Line {
+                                start_mm: [8.0, 0.0],
+                                end_mm: [8.0, 6.0],
+                            },
+                            Curve2d::Line {
+                                start_mm: [8.0, 6.0],
+                                end_mm: [0.0, 6.0],
+                            },
+                            Curve2d::Line {
+                                start_mm: [0.0, 6.0],
+                                end_mm: [0.0, 0.0],
+                            },
+                        ],
+                    },
+                    ProfileLoop {
+                        curves: vec![Curve2d::CircleArc {
+                            center_mm: [4.0, 3.0],
+                            radius_mm: 1.25,
+                            start_angle_rad: 0.0,
+                            end_angle_rad: -std::f64::consts::TAU,
+                        }],
+                    },
+                ],
+            };
+            let root = model.add_node(CadNode::Extrude {
+                profile,
+                vector_mm: [0.0, 0.0, 2.5],
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert_eq!(summary.faces, 8);
+
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            let recovered = crate::detect_solid_extrusions_bytes(step.as_bytes())?;
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].inner_profile_loops.len(), 1);
+            assert_eq!(recovered[0].inner_profile_loops[0].len(), 2);
+            assert!(
+                recovered[0].inner_profile_loops[0]
+                    .iter()
+                    .all(|curve| matches!(
+                        curve,
+                        crate::solid_extrusions::RecoveredProfileCurve::BSpline {
+                            weights: Some(_),
+                            ..
+                        }
+                    ))
+            );
+
+            let fragment = crate::cad_recovery::recover_solid_extrusion_fragment(&recovered[0])?;
+            let CadNode::Transform { child, .. } = fragment.model.node(fragment.root)? else {
+                panic!("expected transform root");
+            };
+            let CadNode::Extrude { profile, .. } = fragment.model.node(*child)? else {
+                panic!("expected extrusion child");
+            };
+            assert_eq!(profile.loops.len(), 2);
+
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
+            let rebuilt_summary = kernel.summarize(&rebuilt);
+            assert!(rebuilt_summary.geometrically_consistent);
+            assert_eq!(rebuilt_summary.faces, 8);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
+            Ok(())
         }
 
         #[test]
