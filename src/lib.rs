@@ -23,6 +23,7 @@ pub mod periodic_bodies;
 pub mod periodic_chains;
 pub mod periodic_resize;
 mod planar_features;
+pub mod profile_curves;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
 mod spherical_caps;

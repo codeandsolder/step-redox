@@ -28,12 +28,26 @@ struct Segment2 {
     b: [f64; 2],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LinearMeridianSupport {
+    reference_t: f64,
+    reference_signed_radius: f64,
+    slope: f64,
+}
+
 type ProfileGraph = (Vec<[f64; 2]>, Vec<(usize, usize)>);
 
 #[derive(Debug, Clone)]
 struct FaceInfo {
     surface: SurfaceSupport,
     loops: Vec<brep::FaceLoop>,
+}
+
+struct TopologyContext<'a> {
+    faces: &'a [FaceInfo],
+    edge_faces: &'a HashMap<u64, Vec<usize>>,
+    entities: &'a [EntityInstance],
+    index: &'a HashMap<u64, usize>,
 }
 
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
@@ -100,12 +114,21 @@ fn detect_one_solid(
         faces.iter().find_map(|face| match face.surface {
             SurfaceSupport::Cylinder(cylinder) => Some((cylinder.axis_origin_mm, cylinder.axis)),
             SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
+            SurfaceSupport::Revolution(revolution) => {
+                Some((revolution.axis_origin_mm, revolution.axis))
+            }
             _ => None,
         })?;
     let axis_direction = canonical_axis(axis_reference_direction);
     let axis_origin_mm =
         closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
+    let context = TopologyContext {
+        faces: &faces,
+        edge_faces: &edge_faces,
+        entities,
+        index,
+    };
 
     let mut max_residual_mm = 0.0_f64;
     let mut segments = Vec::new();
@@ -129,14 +152,21 @@ fn detect_one_solid(
                 &faces,
                 &edge_faces,
             )?,
+            SurfaceSupport::Revolution(revolution) => revolution_line_profile_segment(
+                face_index,
+                face,
+                revolution,
+                axis_origin_mm,
+                axis_direction,
+                &context,
+            )?,
             SurfaceSupport::Plane(plane) => plane_profile_segment(
                 face_index,
                 face,
                 plane,
                 axis_origin_mm,
                 axis_direction,
-                &faces,
-                &edge_faces,
+                &context,
             )?,
             _ => return None,
         };
@@ -371,14 +401,182 @@ fn cone_profile_segment(
     ))
 }
 
+fn revolution_line_profile_segment(
+    face_index: usize,
+    face: &FaceInfo,
+    revolution: brep::RevolutionSurfaceSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    context: &TopologyContext<'_>,
+) -> Option<(Segment2, f64)> {
+    if face.loops.len() != 1 {
+        return None;
+    }
+    let (support, mut max_residual) = revolution_linear_support(
+        revolution,
+        axis_origin,
+        axis,
+        context.entities,
+        context.index,
+    )?;
+
+    let mut min_t = f64::INFINITY;
+    let mut max_t = f64::NEG_INFINITY;
+    for edge in &face.loops[0].edges {
+        for point in [edge.start_mm, edge.end_mm] {
+            let t = axial_coordinate(point, axis_origin, axis);
+            let radius = point_axis_distance(point, axis_origin, axis);
+            let expected_radius = linear_radius_at(support, t)?;
+            if !t.is_finite() || !radius.is_finite() {
+                return None;
+            }
+            min_t = min_t.min(t);
+            max_t = max_t.max(t);
+            max_residual = max_residual.max((radius - expected_radius).abs());
+        }
+    }
+    if !min_t.is_finite() || max_t - min_t <= GEOM_TOL_MM {
+        return None;
+    }
+    let min_signed = linear_signed_radius_at(support, min_t)?;
+    let max_signed = linear_signed_radius_at(support, max_t)?;
+    if min_signed.abs() <= GEOM_TOL_MM
+        || max_signed.abs() <= GEOM_TOL_MM
+        || min_signed.signum() != max_signed.signum()
+    {
+        // Crossing the axis creates an apex / double-cone topology. Keep this
+        // first generic-revolution pass to one non-degenerate meridian branch.
+        return None;
+    }
+
+    for edge in &face.loops[0].edges {
+        match &edge.support {
+            CurveSupport::Line(line) => {
+                let edge_support = linear_meridian_support(*line, axis_origin, axis)?;
+                let generator_angle = support.slope.abs().atan();
+                let edge_angle = edge_support.slope.abs().atan();
+                if (generator_angle - edge_angle).abs() > DIR_TOL {
+                    return None;
+                }
+            }
+            CurveSupport::Circle(circle) => {
+                if !parallel(circle.normal, axis) {
+                    return None;
+                }
+                let t = axial_coordinate(circle.center_mm, axis_origin, axis);
+                max_residual = max_residual
+                    .max(axis_distance(circle.center_mm, axis_origin, axis))
+                    .max((circle.radius_mm - linear_radius_at(support, t)?).abs());
+            }
+            CurveSupport::BSpline(_) => {
+                let neighbor = unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+                let SurfaceSupport::Plane(plane) = context.faces.get(neighbor)?.surface else {
+                    return None;
+                };
+                if !parallel(plane.normal, axis) {
+                    return None;
+                }
+                let plane_t = axial_coordinate(plane.origin_mm, axis_origin, axis);
+                for point in [edge.start_mm, edge.end_mm] {
+                    let t = axial_coordinate(point, axis_origin, axis);
+                    let radius = point_axis_distance(point, axis_origin, axis);
+                    max_residual = max_residual
+                        .max((t - plane_t).abs())
+                        .max((radius - linear_radius_at(support, t)?).abs());
+                }
+                max_residual = max_residual.max(plane.max_residual_mm);
+            }
+            CurveSupport::Other { .. } => return None,
+        }
+    }
+    if max_residual > GEOM_TOL_MM {
+        return None;
+    }
+    Some((
+        Segment2 {
+            a: [linear_radius_at(support, min_t)?, min_t],
+            b: [linear_radius_at(support, max_t)?, max_t],
+        },
+        max_residual,
+    ))
+}
+
+fn revolution_linear_support(
+    revolution: brep::RevolutionSurfaceSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<(LinearMeridianSupport, f64)> {
+    if !parallel(revolution.axis, axis)
+        || axis_distance(revolution.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+    {
+        return None;
+    }
+    let CurveSupport::Line(line) = brep::curve_support(revolution.swept_curve_id, entities, index)
+    else {
+        return None;
+    };
+    let support = linear_meridian_support(line, axis_origin, axis)?;
+    Some((
+        support,
+        axis_distance(revolution.axis_origin_mm, axis_origin, axis),
+    ))
+}
+
+fn linear_meridian_support(
+    line: brep::LineSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+) -> Option<LinearMeridianSupport> {
+    let direction = normalize(line.direction)?;
+    let axial = dot(direction, axis);
+    if axial.abs() <= DIR_TOL {
+        return None;
+    }
+    let relative = sub(line.origin_mm, axis_origin);
+    let reference_t = dot(relative, axis);
+    let perpendicular = sub(direction, mul(axis, axial));
+    let radial_direction_magnitude = norm(perpendicular);
+    let (reference_signed_radius, slope) = if radial_direction_magnitude <= DIR_TOL {
+        (point_axis_distance(line.origin_mm, axis_origin, axis), 0.0)
+    } else {
+        let radial_direction = mul(perpendicular, 1.0 / radial_direction_magnitude);
+        let meridian_normal = normalize(cross(axis, radial_direction))?;
+        if dot(relative, meridian_normal).abs() > GEOM_TOL_MM {
+            return None;
+        }
+        (
+            dot(relative, radial_direction),
+            radial_direction_magnitude / axial,
+        )
+    };
+    if !reference_t.is_finite() || !reference_signed_radius.is_finite() || !slope.is_finite() {
+        return None;
+    }
+    Some(LinearMeridianSupport {
+        reference_t,
+        reference_signed_radius,
+        slope,
+    })
+}
+
+fn linear_signed_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
+    let radius = support.reference_signed_radius + support.slope * (axial - support.reference_t);
+    radius.is_finite().then_some(radius)
+}
+
+fn linear_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
+    Some(linear_signed_radius_at(support, axial)?.abs())
+}
+
 fn plane_profile_segment(
     face_index: usize,
     face: &FaceInfo,
     plane: brep::PlaneSupport,
     axis_origin: [f64; 3],
     axis: [f64; 3],
-    faces: &[FaceInfo],
-    edge_faces: &HashMap<u64, Vec<usize>>,
+    context: &TopologyContext<'_>,
 ) -> Option<(Segment2, f64)> {
     if face.loops.is_empty() || face.loops.len() > 2 || !parallel(plane.normal, axis) {
         return None;
@@ -431,8 +629,9 @@ fn plane_profile_segment(
                     max_residual = max_residual.max(line_axis_distance);
                 }
                 CurveSupport::BSpline(_) => {
-                    let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
-                    let neighbor_face = faces.get(neighbor)?;
+                    let neighbor =
+                        unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+                    let neighbor_face = context.faces.get(neighbor)?;
                     let expected_radius = match neighbor_face.surface {
                         SurfaceSupport::Cylinder(cylinder) => {
                             if !parallel(cylinder.axis, axis)
@@ -455,11 +654,22 @@ fn plane_profile_segment(
                                 cone,
                                 axis_origin,
                                 axis,
-                                faces,
-                                edge_faces,
+                                context.faces,
+                                context.edge_faces,
                             )?;
                             max_residual = max_residual.max(residual);
                             segment_radius_at_axial(segment, t)?
+                        }
+                        SurfaceSupport::Revolution(revolution) => {
+                            let (support, residual) = revolution_linear_support(
+                                revolution,
+                                axis_origin,
+                                axis,
+                                context.entities,
+                                context.index,
+                            )?;
+                            max_residual = max_residual.max(residual);
+                            linear_radius_at(support, t)?
                         }
                         _ => return None,
                     };
@@ -1014,6 +1224,40 @@ mod tests {
             let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
             ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovers_native_line_surface_of_revolution_fixture() {
+        let bytes =
+            include_bytes!("../validation/fixtures/native_line_surface_of_revolution_frustum.step");
+        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].profile_points_mm,
+            vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
+        );
+        assert!(recovered[0].max_residual_mm < 1.0e-9);
+
+        let skewed = String::from_utf8_lossy(bytes).replacen(
+            "CARTESIAN_POINT('',(2.,-4.898587196589E-16,0.))",
+            "CARTESIAN_POINT('',(2.,0.25,0.))",
+            1,
+        );
+        assert!(
+            crate::detect_solid_revolutions_bytes(skewed.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let fragment =
+                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         }
     }
 
