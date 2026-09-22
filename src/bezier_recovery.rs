@@ -6,9 +6,7 @@ pub(crate) struct BezierRecoveryStats {
     pub curves_recovered: usize,
 }
 
-pub(crate) fn recover_exact_bezier_curves(
-    entities: &mut [EntityInstance],
-) -> BezierRecoveryStats {
+pub(crate) fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRecoveryStats {
     let mut stats = BezierRecoveryStats::default();
     if entities.is_empty() {
         return stats;
@@ -87,10 +85,7 @@ fn is_single_span_bezier(record: &Record) -> bool {
     let Some(knots) = numeric_list(&params[7]) else {
         return false;
     };
-    if knots.len() != 2
-        || !knots.iter().all(|x| x.is_finite())
-        || knots[0] == knots[1]
-    {
+    if knots.len() != 2 || !knots.iter().all(|x| x.is_finite()) || knots[0] == knots[1] {
         return false;
     }
 
@@ -109,20 +104,22 @@ fn parameter_usage_is_safe(
         return false;
     }
 
-    parents.iter().all(|parent| match types.get(parent).map(String::as_str) {
-        // EDGE_CURVE trims by topological endpoint vertices, not by stored curve
-        // parameter values, so changing [u0,u1] to Bezier's implicit [0,1] is safe.
-        Some("EDGE_CURVE") => true,
+    parents
+        .iter()
+        .all(|parent| match types.get(parent).map(String::as_str) {
+            // EDGE_CURVE trims by topological endpoint vertices, not by stored curve
+            // parameter values, so changing [u0,u1] to Bezier's implicit [0,1] is safe.
+            Some("EDGE_CURVE") => true,
 
-        // Reparameterizing the basis curve also reparameterizes U on this swept
-        // surface. That is safe only when no consumer refers to surface
-        // parameters (PCURVE, RECTANGULAR_TRIMMED_SURFACE, etc.).
-        Some("SURFACE_OF_LINEAR_EXTRUSION") => surface_usage_is_topological_only(
-            *parent, types, inbound,
-        ),
+            // Reparameterizing the basis curve also reparameterizes U on this swept
+            // surface. That is safe only when no consumer refers to surface
+            // parameters (PCURVE, RECTANGULAR_TRIMMED_SURFACE, etc.).
+            Some("SURFACE_OF_LINEAR_EXTRUSION") => {
+                surface_usage_is_topological_only(*parent, types, inbound)
+            }
 
-        _ => false,
-    })
+            _ => false,
+        })
 }
 
 fn surface_usage_is_topological_only(

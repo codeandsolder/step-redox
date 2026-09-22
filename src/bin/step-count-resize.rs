@@ -61,8 +61,7 @@ fn main() -> Result<()> {
     let semantic = if cli.already_semantic {
         input
     } else {
-        let mut options =
-            step_redox::Options::for_profile(step_redox::OutputProfile::Compact);
+        let mut options = step_redox::Options::for_profile(step_redox::OutputProfile::Compact);
         // Whole-body/count recovery must run before low-level curve factoring.
         // Keep the editable semantic graph explicit for the graph mutator.
         options.experimental_instance_translated_bspline_curves = false;

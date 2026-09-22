@@ -113,7 +113,11 @@ struct Cli {
     #[arg(long, help = "Print machine-readable statistics")]
     json: bool,
 
-    #[arg(long, value_name = "PATH", help = "Write detected regular instance patterns as JSON")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write detected regular instance patterns as JSON"
+    )]
     patterns_json: Option<PathBuf>,
 
     #[arg(
@@ -137,10 +141,18 @@ struct Cli {
     )]
     solid_extrusions_json: Option<PathBuf>,
 
-    #[arg(long, value_name = "PATH", help = "Write detected periodic body grammars as JSON")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write detected periodic body grammars as JSON"
+    )]
     periodic_bodies_json: Option<PathBuf>,
 
-    #[arg(long, value_name = "PATH", help = "Write recovered semantic count parameters as JSON")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write recovered semantic count parameters as JSON"
+    )]
     count_parameters_json: Option<PathBuf>,
 
     #[arg(
@@ -161,12 +173,8 @@ fn main() -> Result<()> {
     // profile for development/testing.
     let mut options = match cli.profile {
         Profile::Manual => step_redox::Options::default(),
-        Profile::Compat => {
-            step_redox::Options::for_profile(step_redox::OutputProfile::Compat)
-        }
-        Profile::Compact => {
-            step_redox::Options::for_profile(step_redox::OutputProfile::Compact)
-        }
+        Profile::Compat => step_redox::Options::for_profile(step_redox::OutputProfile::Compat),
+        Profile::Compact => step_redox::Options::for_profile(step_redox::OutputProfile::Compact),
     };
     options.intern_values = !cli.no_intern;
     options.consolidate_presentation = !cli.no_presentation_consolidation;
@@ -177,8 +185,7 @@ fn main() -> Result<()> {
         cli.experimental_recover_exact_bezier_curves;
     options.experimental_recover_v_extrusions |= cli.experimental_recover_v_extrusions;
     options.experimental_intern_geometric_supports |= cli.experimental_intern_geometric_supports;
-    options.experimental_recover_partitioned_bodies |=
-        cli.experimental_recover_partitioned_bodies;
+    options.experimental_recover_partitioned_bodies |= cli.experimental_recover_partitioned_bodies;
     options.experimental_coalesce_same_support_faces |=
         cli.experimental_coalesce_same_support_faces;
     options.experimental_instance_translated_bspline_curves |=

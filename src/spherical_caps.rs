@@ -147,7 +147,9 @@ pub(crate) fn instance_planar_spherical_caps(
                 if sphere_neighbors.len() != 1 {
                     continue;
                 }
-                let Some(&sibling) = sphere_neighbors.iter().next() else { continue; };
+                let Some(&sibling) = sphere_neighbors.iter().next() else {
+                    continue;
+                };
                 if seen_spheres.contains(&sibling) {
                     continue;
                 }
@@ -187,7 +189,9 @@ pub(crate) fn instance_planar_spherical_caps(
                 if plane_neighbors.len() != 1 {
                     continue;
                 }
-                let Some(&plane_face) = plane_neighbors.iter().next() else { continue; };
+                let Some(&plane_face) = plane_neighbors.iter().next() else {
+                    continue;
+                };
 
                 let Some((interface_bound, interface_loop, bound_orientation)) =
                     matching_plane_bound(plane_face, &interface, entities, &index)
@@ -448,20 +452,16 @@ pub(crate) fn instance_planar_spherical_caps(
 
                 // Remove spherical faces from the fused substrate shell and fill
                 // the corresponding holes in its planar face.
-                let Some(&shell_index) = index.get(&shell_id) else { continue; };
-                let Some(&plane_face_index) = index.get(&plane_face) else { continue; };
-                if !remove_refs_from_list_param(
-                    &mut entities[shell_index],
-                    1,
-                    &sphere_ids,
-                ) {
+                let Some(&shell_index) = index.get(&shell_id) else {
+                    continue;
+                };
+                let Some(&plane_face_index) = index.get(&plane_face) else {
+                    continue;
+                };
+                if !remove_refs_from_list_param(&mut entities[shell_index], 1, &sphere_ids) {
                     continue;
                 }
-                if !remove_refs_from_list_param(
-                    &mut entities[plane_face_index],
-                    1,
-                    &bound_ids,
-                ) {
+                if !remove_refs_from_list_param(&mut entities[plane_face_index], 1, &bound_ids) {
                     continue;
                 }
                 if !append_refs_to_list_param(&mut entities[rep_idx], 1, &mapped_ids) {

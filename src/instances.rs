@@ -357,10 +357,7 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
     stats
 }
 
-
-pub(crate) fn instance_z90_solids_assembly(
-    entities: &mut Vec<EntityInstance>,
-) -> InstanceStats {
+pub(crate) fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> InstanceStats {
     // Reuse the mature geometric proof + guarded GC from the MAPPED_ITEM pass,
     // then replace only its representation layer with the assembly structure
     // emitted by OpenCascade itself. Keep a rollback copy because assembly
@@ -479,7 +476,10 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 return None;
             }
             let (items, _) = representation_items_and_context(entity)?;
-            items.iter().any(|item| mapped_ids.contains(item)).then_some(id)
+            items
+                .iter()
+                .any(|item| mapped_ids.contains(item))
+                .then_some(id)
         })
         .collect();
     if top_reps.is_empty() {
@@ -527,8 +527,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         let Some(&top_idx) = index.get(&top_rep) else {
             return false;
         };
-        let Some((top_items, context_id)) =
-            representation_items_and_context(&entities[top_idx])
+        let Some((top_items, context_id)) = representation_items_and_context(&entities[top_idx])
         else {
             return false;
         };
@@ -558,12 +557,9 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         }
         let root_sdr = sdr_candidates[0];
 
-        let Some(root_pds) = referenced_of_type(
-            root_sdr,
-            entities,
-            &index,
-            &["PRODUCT_DEFINITION_SHAPE"],
-        ) else {
+        let Some(root_pds) =
+            referenced_of_type(root_sdr, entities, &index, &["PRODUCT_DEFINITION_SHAPE"])
+        else {
             return false;
         };
         let Some(parent_pd) =
@@ -571,12 +567,9 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         else {
             return false;
         };
-        let Some(pd_context) = referenced_of_type(
-            parent_pd,
-            entities,
-            &index,
-            &["PRODUCT_DEFINITION_CONTEXT"],
-        ) else {
+        let Some(pd_context) =
+            referenced_of_type(parent_pd, entities, &index, &["PRODUCT_DEFINITION_CONTEXT"])
+        else {
             return false;
         };
         let Some(formation) = referenced_of_type(
@@ -590,8 +583,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         ) else {
             return false;
         };
-        let Some(parent_product) =
-            referenced_of_type(formation, entities, &index, &["PRODUCT"])
+        let Some(parent_product) = referenced_of_type(formation, entities, &index, &["PRODUCT"])
         else {
             return false;
         };
@@ -659,7 +651,9 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             .collect();
         let mut patched_residual_items = residual_items.clone();
         patched_residual_items.push(residual_origin);
-        let Some(top_representation) = entities.get_mut(top_idx) else { return false; };
+        let Some(top_representation) = entities.get_mut(top_idx) else {
+            return false;
+        };
         set_representation_items(top_representation, &patched_residual_items);
 
         let mut root_items = vec![root_origin];
@@ -684,8 +678,12 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 entity_ref(context_id),
             ],
         );
-        let Some(&root_sdr_index) = index.get(&root_sdr) else { return false; };
-        let Some(root_sdr_entity) = entities.get_mut(root_sdr_index) else { return false; };
+        let Some(&root_sdr_index) = index.get(&root_sdr) else {
+            return false;
+        };
+        let Some(root_sdr_entity) = entities.get_mut(root_sdr_index) else {
+            return false;
+        };
         if !replace_direct_ref_in_simple(root_sdr_entity, top_rep, root_rep) {
             return false;
         }
@@ -720,9 +718,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             local_by_map.entry(map).or_default().push((*mapped, axis));
         }
 
-        for (family_ordinal, (map, mut occurrences)) in
-            local_by_map.into_iter().enumerate()
-        {
+        for (family_ordinal, (map, mut occurrences)) in local_by_map.into_iter().enumerate() {
             occurrences.sort_by_key(|(mapped, _)| *mapped);
             used_maps.insert(map);
             let Some(&source_rep) = map_to_source.get(&map) else {
@@ -734,8 +730,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             let Some(&source_idx) = index.get(&source_rep) else {
                 return false;
             };
-            let Some((source_items, _)) =
-                representation_items_and_context(&entities[source_idx])
+            let Some((source_items, _)) = representation_items_and_context(&entities[source_idx])
             else {
                 return false;
             };
@@ -776,10 +771,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                     let Some(&style_idx) = index.get(&style.id) else {
                         return false;
                     };
-                    if !set_styled_item_assignments(
-                        &mut entities[style_idx],
-                        &inherited_style,
-                    ) {
+                    if !set_styled_item_assignments(&mut entities[style_idx], &inherited_style) {
                         return false;
                     }
                 }
@@ -790,9 +782,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                     "STYLED_ITEM",
                     vec![
                         Parameter::String("NONE".to_string()),
-                        Parameter::List(
-                            inherited_style.iter().copied().map(entity_ref).collect(),
-                        ),
+                        Parameter::List(inherited_style.iter().copied().map(entity_ref).collect()),
                         entity_ref(canonical_solid),
                     ],
                 );
@@ -818,9 +808,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                     root_rep,
                     source_origin,
                     *axis,
-                    &format!(
-                        "instance-{rep_ordinal}-{family_ordinal}-{occurrence_ordinal}"
-                    ),
+                    &format!("instance-{rep_ordinal}-{family_ordinal}-{occurrence_ordinal}"),
                 );
             }
         }
@@ -871,11 +859,7 @@ fn set_representation_items(entity: &mut EntityInstance, items: &[u64]) {
     }
 }
 
-fn replace_direct_ref_in_simple(
-    entity: &mut EntityInstance,
-    old: u64,
-    new: u64,
-) -> bool {
+fn replace_direct_ref_in_simple(entity: &mut EntityInstance, old: u64, new: u64) -> bool {
     let Some(record) = simple_record_mut(entity) else {
         return false;
     };
@@ -892,10 +876,7 @@ fn replace_direct_ref_in_simple(
     changed
 }
 
-fn set_styled_item_assignments(
-    entity: &mut EntityInstance,
-    assignments: &[u64],
-) -> bool {
+fn set_styled_item_assignments(entity: &mut EntityInstance, assignments: &[u64]) -> bool {
     let Some(record) = simple_record_mut(entity) else {
         return false;
     };
@@ -1557,8 +1538,7 @@ fn canonical_axis_offset(
         point[1] - center[1],
         point[2] - center[2],
     ];
-    let along =
-        (rel[0] * direction[0] + rel[1] * direction[1] + rel[2] * direction[2]) / norm2;
+    let along = (rel[0] * direction[0] + rel[1] * direction[1] + rel[2] * direction[2]) / norm2;
     let perpendicular = [
         rel[0] - along * direction[0],
         rel[1] - along * direction[1],

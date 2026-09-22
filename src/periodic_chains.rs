@@ -128,14 +128,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
             continue;
         };
 
-        let pattern = build_pattern(
-            solid,
-            &face_ids,
-            &geoms,
-            &candidate,
-            partition,
-            missing,
-        );
+        let pattern = build_pattern(solid, &face_ids, &geoms, &candidate, partition, missing);
         out.push(pattern);
     }
 
@@ -154,8 +147,7 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
 
     for axis in 0..3 {
         let other = other_axes(axis);
-        let mut rows =
-            HashMap::<(IntrinsicFaceKey, i64, i64), Vec<(i64, u64)>>::new();
+        let mut rows = HashMap::<(IntrinsicFaceKey, i64, i64), Vec<(i64, u64)>>::new();
 
         for geom in geoms.values() {
             let key = IntrinsicFaceKey {
@@ -185,10 +177,7 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
             if pitch <= 0 {
                 continue;
             }
-            if row
-                .windows(2)
-                .any(|pair| pair[1].0 - pair[0].0 != pitch)
-            {
+            if row.windows(2).any(|pair| pair[1].0 - pair[0].0 != pitch) {
                 continue;
             }
             *votes.entry((axis, pitch, row.len())).or_insert(0) += 1;
@@ -197,12 +186,14 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
 
     votes
         .into_iter()
-        .map(|((axis_index, pitch_ticks, sites), votes)| LatticeCandidate {
-            axis_index,
-            pitch_ticks,
-            sites,
-            votes,
-        })
+        .map(
+            |((axis_index, pitch_ticks, sites), votes)| LatticeCandidate {
+                axis_index,
+                pitch_ticks,
+                sites,
+                votes,
+            },
+        )
         .max_by(|a, b| {
             a.votes
                 .cmp(&b.votes)
@@ -226,7 +217,10 @@ fn choose_partition(
             continue;
         }
         let tick = quantize_mm(geom.center[axis]);
-        phases.entry(tick.rem_euclid(pitch_ticks)).or_default().push(tick);
+        phases
+            .entry(tick.rem_euclid(pitch_ticks))
+            .or_default()
+            .push(tick);
     }
 
     let mut windows = Vec::<(i64, Vec<f64>)>::new();
@@ -268,8 +262,7 @@ fn choose_partition(
     let mut best: Option<Partition> = None;
     for (observation_score, centers) in windows {
         let mut partition = classify_faces(geoms, &centers, axis, pitch)?;
-        partition.score =
-            partition_score(geoms, &partition, axis, observation_score);
+        partition.score = partition_score(geoms, &partition, axis, observation_score);
         if best
             .as_ref()
             .map(|existing| partition.score > existing.score)
@@ -303,8 +296,7 @@ fn classify_faces(
             .iter()
             .enumerate()
             .filter_map(|(index, &center)| {
-                (geom.lo[axis] >= center - half && geom.hi[axis] <= center + half)
-                    .then_some(index)
+                (geom.lo[axis] >= center - half && geom.hi[axis] <= center + half).then_some(index)
             })
             .collect::<Vec<_>>();
 
@@ -344,8 +336,7 @@ fn classify_faces(
         }
     }
 
-    let mut census_hist =
-        HashMap::<Vec<(CoarseFaceKey, usize)>, usize>::new();
+    let mut census_hist = HashMap::<Vec<(CoarseFaceKey, usize)>, usize>::new();
     for faces in &gap_candidates {
         let mut census = BTreeMap::<CoarseFaceKey, usize>::new();
         for &face in faces {
@@ -408,24 +399,15 @@ fn partition_score(
     axis: usize,
     observation_score: i64,
 ) -> [i64; 8] {
-    let site_counts = partition
-        .sites
-        .iter()
-        .map(Vec::len)
-        .collect::<Vec<_>>();
-    let gap_counts = partition
-        .gaps
-        .iter()
-        .map(Vec::len)
-        .collect::<Vec<_>>();
+    let site_counts = partition.sites.iter().map(Vec::len).collect::<Vec<_>>();
+    let gap_counts = partition.gaps.iter().map(Vec::len).collect::<Vec<_>>();
 
     let site_mode_n = mode_frequency(&site_counts) as i64;
     let gap_mode_n = mode_frequency(&gap_counts) as i64;
     let site_sym = symmetric_abs_difference(&site_counts) as i64;
     let gap_sym = symmetric_abs_difference(&gap_counts) as i64;
 
-    let midpoint =
-        (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
     let mut negative = 0usize;
     let mut positive = 0usize;
     let mut middle = 0usize;
@@ -469,8 +451,7 @@ fn build_pattern(
     let interior_site_face_count = mode_value(&site_face_counts).unwrap_or(0);
     let interior_gap_face_count = mode_value(&gap_face_counts).unwrap_or(0);
 
-    let midpoint =
-        (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
     let mut fixed_negative = Vec::new();
     let mut fixed_middle = Vec::new();
     let mut fixed_positive = Vec::new();
@@ -496,10 +477,8 @@ fn build_pattern(
     }
 
     let mut edge_category_counts = BTreeMap::<String, usize>::new();
-    let mut site_adj =
-        vec![BTreeMap::<String, usize>::new(); partition.sites.len()];
-    let mut gap_adj =
-        vec![BTreeMap::<String, usize>::new(); partition.gaps.len()];
+    let mut site_adj = vec![BTreeMap::<String, usize>::new(); partition.sites.len()];
+    let mut gap_adj = vec![BTreeMap::<String, usize>::new(); partition.gaps.len()];
     let mut nonmanifold_edges = 0usize;
     let mut cross_site_edges = 0usize;
 
@@ -528,14 +507,14 @@ fn build_pattern(
     }
 
     let periodic_faces = partition.site_of.len() + partition.gap_of.len();
-    let repeat_coverage_ratio =
-        periodic_faces as f64 / all_face_ids.len().max(1) as f64;
+    let repeat_coverage_ratio = periodic_faces as f64 / all_face_ids.len().max(1) as f64;
 
     let site_symmetric = symmetric_abs_difference(&site_face_counts) == 0;
     let gap_symmetric = symmetric_abs_difference(&gap_face_counts) == 0;
     let fixed_symmetric = fixed_negative.len() == fixed_positive.len();
-    let gap_consistent =
-        gap_face_counts.iter().all(|&count| count == interior_gap_face_count);
+    let gap_consistent = gap_face_counts
+        .iter()
+        .all(|&count| count == interior_gap_face_count);
     let interior_consistent = if partition.sites.len() > 4 {
         partition.sites[2..partition.sites.len() - 2]
             .iter()
@@ -624,10 +603,7 @@ fn add_adjacency(
     }
 }
 
-fn face_category(
-    face: u64,
-    partition: &Partition,
-) -> (&'static str, Option<usize>) {
+fn face_category(face: u64, partition: &Partition) -> (&'static str, Option<usize>) {
     if let Some(&site) = partition.site_of.get(&face) {
         ("site", Some(site))
     } else if let Some(&gap) = partition.gap_of.get(&face) {
@@ -658,8 +634,7 @@ fn face_geometry(
         _ => return None,
     };
     let surface = entity_ref_value(params.get(2)?)?;
-    let same_sense =
-        matches!(params.get(3)?, Parameter::Enumeration(value) if value == "T");
+    let same_sense = matches!(params.get(3)?, Parameter::Enumeration(value) if value == "T");
     let surface_record = simple_record(entities.get(*index.get(&surface)?)?)?;
     let surface_type = surface_record.name.clone();
     let support_axis = surface_axis_signature(surface_record, entities, index);
@@ -679,8 +654,7 @@ fn face_geometry(
         };
         for param in [edge_params.get(1)?, edge_params.get(2)?] {
             let vertex = entity_ref_value(param)?;
-            let vertex_record =
-                simple_record(entities.get(*index.get(&vertex)?)?)?;
+            let vertex_record = simple_record(entities.get(*index.get(&vertex)?)?)?;
             if vertex_record.name != "VERTEX_POINT" {
                 return None;
             }
@@ -716,11 +690,7 @@ fn face_geometry(
         (lo[1] + hi[1]) * 0.5,
         (lo[2] + hi[2]) * 0.5,
     ];
-    let span = [
-        hi[0] - lo[0],
-        hi[1] - lo[1],
-        hi[2] - lo[2],
-    ];
+    let span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let mut local_points = coords
         .iter()
         .map(|point| {
@@ -766,8 +736,9 @@ fn surface_axis_signature(
     let Some(placement) = params.get(1).and_then(entity_ref_value) else {
         return [0; 3];
     };
-    let Some(place_record) =
-        index.get(&placement).and_then(|&i| simple_record(entities.get(i)?))
+    let Some(place_record) = index
+        .get(&placement)
+        .and_then(|&i| simple_record(entities.get(i)?))
     else {
         return [0; 3];
     };
@@ -780,8 +751,9 @@ fn surface_axis_signature(
     let Some(direction) = place_params.get(2).and_then(entity_ref_value) else {
         return [0; 3];
     };
-    let Some(dir_record) =
-        index.get(&direction).and_then(|&i| simple_record(entities.get(i)?))
+    let Some(dir_record) = index
+        .get(&direction)
+        .and_then(|&i| simple_record(entities.get(i)?))
     else {
         return [0; 3];
     };
@@ -886,9 +858,7 @@ fn face_edges(
     for bound_ref in bound_refs {
         let bound = entity_ref_value(bound_ref)?;
         let bound_record = simple_record(entities.get(*index.get(&bound)?)?)?;
-        if bound_record.name != "FACE_BOUND"
-            && bound_record.name != "FACE_OUTER_BOUND"
-        {
+        if bound_record.name != "FACE_BOUND" && bound_record.name != "FACE_OUTER_BOUND" {
             return None;
         }
         let bound_params = list_params(bound_record)?;
@@ -903,8 +873,7 @@ fn face_edges(
         };
         for oriented_ref in oriented_refs {
             let oriented = entity_ref_value(oriented_ref)?;
-            let oriented_record =
-                simple_record(entities.get(*index.get(&oriented)?)?)?;
+            let oriented_record = simple_record(entities.get(*index.get(&oriented)?)?)?;
             if oriented_record.name != "ORIENTED_EDGE" {
                 return None;
             }
@@ -979,8 +948,7 @@ fn simple_record(entity: &EntityInstance) -> Option<&Record> {
 
 fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
-        EntityInstance::Simple { id, .. }
-        | EntityInstance::Complex { id, .. } => *id,
+        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 

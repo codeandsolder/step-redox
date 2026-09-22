@@ -16,7 +16,9 @@ pub(crate) struct PartitionRecoveryStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum EdgeKey {
-    Line { ends: [[i64; 3]; 2] },
+    Line {
+        ends: [[i64; 3]; 2],
+    },
     Circle {
         center: [i64; 3],
         axis: [i64; 3],
@@ -71,7 +73,9 @@ struct UnionFind {
 impl UnionFind {
     fn find(&mut self, id: u64) -> u64 {
         let p = *self.parent.entry(id).or_insert(id);
-        if p == id { return id; }
+        if p == id {
+            return id;
+        }
         let root = self.find(p);
         self.parent.insert(id, root);
         root
@@ -80,13 +84,21 @@ impl UnionFind {
     fn union(&mut self, a: u64, b: u64) {
         let mut a = self.find(a);
         let mut b = self.find(b);
-        if a == b { return; }
-        if b < a { std::mem::swap(&mut a, &mut b); }
+        if a == b {
+            return;
+        }
+        if b < a {
+            std::mem::swap(&mut a, &mut b);
+        }
         self.parent.insert(b, a);
     }
 
     fn mapped(&mut self, id: u64) -> u64 {
-        if self.parent.contains_key(&id) { self.find(id) } else { id }
+        if self.parent.contains_key(&id) {
+            self.find(id)
+        } else {
+            id
+        }
     }
 }
 
@@ -115,8 +127,12 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut solid_shell = HashMap::new();
     for entity in entities.iter() {
         let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else { continue; };
-        if record.name != "MANIFOLD_SOLID_BREP" { continue; }
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
         let shell = direct_refs_of_type(entity, entities, &index, "CLOSED_SHELL");
         if shell.len() == 1 {
             solid_shell.insert(id, shell[0]);
@@ -132,19 +148,31 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     for (&solid, &shell) in &solid_shell {
         let &shell_idx = index.get(&shell)?;
         for face in direct_refs_of_type(&entities[shell_idx], entities, &index, "ADVANCED_FACE") {
-            if styles_by_target.contains_key(&face) { continue; }
-            let Some((key, outward)) = face_signature(face, entities, &index) else { continue; };
-            buckets.entry(key).or_default().push(FaceCandidate { solid, face, outward });
+            if styles_by_target.contains_key(&face) {
+                continue;
+            }
+            let Some((key, outward)) = face_signature(face, entities, &index) else {
+                continue;
+            };
+            buckets.entry(key).or_default().push(FaceCandidate {
+                solid,
+                face,
+                outward,
+            });
         }
     }
 
     let mut interfaces = Vec::new();
     for candidates in buckets.values() {
         // Ambiguous coincident stacks are skipped deliberately.
-        if candidates.len() != 2 { continue; }
+        if candidates.len() != 2 {
+            continue;
+        }
         let a = &candidates[0];
         let b = &candidates[1];
-        if a.solid == b.solid || dot(a.outward, b.outward) > OPPOSITE_DOT { continue; }
+        if a.solid == b.solid || dot(a.outward, b.outward) > OPPOSITE_DOT {
+            continue;
+        }
         interfaces.push(Interface {
             a_solid: a.solid,
             b_solid: b.solid,
@@ -158,8 +186,14 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
 
     let mut adjacency: HashMap<u64, BTreeSet<u64>> = HashMap::new();
     for interface in &interfaces {
-        adjacency.entry(interface.a_solid).or_default().insert(interface.b_solid);
-        adjacency.entry(interface.b_solid).or_default().insert(interface.a_solid);
+        adjacency
+            .entry(interface.a_solid)
+            .or_default()
+            .insert(interface.b_solid);
+        adjacency
+            .entry(interface.b_solid)
+            .or_default()
+            .insert(interface.a_solid);
     }
 
     let mut seen = HashSet::new();
@@ -167,11 +201,15 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut roots: Vec<u64> = adjacency.keys().copied().collect();
     roots.sort_unstable();
     for root in roots {
-        if seen.contains(&root) { continue; }
+        if seen.contains(&root) {
+            continue;
+        }
         let mut stack = vec![root];
         let mut component = BTreeSet::new();
         while let Some(id) = stack.pop() {
-            if !component.insert(id) { continue; }
+            if !component.insert(id) {
+                continue;
+            }
             seen.insert(id);
             if let Some(neighbors) = adjacency.get(&id) {
                 stack.extend(neighbors.iter().copied());
@@ -186,48 +224,78 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut plans = Vec::<ComponentPlan>::new();
     for solids in raw_components {
         let solid_set: HashSet<u64> = solids.iter().copied().collect();
-        let component_interfaces: Vec<Interface> = interfaces.iter()
+        let component_interfaces: Vec<Interface> = interfaces
+            .iter()
             .filter(|it| solid_set.contains(&it.a_solid) && solid_set.contains(&it.b_solid))
-            .cloned().collect();
-        if component_interfaces.is_empty() { continue; }
+            .cloned()
+            .collect();
+        if component_interfaces.is_empty() {
+            continue;
+        }
 
         let mut assignment: Option<Vec<u64>> = None;
         let mut old_styles = Vec::new();
         let mut style_ok = true;
         for solid in &solids {
-            let Some(styles) = styles_by_target.get(solid) else { style_ok = false; break; };
-            if styles.len() != 1 { style_ok = false; break; }
+            let Some(styles) = styles_by_target.get(solid) else {
+                style_ok = false;
+                break;
+            };
+            if styles.len() != 1 {
+                style_ok = false;
+                break;
+            }
             let (style_id, current) = &styles[0];
             match &assignment {
                 None => assignment = Some(current.clone()),
                 Some(expected) if expected == current => {}
-                Some(_) => { style_ok = false; break; }
+                Some(_) => {
+                    style_ok = false;
+                    break;
+                }
             }
             old_styles.push(*style_id);
         }
-        if !style_ok { continue; }
-        let Some(style_assignment) = assignment else { continue; };
+        if !style_ok {
+            continue;
+        }
+        let Some(style_assignment) = assignment else {
+            continue;
+        };
 
-        let owners: Vec<u64> = rep_items.iter()
+        let owners: Vec<u64> = rep_items
+            .iter()
             .filter_map(|(&rep, items)| solids.iter().all(|s| items.contains(s)).then_some(rep))
             .collect();
-        if owners.len() != 1 { continue; }
+        if owners.len() != 1 {
+            continue;
+        }
 
-        let drop_faces: HashSet<u64> = component_interfaces.iter()
-            .flat_map(|it| [it.a_face, it.b_face]).collect();
+        let drop_faces: HashSet<u64> = component_interfaces
+            .iter()
+            .flat_map(|it| [it.a_face, it.b_face])
+            .collect();
         let mut retained_faces = Vec::new();
         let mut retained_seen = HashSet::new();
         let mut topology_ok = true;
         for solid in &solids {
-            let Some(&shell) = solid_shell.get(solid) else { topology_ok = false; break; };
-            let Some(&sh_idx) = index.get(&shell) else { topology_ok = false; break; };
+            let Some(&shell) = solid_shell.get(solid) else {
+                topology_ok = false;
+                break;
+            };
+            let Some(&sh_idx) = index.get(&shell) else {
+                topology_ok = false;
+                break;
+            };
             for face in direct_refs_of_type(&entities[sh_idx], entities, &index, "ADVANCED_FACE") {
                 if !drop_faces.contains(&face) && retained_seen.insert(face) {
                     retained_faces.push(face);
                 }
             }
         }
-        if !topology_ok || retained_faces.is_empty() { continue; }
+        if !topology_ok || retained_faces.is_empty() {
+            continue;
+        }
 
         plans.push(ComponentPlan {
             solids,
@@ -249,7 +317,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
         for interface in &plan.interfaces {
             let a_edges = keyed_face_edges(interface.a_face, entities, &index)?;
             let b_edges = keyed_face_edges(interface.b_face, entities, &index)?;
-            if a_edges.len() != b_edges.len() { return None; }
+            if a_edges.len() != b_edges.len() {
+                return None;
+            }
 
             for (key, &(_, a_edge)) in &a_edges {
                 let &(_, b_edge) = b_edges.get(key)?;
@@ -289,12 +359,20 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut oe_updates = HashMap::<u64, (u64, bool)>::new();
     for entity in entities.iter() {
         let id = entity_id(entity);
-        if !retained_oes.contains(&id) { continue; }
-        let Some(record) = simple_record(entity) else { continue; };
-        if record.name != "ORIENTED_EDGE" { continue; }
+        if !retained_oes.contains(&id) {
+            continue;
+        }
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "ORIENTED_EDGE" {
+            continue;
+        }
         let edge = oriented_edge_element(record)?;
         let canonical = edge_uf.mapped(edge);
-        if canonical == edge { continue; }
+        if canonical == edge {
+            continue;
+        }
 
         let [v0, v1] = edge_vertices(edge, entities, &index)?;
         let forward = oriented_edge_orientation(record)?;
@@ -315,7 +393,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
 
     for entity in entities.iter_mut() {
         let id = entity_id(entity);
-        let Some(record) = simple_record_mut(entity) else { continue; };
+        let Some(record) = simple_record_mut(entity) else {
+            continue;
+        };
         match record.name.as_str() {
             "EDGE_CURVE" => rewrite_edge_vertices(record, &mut vertex_uf)?,
             "ORIENTED_EDGE" => {
@@ -335,19 +415,46 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut stats = PartitionRecoveryStats::default();
 
     for plan in &plans {
-        let shell = push_simple(entities, &mut next_id, "CLOSED_SHELL", vec![
-            Parameter::String("step-redox welded partition".to_string()),
-            Parameter::List(plan.retained_faces.iter().copied().map(entity_ref).collect()),
-        ]);
-        let solid = push_simple(entities, &mut next_id, "MANIFOLD_SOLID_BREP", vec![
-            Parameter::String("step-redox welded partition".to_string()),
-            entity_ref(shell),
-        ]);
-        let style = push_simple(entities, &mut next_id, "STYLED_ITEM", vec![
-            Parameter::String(String::new()),
-            Parameter::List(plan.style_assignment.iter().copied().map(entity_ref).collect()),
-            entity_ref(solid),
-        ]);
+        let shell = push_simple(
+            entities,
+            &mut next_id,
+            "CLOSED_SHELL",
+            vec![
+                Parameter::String("step-redox welded partition".to_string()),
+                Parameter::List(
+                    plan.retained_faces
+                        .iter()
+                        .copied()
+                        .map(entity_ref)
+                        .collect(),
+                ),
+            ],
+        );
+        let solid = push_simple(
+            entities,
+            &mut next_id,
+            "MANIFOLD_SOLID_BREP",
+            vec![
+                Parameter::String("step-redox welded partition".to_string()),
+                entity_ref(shell),
+            ],
+        );
+        let style = push_simple(
+            entities,
+            &mut next_id,
+            "STYLED_ITEM",
+            vec![
+                Parameter::String(String::new()),
+                Parameter::List(
+                    plan.style_assignment
+                        .iter()
+                        .copied()
+                        .map(entity_ref)
+                        .collect(),
+                ),
+                entity_ref(solid),
+            ],
+        );
 
         let map = rep_replacements.entry(plan.rep).or_default();
         for old in &plan.solids {
@@ -370,7 +477,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     }
 
     for entity in entities.iter_mut() {
-        let Some(record) = simple_record_mut(entity) else { continue; };
+        let Some(record) = simple_record_mut(entity) else {
+            continue;
+        };
         if matches!(
             record.name.as_str(),
             "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
@@ -388,7 +497,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     while let Some(id) = stack.pop() {
         if let Some(children) = refs_before.get(&id) {
             for &child in children {
-                if candidate.insert(child) { stack.push(child); }
+                if candidate.insert(child) {
+                    stack.push(child);
+                }
             }
         }
     }
@@ -401,11 +512,12 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     loop {
         let mut changed = false;
         for &id in &candidate {
-            if delete.contains(&id) { continue; }
+            if delete.contains(&id) {
+                continue;
+            }
             let parents = inbound_after.get(&id).cloned().unwrap_or_default();
             let detached = parents.is_empty();
-            let child_of_dead =
-                !parents.is_empty() && parents.iter().all(|p| delete.contains(p));
+            let child_of_dead = !parents.is_empty() && parents.iter().all(|p| delete.contains(p));
             if seeds.contains(&id) {
                 if detached || child_of_dead {
                     delete.insert(id);
@@ -418,7 +530,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 
     stats.styles_retargeted = old_styles.len();
@@ -427,22 +541,31 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     Some(stats)
 }
 
-
 fn face_signature(
     face: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<(FaceKey, [f64; 3])> {
     let record = simple_record(entities.get(*index.get(&face)?)?)?;
-    if record.name != "ADVANCED_FACE" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
-    if params.len() < 4 { return None; }
+    if record.name != "ADVANCED_FACE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    if params.len() < 4 {
+        return None;
+    }
 
     let bounds = entity_ref_list(params.get(1)?)?;
     let plane = entity_ref_value(params.get(2)?)?;
     let same_sense = logical_bool(params.get(3)?)?;
     let (plane_axis, plane_d, raw_normal) = plane_key(plane, entities, index)?;
-    let outward = if same_sense { raw_normal } else { raw_normal.map(|x| -x) };
+    let outward = if same_sense {
+        raw_normal
+    } else {
+        raw_normal.map(|x| -x)
+    };
 
     let mut bound_keys = Vec::new();
     for bound in bounds {
@@ -450,7 +573,14 @@ fn face_signature(
     }
     bound_keys.sort();
 
-    Some((FaceKey { plane_axis, plane_d, bounds: bound_keys }, outward))
+    Some((
+        FaceKey {
+            plane_axis,
+            plane_d,
+            bounds: bound_keys,
+        },
+        outward,
+    ))
 }
 
 fn bound_key(
@@ -466,9 +596,13 @@ fn bound_key(
         _ => return None,
     };
     let loops = direct_refs_of_type(entity, entities, index, "EDGE_LOOP");
-    if loops.len() != 1 { return None; }
+    if loops.len() != 1 {
+        return None;
+    }
     let loop_record = simple_record(entities.get(*index.get(&loops[0])?)?)?;
-    let Parameter::List(params) = &loop_record.parameter else { return None; };
+    let Parameter::List(params) = &loop_record.parameter else {
+        return None;
+    };
     let oes = entity_ref_list(params.get(1)?)?;
 
     let mut edges = Vec::new();
@@ -487,15 +621,21 @@ fn face_oriented_edges(
     index: &HashMap<u64, usize>,
 ) -> Option<Vec<u64>> {
     let face_record = simple_record(entities.get(*index.get(&face)?)?)?;
-    let Parameter::List(params) = &face_record.parameter else { return None; };
+    let Parameter::List(params) = &face_record.parameter else {
+        return None;
+    };
     let bounds = entity_ref_list(params.get(1)?)?;
     let mut out = Vec::new();
     for bound in bounds {
         let bound_entity = entities.get(*index.get(&bound)?)?;
         let loops = direct_refs_of_type(bound_entity, entities, index, "EDGE_LOOP");
-        if loops.len() != 1 { return None; }
+        if loops.len() != 1 {
+            return None;
+        }
         let loop_record = simple_record(entities.get(*index.get(&loops[0])?)?)?;
-        let Parameter::List(loop_params) = &loop_record.parameter else { return None; };
+        let Parameter::List(loop_params) = &loop_record.parameter else {
+            return None;
+        };
         out.extend(entity_ref_list(loop_params.get(1)?)?);
     }
     Some(out)
@@ -507,16 +647,22 @@ fn keyed_face_edges(
     index: &HashMap<u64, usize>,
 ) -> Option<BTreeMap<EdgeKey, (u64, u64)>> {
     let face_record = simple_record(entities.get(*index.get(&face)?)?)?;
-    let Parameter::List(params) = &face_record.parameter else { return None; };
+    let Parameter::List(params) = &face_record.parameter else {
+        return None;
+    };
     let bounds = entity_ref_list(params.get(1)?)?;
     let mut out = BTreeMap::new();
 
     for bound in bounds {
         let bound_entity = entities.get(*index.get(&bound)?)?;
         let loops = direct_refs_of_type(bound_entity, entities, index, "EDGE_LOOP");
-        if loops.len() != 1 { return None; }
+        if loops.len() != 1 {
+            return None;
+        }
         let loop_record = simple_record(entities.get(*index.get(&loops[0])?)?)?;
-        let Parameter::List(loop_params) = &loop_record.parameter else { return None; };
+        let Parameter::List(loop_params) = &loop_record.parameter else {
+            return None;
+        };
         let oes = entity_ref_list(loop_params.get(1)?)?;
         for oe in oes {
             let oe_record = simple_record(entities.get(*index.get(&oe)?)?)?;
@@ -524,7 +670,9 @@ fn keyed_face_edges(
             let key = edge_key(edge, entities, index)?;
             // Repeated identical edge geometry inside one face would make the
             // seam correspondence ambiguous; skip rather than guess.
-            if out.insert(key, (oe, edge)).is_some() { return None; }
+            if out.insert(key, (oe, edge)).is_some() {
+                return None;
+            }
         }
     }
     Some(out)
@@ -540,17 +688,23 @@ fn edge_key(
         point_key(vertex_point(v0, entities, index)?)?,
         point_key(vertex_point(v1, entities, index)?)?,
     ];
-    if ends[1] < ends[0] { ends.swap(0, 1); }
+    if ends[1] < ends[0] {
+        ends.swap(0, 1);
+    }
 
     let edge_record = simple_record(entities.get(*index.get(&edge)?)?)?;
-    let Parameter::List(params) = &edge_record.parameter else { return None; };
+    let Parameter::List(params) = &edge_record.parameter else {
+        return None;
+    };
     let geom = entity_ref_value(params.get(3)?)?;
     let geom_record = simple_record(entities.get(*index.get(&geom)?)?)?;
 
     match geom_record.name.as_str() {
         "LINE" => Some(EdgeKey::Line { ends }),
         "CIRCLE" => {
-            let Parameter::List(circle_params) = &geom_record.parameter else { return None; };
+            let Parameter::List(circle_params) = &geom_record.parameter else {
+                return None;
+            };
             let placement = entity_ref_value(circle_params.get(1)?)?;
             let radius = numeric_value(circle_params.get(2)?)?;
             let (center, axis) = axis_location_and_axis(placement, entities, index)?;
@@ -571,8 +725,12 @@ fn plane_key(
     index: &HashMap<u64, usize>,
 ) -> Option<([i64; 3], i64, [f64; 3])> {
     let record = simple_record(entities.get(*index.get(&plane)?)?)?;
-    if record.name != "PLANE" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "PLANE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     let placement = entity_ref_value(params.get(1)?)?;
     let (point, normal) = axis_location_and_axis(placement, entities, index)?;
     let raw = normalize(normal)?;
@@ -590,8 +748,12 @@ fn axis_location_and_axis(
     index: &HashMap<u64, usize>,
 ) -> Option<([f64; 3], [f64; 3])> {
     let record = simple_record(entities.get(*index.get(&placement)?)?)?;
-    if record.name != "AXIS2_PLACEMENT_3D" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "AXIS2_PLACEMENT_3D" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     let point = point_coords(entity_ref_value(params.get(1)?)?, entities, index)?;
     let axis = direction_coords(entity_ref_value(params.get(2)?)?, entities, index)?;
     Some((point, axis))
@@ -603,8 +765,12 @@ fn vertex_point(
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
     let record = simple_record(entities.get(*index.get(&vertex)?)?)?;
-    if record.name != "VERTEX_POINT" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "VERTEX_POINT" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     point_coords(entity_ref_value(params.get(1)?)?, entities, index)
 }
 
@@ -614,8 +780,12 @@ fn point_coords(
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
     let record = simple_record(entities.get(*index.get(&point)?)?)?;
-    if record.name != "CARTESIAN_POINT" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "CARTESIAN_POINT" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     let xyz = numeric_list(params.get(1)?)?;
     (xyz.len() == 3).then(|| [xyz[0], xyz[1], xyz[2]])
 }
@@ -626,8 +796,12 @@ fn direction_coords(
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
     let record = simple_record(entities.get(*index.get(&direction)?)?)?;
-    if record.name != "DIRECTION" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "DIRECTION" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     let xyz = numeric_list(params.get(1)?)?;
     (xyz.len() == 3).then(|| [xyz[0], xyz[1], xyz[2]])
 }
@@ -638,8 +812,12 @@ fn edge_vertices(
     index: &HashMap<u64, usize>,
 ) -> Option<[u64; 2]> {
     let record = simple_record(entities.get(*index.get(&edge)?)?)?;
-    if record.name != "EDGE_CURVE" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "EDGE_CURVE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     Some([
         entity_ref_value(params.get(1)?)?,
         entity_ref_value(params.get(2)?)?,
@@ -647,19 +825,29 @@ fn edge_vertices(
 }
 
 fn oriented_edge_element(record: &Record) -> Option<u64> {
-    if record.name != "ORIENTED_EDGE" { return None; }
-    let Parameter::List(params) = &record.parameter else { return None; };
+    if record.name != "ORIENTED_EDGE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     entity_ref_value(params.get(3)?)
 }
 
 fn oriented_edge_orientation(record: &Record) -> Option<bool> {
-    let Parameter::List(params) = &record.parameter else { return None; };
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
     logical_bool(params.get(4)?)
 }
 
 fn rewrite_edge_vertices(record: &mut Record, uf: &mut UnionFind) -> Option<()> {
-    let Parameter::List(params) = &mut record.parameter else { return None; };
-    if params.len() < 5 { return None; }
+    let Parameter::List(params) = &mut record.parameter else {
+        return None;
+    };
+    if params.len() < 5 {
+        return None;
+    }
     let v0 = entity_ref_value(&params[1])?;
     let v1 = entity_ref_value(&params[2])?;
     params[1] = entity_ref(uf.mapped(v0));
@@ -668,8 +856,12 @@ fn rewrite_edge_vertices(record: &mut Record, uf: &mut UnionFind) -> Option<()> 
 }
 
 fn rewrite_oriented_edge(record: &mut Record, edge: u64, orientation: bool) -> Option<()> {
-    let Parameter::List(params) = &mut record.parameter else { return None; };
-    if params.len() < 5 { return None; }
+    let Parameter::List(params) = &mut record.parameter else {
+        return None;
+    };
+    if params.len() < 5 {
+        return None;
+    }
     params[3] = entity_ref(edge);
     params[4] = Parameter::Enumeration(if orientation { "T" } else { "F" }.to_string());
     Some(())
@@ -679,10 +871,18 @@ fn representation_items(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     let mut out = HashMap::new();
     for entity in entities {
         let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else { continue; };
-        if !record.name.contains("SHAPE_REPRESENTATION") { continue; }
-        let Parameter::List(params) = &record.parameter else { continue; };
-        let Some(items) = params.get(1).and_then(entity_ref_list) else { continue; };
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if !record.name.contains("SHAPE_REPRESENTATION") {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        let Some(items) = params.get(1).and_then(entity_ref_list) else {
+            continue;
+        };
         out.insert(id, items);
     }
     out
@@ -693,14 +893,20 @@ fn replace_representation_items(
     mapping: &HashMap<u64, u64>,
 ) -> Option<()> {
     let record = simple_record_mut(entity)?;
-    let Parameter::List(params) = &mut record.parameter else { return None; };
-    let Parameter::List(items) = params.get_mut(1)? else { return None; };
+    let Parameter::List(params) = &mut record.parameter else {
+        return None;
+    };
+    let Parameter::List(items) = params.get_mut(1)? else {
+        return None;
+    };
     let mut out = Vec::new();
     let mut emitted = HashSet::new();
     for item in items.iter() {
         let old = entity_ref_value(item)?;
         if let Some(&new) = mapping.get(&old) {
-            if emitted.insert(new) { out.push(entity_ref(new)); }
+            if emitted.insert(new) {
+                out.push(entity_ref(new));
+            }
         } else {
             out.push(entity_ref(old));
         }
@@ -709,10 +915,7 @@ fn replace_representation_items(
     Some(())
 }
 
-fn replace_and_dedup_direct_ref_lists(
-    param: &mut Parameter,
-    mapping: &HashMap<u64, u64>,
-) {
+fn replace_and_dedup_direct_ref_lists(param: &mut Parameter, mapping: &HashMap<u64, u64>) {
     match param {
         Parameter::List(items) => {
             let all_refs = !items.is_empty() && items.iter().all(|p| entity_ref_value(p).is_some());
@@ -721,7 +924,9 @@ fn replace_and_dedup_direct_ref_lists(
                 let mut out = Vec::new();
                 for old in items.iter().filter_map(entity_ref_value) {
                     let new = mapping.get(&old).copied().unwrap_or(old);
-                    if seen.insert(new) { out.push(entity_ref(new)); }
+                    if seen.insert(new) {
+                        out.push(entity_ref(new));
+                    }
                 }
                 *items = out;
             } else {
@@ -737,18 +942,28 @@ fn replace_and_dedup_direct_ref_lists(
     }
 }
 
-fn styles_by_target(
-    entities: &[EntityInstance],
-) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
+fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
     let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
     for entity in entities {
         let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else { continue; };
-        if record.name != "STYLED_ITEM" { continue; }
-        let Parameter::List(params) = &record.parameter else { continue; };
-        if params.len() != 3 { continue; }
-        let Some(target) = entity_ref_value(&params[2]) else { continue; };
-        let Some(assignments) = entity_ref_list(&params[1]) else { continue; };
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "STYLED_ITEM" {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        if params.len() != 3 {
+            continue;
+        }
+        let Some(target) = entity_ref_value(&params[2]) else {
+            continue;
+        };
+        let Some(assignments) = entity_ref_list(&params[1]) else {
+            continue;
+        };
         out.entry(target).or_default().push((id, assignments));
     }
     out
@@ -762,7 +977,8 @@ fn direct_refs_of_type(
 ) -> Vec<u64> {
     let mut refs = Vec::new();
     visit_entity_refs(entity, &mut |id| {
-        if index.get(&id)
+        if index
+            .get(&id)
             .and_then(|idx| simple_record(&entities[*idx]))
             .is_some_and(|record| record.name == wanted)
         {
@@ -773,7 +989,11 @@ fn direct_refs_of_type(
 }
 
 fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities.iter().enumerate().map(|(idx, entity)| (entity_id(entity), idx)).collect()
+    entities
+        .iter()
+        .enumerate()
+        .map(|(idx, entity)| (entity_id(entity), idx))
+        .collect()
 }
 
 fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
@@ -829,7 +1049,9 @@ fn entity_ref_value(param: &Parameter) -> Option<u64> {
 }
 
 fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else { return None; };
+    let Parameter::List(items) = param else {
+        return None;
+    };
     items.iter().map(entity_ref_value).collect()
 }
 
@@ -842,7 +1064,9 @@ fn numeric_value(param: &Parameter) -> Option<f64> {
 }
 
 fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else { return None; };
+    let Parameter::List(items) = param else {
+        return None;
+    };
     items.iter().map(numeric_value).collect()
 }
 
@@ -871,9 +1095,13 @@ fn direction_key(v: [f64; 3]) -> Option<[i64; 3]> {
 }
 
 fn quantize(v: f64, q: f64) -> Option<i64> {
-    if !v.is_finite() || !q.is_finite() || q <= 0.0 { return None; }
+    if !v.is_finite() || !q.is_finite() || q <= 0.0 {
+        return None;
+    }
     let x = (v / q).round();
-    if x < i64::MIN as f64 || x > i64::MAX as f64 { return None; }
+    if x < i64::MIN as f64 || x > i64::MAX as f64 {
+        return None;
+    }
     Some(x as i64)
 }
 
@@ -883,7 +1111,9 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
     let n = dot(v, v).sqrt();
-    if !n.is_finite() || n <= 1.0e-15 { return None; }
+    if !n.is_finite() || n <= 1.0e-15 {
+        return None;
+    }
     Some([v[0] / n, v[1] / n, v[2] / n])
 }
 
@@ -891,7 +1121,9 @@ fn canonical_axis(v: [f64; 3]) -> Option<[f64; 3]> {
     let mut v = normalize(v)?;
     for x in v {
         if x.abs() > 1.0e-12 {
-            if x < 0.0 { v = v.map(|q| -q); }
+            if x < 0.0 {
+                v = v.map(|q| -q);
+            }
             break;
         }
     }
@@ -913,7 +1145,9 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
     match param {
         Parameter::Ref(Name::Entity(id)) => f(*id),
         Parameter::List(items) => {
-            for item in items { visit_param_refs(item, f); }
+            for item in items {
+                visit_param_refs(item, f);
+            }
         }
         Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
         _ => {}
