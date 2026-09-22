@@ -1,5 +1,6 @@
 use crate::brep::{
-    self, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport, SurfaceSupport,
+    self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
+    SplineExtrusionSupport, SurfaceSupport,
 };
 use crate::instances::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
@@ -40,18 +41,22 @@ pub enum RecoveredProfileCurve {
         start_angle_rad: f64,
         end_angle_rad: f64,
     },
+    Bezier {
+        source_edge_ids: Vec<u64>,
+        control_points_mm: Vec<[f64; 2]>,
+    },
+    BSpline {
+        source_edge_ids: Vec<u64>,
+        degree: usize,
+        control_points_mm: Vec<[f64; 2]>,
+        knots: Vec<f64>,
+        weights: Option<Vec<f64>>,
+    },
 }
 
 impl RecoveredProfileCurve {
     fn first_source_edge_id(&self) -> u64 {
-        match self {
-            Self::Line {
-                source_edge_ids, ..
-            }
-            | Self::CircleArc {
-                source_edge_ids, ..
-            } => source_edge_ids.first().copied().unwrap_or(u64::MAX),
-        }
+        self.source_edge_ids().first().copied().unwrap_or(u64::MAX)
     }
 
     pub fn source_edge_ids(&self) -> &[u64] {
@@ -61,6 +66,12 @@ impl RecoveredProfileCurve {
             }
             | Self::CircleArc {
                 source_edge_ids, ..
+            }
+            | Self::Bezier {
+                source_edge_ids, ..
+            }
+            | Self::BSpline {
+                source_edge_ids, ..
             } => source_edge_ids,
         }
     }
@@ -69,36 +80,57 @@ impl RecoveredProfileCurve {
         match self {
             Self::Line { .. } => 1,
             Self::CircleArc { .. } => 2,
+            Self::Bezier {
+                control_points_mm, ..
+            } => 2 + control_points_mm.len(),
+            Self::BSpline {
+                control_points_mm,
+                knots,
+                weights,
+                ..
+            } => 4 + control_points_mm.len() + knots.len() + weights.as_ref().map_or(0, Vec::len),
         }
     }
 
-    fn start_point(&self) -> [f64; 2] {
+    fn start_point(&self) -> Option<[f64; 2]> {
         match self {
-            Self::Line { start_mm, .. } => *start_mm,
+            Self::Line { start_mm, .. } => Some(*start_mm),
             Self::CircleArc {
                 center_mm,
                 radius_mm,
                 start_angle_rad,
                 ..
-            } => [
+            } => Some([
                 center_mm[0] + radius_mm * start_angle_rad.cos(),
                 center_mm[1] + radius_mm * start_angle_rad.sin(),
-            ],
+            ]),
+            Self::Bezier {
+                control_points_mm, ..
+            }
+            | Self::BSpline {
+                control_points_mm, ..
+            } => control_points_mm.first().copied(),
         }
     }
 
-    fn end_point(&self) -> [f64; 2] {
+    fn end_point(&self) -> Option<[f64; 2]> {
         match self {
-            Self::Line { end_mm, .. } => *end_mm,
+            Self::Line { end_mm, .. } => Some(*end_mm),
             Self::CircleArc {
                 center_mm,
                 radius_mm,
                 end_angle_rad,
                 ..
-            } => [
+            } => Some([
                 center_mm[0] + radius_mm * end_angle_rad.cos(),
                 center_mm[1] + radius_mm * end_angle_rad.sin(),
-            ],
+            ]),
+            Self::Bezier {
+                control_points_mm, ..
+            }
+            | Self::BSpline {
+                control_points_mm, ..
+            } => control_points_mm.last().copied(),
         }
     }
 
@@ -126,7 +158,33 @@ impl RecoveredProfileCurve {
                 start_angle_rad: *end_angle_rad,
                 end_angle_rad: *start_angle_rad,
             },
+            Self::Bezier {
+                source_edge_ids,
+                control_points_mm,
+            } => Self::Bezier {
+                source_edge_ids: source_edge_ids.clone(),
+                control_points_mm: control_points_mm.iter().rev().copied().collect(),
+            },
+            Self::BSpline {
+                source_edge_ids,
+                degree,
+                control_points_mm,
+                knots,
+                weights,
+            } => Self::BSpline {
+                source_edge_ids: source_edge_ids.clone(),
+                degree: *degree,
+                control_points_mm: control_points_mm.iter().rev().copied().collect(),
+                knots: knots.iter().rev().map(|knot| 1.0 - knot).collect(),
+                weights: weights
+                    .as_ref()
+                    .map(|values| values.iter().rev().copied().collect()),
+            },
         }
+    }
+
+    fn is_spline(&self) -> bool {
+        matches!(self, Self::Bezier { .. } | Self::BSpline { .. })
     }
 }
 
@@ -239,7 +297,7 @@ fn cap_pair_candidate(
     let first = &faces[first_index];
     let second = &faces[second_index];
     let (SurfaceSupport::Plane(first_plane), SurfaceSupport::Plane(second_plane)) =
-        (first.surface, second.surface)
+        (&first.surface, &second.surface)
     else {
         return None;
     };
@@ -264,15 +322,15 @@ fn cap_pair_candidate(
     };
     let bottom = &faces[bottom_index];
     let top = &faces[top_index];
-    let SurfaceSupport::Plane(bottom_plane) = bottom.surface else {
+    let SurfaceSupport::Plane(bottom_plane) = &bottom.surface else {
         return None;
     };
-    let SurfaceSupport::Plane(top_plane) = top.surface else {
+    let SurfaceSupport::Plane(top_plane) = &top.surface else {
         return None;
     };
     let extrusion = mul(z_axis, height_mm);
 
-    if !face_lies_on_plane(bottom, bottom_plane) || !face_lies_on_plane(top, top_plane) {
+    if !face_lies_on_plane(bottom, *bottom_plane) || !face_lies_on_plane(top, *top_plane) {
         return None;
     }
 
@@ -343,7 +401,9 @@ fn cap_pair_candidate(
             return None;
         }
 
-        if !side_support_matches_profile(side, bottom_edge, z_axis) {
+        let side_residual = side_support_residual(side, bottom_edge, extrusion)?;
+        max_residual_mm = max_residual_mm.max(side_residual);
+        if max_residual_mm > GEOM_TOL_MM {
             return None;
         }
 
@@ -432,12 +492,16 @@ fn edge_lies_on_plane(edge: &OrientedEdgeUse, plane: PlaneSupport) -> bool {
     {
         return false;
     }
-    match edge.support {
+    match &edge.support {
         CurveSupport::Line(_) => true,
         CurveSupport::Circle(circle) => {
             point_plane_distance(circle.center_mm, plane) <= GEOM_TOL_MM
                 && parallel(circle.normal, plane.normal)
         }
+        CurveSupport::BSpline(spline) => spline
+            .control_points_mm
+            .iter()
+            .all(|&point| point_plane_distance(point, plane) <= GEOM_TOL_MM),
         CurveSupport::Other { .. } => false,
     }
 }
@@ -448,7 +512,7 @@ fn translated_profile_edge_residual(
     extrusion: [f64; 3],
 ) -> Option<f64> {
     let endpoint_residual = translated_endpoints_residual(bottom, top, extrusion);
-    match (bottom.support, top.support) {
+    match (&bottom.support, &top.support) {
         (CurveSupport::Line(_), CurveSupport::Line(_)) => Some(endpoint_residual),
         (CurveSupport::Circle(bottom_circle), CurveSupport::Circle(top_circle)) => {
             if !parallel(bottom_circle.normal, top_circle.normal) {
@@ -457,8 +521,8 @@ fn translated_profile_edge_residual(
             if (bottom_circle.radius_mm - top_circle.radius_mm).abs() > GEOM_TOL_MM {
                 return None;
             }
-            let bottom_sweep = circle_edge_sweep(bottom, bottom_circle)?;
-            let top_sweep = circle_edge_sweep(top, top_circle)?;
+            let bottom_sweep = circle_edge_sweep(bottom, *bottom_circle)?;
+            let top_sweep = circle_edge_sweep(top, *top_circle)?;
             if (bottom_sweep.abs() - top_sweep.abs()).abs() > ANGLE_TOL_RAD {
                 return None;
             }
@@ -470,6 +534,11 @@ fn translated_profile_edge_residual(
                     ))
                     .max((bottom_circle.radius_mm - top_circle.radius_mm).abs()),
             )
+        }
+        (CurveSupport::BSpline(bottom_spline), CurveSupport::BSpline(top_spline)) => {
+            let spline_residual =
+                translated_bspline_residual(bottom_spline, top_spline, extrusion)?;
+            Some(endpoint_residual.max(spline_residual))
         }
         _ => None,
     }
@@ -487,40 +556,145 @@ fn translated_endpoints_residual(
     direct.min(reverse)
 }
 
-fn side_support_matches_profile(
-    side: &FaceInfo,
-    profile_edge: &OrientedEdgeUse,
-    z_axis: [f64; 3],
-) -> bool {
-    match (profile_edge.support, side.surface) {
-        (CurveSupport::Line(_), SurfaceSupport::Plane(plane)) => {
-            let direction = sub(profile_edge.end_mm, profile_edge.start_mm);
-            let Some(direction) = normalize(direction) else {
-                return false;
-            };
-            let expected_normal = cross(direction, z_axis);
-            let Some(expected_normal) = normalize(expected_normal) else {
-                return false;
-            };
-            parallel(plane.normal, expected_normal)
-                && side
-                    .loop_edges
-                    .iter()
-                    .all(|edge| edge_lies_on_plane(edge, plane))
-        }
-        (CurveSupport::Circle(circle), SurfaceSupport::Cylinder(cylinder)) => {
-            parallel(circle.normal, z_axis)
-                && parallel(cylinder.axis, z_axis)
-                && (circle.radius_mm - cylinder.radius_mm).abs() <= GEOM_TOL_MM
-                && axis_line_distance(cylinder.axis_origin_mm, cylinder.axis, circle.center_mm)
-                    <= GEOM_TOL_MM
+fn translated_bspline_residual(
+    bottom: &BSplineSupport,
+    top: &BSplineSupport,
+    extrusion: [f64; 3],
+) -> Option<f64> {
+    let direct = bspline_control_residual(bottom, top, extrusion);
+    let reversed_top = reverse_bspline_support(top);
+    let reversed = bspline_control_residual(bottom, &reversed_top, extrusion);
+    match (direct, reversed) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn bspline_control_residual(
+    source: &BSplineSupport,
+    target: &BSplineSupport,
+    translation: [f64; 3],
+) -> Option<f64> {
+    if !bspline_parameterization_matches(source, target)
+        || source.control_points_mm.len() != target.control_points_mm.len()
+    {
+        return None;
+    }
+    Some(
+        source
+            .control_points_mm
+            .iter()
+            .zip(&target.control_points_mm)
+            .map(|(&source_point, &target_point)| {
+                distance(add(source_point, translation), target_point)
+            })
+            .fold(0.0_f64, f64::max),
+    )
+}
+
+fn bspline_parameterization_matches(first: &BSplineSupport, second: &BSplineSupport) -> bool {
+    if first.degree != second.degree
+        || first.knots.len() != second.knots.len()
+        || first
+            .knots
+            .iter()
+            .zip(&second.knots)
+            .any(|(a, b)| (a - b).abs() > 1.0e-12)
+    {
+        return false;
+    }
+    match (&first.weights, &second.weights) {
+        (None, None) => true,
+        (Some(a), Some(b)) if a.len() == b.len() => {
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() <= 1.0e-12)
         }
         _ => false,
     }
 }
 
+fn reverse_bspline_support(spline: &BSplineSupport) -> BSplineSupport {
+    BSplineSupport {
+        degree: spline.degree,
+        control_points_mm: spline.control_points_mm.iter().rev().copied().collect(),
+        knots: spline.knots.iter().rev().map(|knot| 1.0 - knot).collect(),
+        weights: spline
+            .weights
+            .as_ref()
+            .map(|weights| weights.iter().rev().copied().collect()),
+    }
+}
+
+fn side_support_residual(
+    side: &FaceInfo,
+    profile_edge: &OrientedEdgeUse,
+    extrusion: [f64; 3],
+) -> Option<f64> {
+    let z_axis = normalize(extrusion)?;
+    match (&profile_edge.support, &side.surface) {
+        (CurveSupport::Line(_), SurfaceSupport::Plane(plane)) => {
+            let direction = normalize(sub(profile_edge.end_mm, profile_edge.start_mm))?;
+            let expected_normal = normalize(cross(direction, z_axis))?;
+            (parallel(plane.normal, expected_normal)
+                && side
+                    .loop_edges
+                    .iter()
+                    .all(|edge| edge_lies_on_plane(edge, *plane)))
+            .then_some(0.0)
+        }
+        (CurveSupport::Circle(circle), SurfaceSupport::Cylinder(cylinder)) => {
+            if !parallel(circle.normal, z_axis)
+                || !parallel(cylinder.axis, z_axis)
+                || (circle.radius_mm - cylinder.radius_mm).abs() > GEOM_TOL_MM
+            {
+                return None;
+            }
+            let residual =
+                axis_line_distance(cylinder.axis_origin_mm, cylinder.axis, circle.center_mm)
+                    .max((circle.radius_mm - cylinder.radius_mm).abs());
+            (residual <= GEOM_TOL_MM).then_some(residual)
+        }
+        (CurveSupport::BSpline(profile), SurfaceSupport::SplineExtrusion(surface)) => {
+            spline_side_residual(profile, surface, extrusion)
+        }
+        _ => None,
+    }
+}
+
+fn spline_side_residual(
+    profile: &BSplineSupport,
+    surface: &SplineExtrusionSupport,
+    extrusion: [f64; 3],
+) -> Option<f64> {
+    let sweep_residual = distance(surface.extrusion_mm, extrusion)
+        .min(distance(surface.extrusion_mm, mul(extrusion, -1.0)));
+    if sweep_residual > GEOM_TOL_MM || surface.max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+
+    let candidate_translations = [[0.0, 0.0, 0.0], extrusion, mul(extrusion, -1.0)];
+    let mut profile_residual = f64::INFINITY;
+    for translation in candidate_translations {
+        if let Some(value) = bspline_control_residual(profile, &surface.profile, translation) {
+            profile_residual = profile_residual.min(value);
+        }
+        let reversed = reverse_bspline_support(&surface.profile);
+        if let Some(value) = bspline_control_residual(profile, &reversed, translation) {
+            profile_residual = profile_residual.min(value);
+        }
+    }
+    if !profile_residual.is_finite() || profile_residual > GEOM_TOL_MM {
+        return None;
+    }
+    Some(
+        profile_residual
+            .max(sweep_residual)
+            .max(surface.max_residual_mm),
+    )
+}
+
 fn connector_residual(edge: &OrientedEdgeUse, extrusion: [f64; 3]) -> Option<f64> {
-    if !matches!(edge.support, CurveSupport::Line(_)) {
+    if !matches!(&edge.support, CurveSupport::Line(_)) {
         return None;
     }
     let forward = distance(sub(edge.end_mm, edge.start_mm), extrusion);
@@ -533,8 +707,8 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
         return None;
     }
     for index in 0..cap.loop_edges.len() {
-        let current = cap.loop_edges[index];
-        let next = cap.loop_edges[(index + 1) % cap.loop_edges.len()];
+        let current = &cap.loop_edges[index];
+        let next = &cap.loop_edges[(index + 1) % cap.loop_edges.len()];
         if current.end_vertex != next.start_vertex
             || distance(current.end_mm, next.start_mm) > GEOM_TOL_MM
         {
@@ -549,7 +723,7 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
     let y_axis = normalize(cross(z_axis, x_axis))?;
 
     if cap.loop_edges.len() == 1
-        && let CurveSupport::Circle(circle) = cap.loop_edges[0].support
+        && let CurveSupport::Circle(circle) = &cap.loop_edges[0].support
         && distance(cap.loop_edges[0].start_mm, cap.loop_edges[0].end_mm) <= GEOM_TOL_MM
     {
         if !parallel(circle.normal, z_axis) {
@@ -587,7 +761,7 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
         .map(|edge| recovered_profile_curve(edge, origin_mm, x_axis, y_axis, z_axis))
         .collect::<Option<Vec<_>>>()?;
 
-    if signed_area_curves(&curves) < 0.0 {
+    if !curves.iter().any(RecoveredProfileCurve::is_spline) && signed_area_curves(&curves) < 0.0 {
         curves = curves
             .iter()
             .rev()
@@ -625,9 +799,13 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
         });
     }
 
+    let endpoints = curves
+        .iter()
+        .map(|curve| Some((curve.start_point()?, curve.end_point()?)))
+        .collect::<Option<Vec<_>>>()?;
     let start_index = (0..curves.len()).min_by(|&a, &b| {
-        let aa = curves[a].start_point();
-        let bb = curves[b].start_point();
+        let aa = endpoints[a].0;
+        let bb = endpoints[b].0;
         aa[0]
             .total_cmp(&bb[0])
             .then_with(|| aa[1].total_cmp(&bb[1]))
@@ -639,11 +817,12 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
     })?;
     curves.rotate_left(start_index);
 
-    if curves.iter().enumerate().any(|(index, curve)| {
-        distance2(
-            curve.end_point(),
-            curves[(index + 1) % curves.len()].start_point(),
-        ) > GEOM_TOL_MM
+    let endpoints = curves
+        .iter()
+        .map(|curve| Some((curve.start_point()?, curve.end_point()?)))
+        .collect::<Option<Vec<_>>>()?;
+    if endpoints.iter().enumerate().any(|(index, (_, end))| {
+        distance2(*end, endpoints[(index + 1) % endpoints.len()].0) > GEOM_TOL_MM
     }) {
         return None;
     }
@@ -665,7 +844,7 @@ fn recovered_profile_curve(
 ) -> Option<RecoveredProfileCurve> {
     let start_mm = project2(edge.start_mm, origin_mm, x_axis, y_axis);
     let end_mm = project2(edge.end_mm, origin_mm, x_axis, y_axis);
-    match edge.support {
+    match &edge.support {
         CurveSupport::Line(_) => Some(RecoveredProfileCurve::Line {
             source_edge_ids: vec![edge.edge_id],
             start_mm,
@@ -692,8 +871,60 @@ fn recovered_profile_curve(
                 end_angle_rad: start_angle + sweep,
             })
         }
+        CurveSupport::BSpline(spline) => {
+            let oriented = if edge.parameter_forward {
+                spline.clone()
+            } else {
+                reverse_bspline_support(spline)
+            };
+            let support_start = *oriented.control_points_mm.first()?;
+            let support_end = *oriented.control_points_mm.last()?;
+            if distance(support_start, edge.start_mm) > GEOM_TOL_MM
+                || distance(support_end, edge.end_mm) > GEOM_TOL_MM
+            {
+                return None;
+            }
+            let control_points_mm = oriented
+                .control_points_mm
+                .iter()
+                .map(|&point| project2(point, origin_mm, x_axis, y_axis))
+                .collect::<Vec<_>>();
+
+            if oriented.weights.is_none() && is_bezier_support(&oriented) {
+                Some(RecoveredProfileCurve::Bezier {
+                    source_edge_ids: vec![edge.edge_id],
+                    control_points_mm,
+                })
+            } else {
+                Some(RecoveredProfileCurve::BSpline {
+                    source_edge_ids: vec![edge.edge_id],
+                    degree: oriented.degree,
+                    control_points_mm,
+                    knots: oriented.knots,
+                    weights: oriented.weights,
+                })
+            }
+        }
         CurveSupport::Other { .. } => None,
     }
+}
+
+fn is_bezier_support(spline: &BSplineSupport) -> bool {
+    let Some(order) = spline.degree.checked_add(1) else {
+        return false;
+    };
+    let Some(expected_knots) = order.checked_mul(2) else {
+        return false;
+    };
+    if spline.control_points_mm.len() != order || spline.knots.len() != expected_knots {
+        return false;
+    }
+    spline.knots[..order]
+        .iter()
+        .all(|knot| knot.abs() <= 1.0e-12)
+        && spline.knots[order..]
+            .iter()
+            .all(|knot| (*knot - 1.0).abs() <= 1.0e-12)
 }
 
 fn simplify_profile_curves(mut curves: Vec<RecoveredProfileCurve>) -> Vec<RecoveredProfileCurve> {
@@ -740,7 +971,7 @@ fn merge_profile_curves(
     first: &RecoveredProfileCurve,
     second: &RecoveredProfileCurve,
 ) -> Option<RecoveredProfileCurve> {
-    if distance2(first.end_point(), second.start_point()) > GEOM_TOL_MM {
+    if distance2(first.end_point()?, second.start_point()?) > GEOM_TOL_MM {
         return None;
     }
 
@@ -886,6 +1117,7 @@ fn signed_area_curves(curves: &[RecoveredProfileCurve]) -> f64 {
                     - r * center_mm[1] * (theta1.cos() - theta0.cos())
                     + r * r * (theta1 - theta0))
             }
+            RecoveredProfileCurve::Bezier { .. } | RecoveredProfileCurve::BSpline { .. } => 0.0,
         })
         .sum()
 }
