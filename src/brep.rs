@@ -11,6 +11,7 @@ const DIRECTION_TOLERANCE: f64 = 1.0e-15;
 pub(crate) struct PlaneSupport {
     pub origin_mm: [f64; 3],
     pub normal: [f64; 3],
+    pub max_residual_mm: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,6 +20,39 @@ pub(crate) struct CylinderSupport {
     pub axis: [f64; 3],
     pub x_direction: [f64; 3],
     pub radius_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ConeSupport {
+    pub reference_origin_mm: [f64; 3],
+    pub axis: [f64; 3],
+    pub x_direction: [f64; 3],
+    pub reference_radius_mm: f64,
+    pub semi_angle_rad: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SphereSupport {
+    pub center_mm: [f64; 3],
+    pub axis: [f64; 3],
+    pub x_direction: [f64; 3],
+    pub radius_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TorusSupport {
+    pub center_mm: [f64; 3],
+    pub axis: [f64; 3],
+    pub x_direction: [f64; 3],
+    pub major_radius_mm: f64,
+    pub minor_radius_mm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RevolutionSurfaceSupport {
+    pub axis_origin_mm: [f64; 3],
+    pub axis: [f64; 3],
+    pub swept_curve_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +74,10 @@ pub(crate) struct SplineExtrusionSupport {
 pub(crate) enum SurfaceSupport {
     Plane(PlaneSupport),
     Cylinder(CylinderSupport),
+    Cone(ConeSupport),
+    Sphere(SphereSupport),
+    Torus(TorusSupport),
+    Revolution(RevolutionSurfaceSupport),
     SplineExtrusion(SplineExtrusionSupport),
     Other { entity_id: u64 },
 }
@@ -229,7 +267,11 @@ pub(crate) fn surface_support(
                 let support = (|| {
                     let placement = entity_ref_value(params.get(1)?)?;
                     let (origin_mm, normal, _) = axis2_placement_3d(placement, entities, index)?;
-                    Some(PlaneSupport { origin_mm, normal })
+                    Some(PlaneSupport {
+                        origin_mm,
+                        normal,
+                        max_residual_mm: 0.0,
+                    })
                 })();
                 if let Some(support) = support {
                     return SurfaceSupport::Plane(support);
@@ -251,26 +293,124 @@ pub(crate) fn surface_support(
                     return SurfaceSupport::Cylinder(support);
                 }
             }
+            "CONICAL_SURFACE" => {
+                let support = (|| {
+                    let placement = entity_ref_value(params.get(1)?)?;
+                    let (reference_origin_mm, axis, x_direction) =
+                        axis2_placement_3d(placement, entities, index)?;
+                    let reference_radius_mm = number(params.get(2)?)?;
+                    let semi_angle_rad = number(params.get(3)?)?;
+                    if !reference_radius_mm.is_finite()
+                        || reference_radius_mm < 0.0
+                        || !semi_angle_rad.is_finite()
+                        || semi_angle_rad <= 0.0
+                        || semi_angle_rad >= std::f64::consts::FRAC_PI_2
+                    {
+                        return None;
+                    }
+                    Some(ConeSupport {
+                        reference_origin_mm,
+                        axis,
+                        x_direction,
+                        reference_radius_mm,
+                        semi_angle_rad,
+                    })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Cone(support);
+                }
+            }
+            "SPHERICAL_SURFACE" => {
+                let support = (|| {
+                    let placement = entity_ref_value(params.get(1)?)?;
+                    let (center_mm, axis, x_direction) =
+                        axis2_placement_3d(placement, entities, index)?;
+                    let radius_mm = number(params.get(2)?)?;
+                    if !radius_mm.is_finite() || radius_mm <= 0.0 {
+                        return None;
+                    }
+                    Some(SphereSupport {
+                        center_mm,
+                        axis,
+                        x_direction,
+                        radius_mm,
+                    })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Sphere(support);
+                }
+            }
+            "TOROIDAL_SURFACE" => {
+                let support = (|| {
+                    let placement = entity_ref_value(params.get(1)?)?;
+                    let (center_mm, axis, x_direction) =
+                        axis2_placement_3d(placement, entities, index)?;
+                    let major_radius_mm = number(params.get(2)?)?;
+                    let minor_radius_mm = number(params.get(3)?)?;
+                    if !major_radius_mm.is_finite()
+                        || major_radius_mm <= 0.0
+                        || !minor_radius_mm.is_finite()
+                        || minor_radius_mm <= 0.0
+                    {
+                        return None;
+                    }
+                    Some(TorusSupport {
+                        center_mm,
+                        axis,
+                        x_direction,
+                        major_radius_mm,
+                        minor_radius_mm,
+                    })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Torus(support);
+                }
+            }
+            "SURFACE_OF_REVOLUTION" => {
+                let support = (|| {
+                    let swept_curve_id = entity_ref_value(params.get(1)?)?;
+                    let placement = entity_ref_value(params.get(2)?)?;
+                    let (axis_origin_mm, axis) = axis1_placement(placement, entities, index)?;
+                    Some(RevolutionSurfaceSupport {
+                        axis_origin_mm,
+                        axis,
+                        swept_curve_id,
+                    })
+                })();
+                if let Some(support) = support {
+                    return SurfaceSupport::Revolution(support);
+                }
+            }
             _ => {}
         }
     }
 
-    surface_recovery::analyze_v_extrusion_surface(surface_id, entities, index, 1.0e-7)
-        .map(|evidence| {
-            SurfaceSupport::SplineExtrusion(SplineExtrusionSupport {
-                profile: BSplineSupport {
-                    degree: evidence.degree,
-                    control_points_mm: evidence.control_points_mm,
-                    knots: evidence.knots,
-                    weights: evidence.weights.and_then(normalize_weights),
-                },
-                extrusion_mm: evidence.extrusion_mm,
-                max_residual_mm: evidence.max_residual_mm,
-            })
-        })
-        .unwrap_or(SurfaceSupport::Other {
-            entity_id: surface_id,
-        })
+    if let Some(evidence) =
+        surface_recovery::analyze_v_extrusion_surface(surface_id, entities, index, 1.0e-7)
+    {
+        return SurfaceSupport::SplineExtrusion(SplineExtrusionSupport {
+            profile: BSplineSupport {
+                degree: evidence.degree,
+                control_points_mm: evidence.control_points_mm,
+                knots: evidence.knots,
+                weights: evidence.weights.and_then(normalize_weights),
+            },
+            extrusion_mm: evidence.extrusion_mm,
+            max_residual_mm: evidence.max_residual_mm,
+        });
+    }
+    if let Some(evidence) =
+        surface_recovery::analyze_planar_surface(surface_id, entities, index, 1.0e-7)
+    {
+        return SurfaceSupport::Plane(PlaneSupport {
+            origin_mm: evidence.origin_mm,
+            normal: evidence.normal,
+            max_residual_mm: evidence.max_residual_mm,
+        });
+    }
+    SurfaceSupport::Other {
+        entity_id: surface_id,
+    }
 }
 
 pub(crate) fn curve_support(
@@ -636,7 +776,7 @@ pub(crate) fn axis2_placement_3d(
         Parameter::Ref(_) => {
             direction_components(entity_ref_value(params.get(2)?)?, entities, index)?
         }
-        Parameter::Omitted => [0.0, 0.0, 1.0],
+        Parameter::Omitted | Parameter::NotProvided => [0.0, 0.0, 1.0],
         _ => return None,
     };
     let axis = normalize(axis)?;
@@ -644,11 +784,34 @@ pub(crate) fn axis2_placement_3d(
         Parameter::Ref(_) => {
             direction_components(entity_ref_value(params.get(3)?)?, entities, index)?
         }
-        Parameter::Omitted => default_ref_direction(axis),
+        Parameter::Omitted | Parameter::NotProvided => default_ref_direction(axis),
         _ => return None,
     };
     let x_direction = normalize(sub(raw_x, mul(axis, dot(raw_x, axis))))?;
     Some((origin_mm, axis, x_direction))
+}
+
+pub(crate) fn axis1_placement(
+    placement_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<([f64; 3], [f64; 3])> {
+    let placement = simple_record(&entities[*index.get(&placement_id)?])?;
+    if placement.name != "AXIS1_PLACEMENT" {
+        return None;
+    }
+    let Parameter::List(params) = &placement.parameter else {
+        return None;
+    };
+    let origin_mm = cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)?;
+    let axis = match params.get(2)? {
+        Parameter::Ref(_) => {
+            direction_components(entity_ref_value(params.get(2)?)?, entities, index)?
+        }
+        Parameter::Omitted | Parameter::NotProvided => [0.0, 0.0, 1.0],
+        _ => return None,
+    };
+    Some((origin_mm, normalize(axis)?))
 }
 
 pub(crate) fn direction_components(
@@ -903,6 +1066,144 @@ pub(crate) fn toggle_tf(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instances::entity_id;
+
+    fn wrapped(data: &str) -> String {
+        format!(
+            "ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('x'),'1');
+FILE_NAME('a','b',(''),(''),'x','y','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+{data}
+ENDSEC;
+END-ISO-10303-21;
+"
+        )
+    }
+
+    #[test]
+    fn parses_rotational_analytic_surface_supports() {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(1.,2.,3.));
+             #2=DIRECTION('',(0.,0.,2.));
+             #3=DIRECTION('',(1.,0.,0.));
+             #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+             #5=CONICAL_SURFACE('',#4,2.,0.25);
+             #6=SPHERICAL_SURFACE('',#4,4.);
+             #7=TOROIDAL_SURFACE('',#4,5.,1.);
+             #8=AXIS1_PLACEMENT('',#1,#2);
+             #9=VECTOR('',#3,1.);
+             #10=LINE('',#1,#9);
+             #11=SURFACE_OF_REVOLUTION('',#10,#8);",
+        );
+        let exchange = ruststep::parser::parse(&text).unwrap();
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+
+        let SurfaceSupport::Cone(cone) = surface_support(5, entities, &index) else {
+            panic!("expected cone support");
+        };
+        assert_eq!(cone.reference_origin_mm, [1.0, 2.0, 3.0]);
+        assert_eq!(cone.axis, [0.0, 0.0, 1.0]);
+        assert_eq!(cone.reference_radius_mm, 2.0);
+        assert_eq!(cone.semi_angle_rad, 0.25);
+
+        let SurfaceSupport::Sphere(sphere) = surface_support(6, entities, &index) else {
+            panic!("expected sphere support");
+        };
+        assert_eq!(sphere.center_mm, [1.0, 2.0, 3.0]);
+        assert_eq!(sphere.radius_mm, 4.0);
+
+        let SurfaceSupport::Torus(torus) = surface_support(7, entities, &index) else {
+            panic!("expected torus support");
+        };
+        assert_eq!(torus.center_mm, [1.0, 2.0, 3.0]);
+        assert_eq!(torus.major_radius_mm, 5.0);
+        assert_eq!(torus.minor_radius_mm, 1.0);
+
+        let SurfaceSupport::Revolution(revolution) = surface_support(11, entities, &index) else {
+            panic!("expected surface-of-revolution support");
+        };
+        assert_eq!(revolution.axis_origin_mm, [1.0, 2.0, 3.0]);
+        assert_eq!(revolution.axis, [0.0, 0.0, 1.0]);
+        assert_eq!(revolution.swept_curve_id, 10);
+    }
+
+    #[test]
+    fn axis1_placement_defaults_to_positive_z() {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(1.,2.,3.));
+             #2=AXIS1_PLACEMENT('',#1,$);",
+        );
+        let exchange = ruststep::parser::parse(&text).unwrap();
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            axis1_placement(2, entities, &index),
+            Some(([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]))
+        );
+    }
+
+    #[test]
+    fn spline_extrusion_precedes_planar_fallback() {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));
+             #2=CARTESIAN_POINT('',(0.,2.,0.));
+             #3=CARTESIAN_POINT('',(1.,0.,0.));
+             #4=CARTESIAN_POINT('',(1.,2.,0.));
+             #5=CARTESIAN_POINT('',(2.,0.,0.));
+             #6=CARTESIAN_POINT('',(2.,2.,0.));
+             #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
+        );
+        let exchange = ruststep::parser::parse(&text).unwrap();
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+        assert!(matches!(
+            surface_support(10, entities, &index),
+            SurfaceSupport::SplineExtrusion(_)
+        ));
+    }
+
+    #[test]
+    fn planar_non_extrusion_bspline_falls_back_to_plane() {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(0.,0.,3.));
+             #2=CARTESIAN_POINT('',(0.,1.,3.));
+             #3=CARTESIAN_POINT('',(0.,2.,3.));
+             #4=CARTESIAN_POINT('',(2.,0.,3.));
+             #5=CARTESIAN_POINT('',(2.,1.,3.));
+             #6=CARTESIAN_POINT('',(2.,2.,3.));
+             #10=B_SPLINE_SURFACE_WITH_KNOTS('',1,2,((#1,#2,#3),(#4,#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.);",
+        );
+        let exchange = ruststep::parser::parse(&text).unwrap();
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+        let SurfaceSupport::Plane(plane) = surface_support(10, entities, &index) else {
+            panic!("expected planar fallback");
+        };
+        assert!((plane.origin_mm[2] - 3.0).abs() <= 1.0e-12);
+        assert!((plane.normal[2].abs() - 1.0).abs() <= 1.0e-12);
+        assert!(plane.max_residual_mm <= 1.0e-12);
+    }
 
     #[test]
     fn toggles_step_boolean_enumerations() {

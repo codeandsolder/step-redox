@@ -24,6 +24,7 @@ pub mod periodic_chains;
 pub mod periodic_resize;
 mod planar_features;
 pub mod solid_extrusions;
+pub mod solid_revolutions;
 mod spherical_caps;
 mod surface_recovery;
 
@@ -223,10 +224,36 @@ pub fn detect_formed_sheet_evidence_bytes(
         .collect())
 }
 
-/// Detect whole-solid line-profile extrusion grammars in a STEP exchange.
+/// Detect proven full-turn axisymmetric solid grammars in a STEP exchange.
 ///
-/// This first pass is intentionally strict: accepted solids must be closed, all-planar,
-/// single-loop prisms whose cap edges and lateral connectors prove one translation.
+/// The current pass is intentionally strict: accepted solids are closed two-manifold
+/// lathes whose meridian is a non-self-intersecting axis-aligned polygon and whose
+/// faces are coaxial cylinders plus axis-normal planar disks/annuli. Planar B-spline
+/// supports are accepted only when their complete control net proves coplanarity.
+pub fn detect_solid_revolutions_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_revolutions::RecoveredSolidRevolution>> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_revolutions::detect_solid_revolutions(&section.entities))
+        .collect())
+}
+
+/// Detect proven whole-solid extrusion grammars in a STEP exchange.
+///
+/// Recovery is fail-closed and supports multi-loop profiles with line, circular-arc,
+/// exact Bezier, and general/rational B-spline boundaries when cap correspondence,
+/// side supports, and the common translation are all proven within tolerance.
 pub fn detect_solid_extrusions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {

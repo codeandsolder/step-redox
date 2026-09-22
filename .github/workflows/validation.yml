@@ -78,6 +78,7 @@ jobs:
         run: |
           cargo test --lib --release --locked --features cad-kernel-monstertruck
           cargo clippy --lib --locked --features cad-kernel-monstertruck -- -D warnings
+          cargo clippy --bin step-revolution-scan --locked --features cad-kernel-monstertruck -- -D warnings
 
       - name: Validate Monstertruck tooling
         run: |
@@ -93,7 +94,7 @@ jobs:
           )
 
       - name: Build step-redox
-        run: cargo build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize
+        run: cargo build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize --bin step-revolution-scan
 
       - name: Cache upstream STEP fixtures
         uses: actions/cache@v4

@@ -384,7 +384,7 @@ fn cap_pair_candidate(
     let mut used_bottom_edges = HashSet::new();
     let mut used_top_edges = HashSet::new();
     let mut translated_edges = HashMap::new();
-    let mut max_residual_mm = 0.0_f64;
+    let mut max_residual_mm = bottom_plane.max_residual_mm.max(top_plane.max_residual_mm);
 
     for &side_index in &side_indices {
         let side = &faces[side_index];
@@ -992,7 +992,7 @@ fn side_support_residual(
                     .loop_edges
                     .iter()
                     .all(|edge| edge_lies_on_plane(edge, *plane)))
-            .then_some(0.0)
+            .then_some(plane.max_residual_mm)
         }
         (CurveSupport::Circle(circle), SurfaceSupport::Cylinder(cylinder)) => {
             if !parallel(circle.normal, z_axis)

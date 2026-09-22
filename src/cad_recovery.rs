@@ -1,9 +1,10 @@
 use crate::cad_ir::{
-    BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d, ProfileLoop,
+    Axis3, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d, ProfileLoop,
     ProofStatus, Provenance, RigidTransform,
 };
 use crate::patterns::InstancePattern;
 use crate::solid_extrusions::{RecoveredProfileCurve, RecoveredSolidExtrusion};
+use crate::solid_revolutions::RecoveredSolidRevolution;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -26,6 +27,10 @@ pub enum CadFragmentSource {
         solid_id: u64,
         cap_face_ids: [u64; 2],
         side_face_ids: Vec<u64>,
+    },
+    SolidRevolution {
+        solid_id: u64,
+        face_ids: Vec<u64>,
     },
 }
 
@@ -104,6 +109,73 @@ pub fn recover_solid_extrusion_fragments(
         .collect()
 }
 
+/// Recover a constructive CAD fragment from a geometrically-proven full revolution.
+///
+/// The detector expresses the meridian sketch directly in local [radius, axial]
+/// coordinates. Local +Y is the revolution axis; the rigid transform maps local
+/// +X to the detector's deterministic radial direction and local +Y to the world axis.
+pub fn recover_solid_revolution_fragment(
+    revolution: &RecoveredSolidRevolution,
+) -> Result<CadFragment> {
+    validate_solid_revolution(revolution)?;
+
+    let mut model = CadModel::new();
+    let profile = Profile2d::polygon(revolution.profile_points_mm.clone())?;
+    let body = model.add_node(CadNode::Revolve {
+        profile,
+        axis: Axis3 {
+            origin_mm: [0.0, 0.0, 0.0],
+            direction: [0.0, 1.0, 0.0],
+        },
+        angle_rad: std::f64::consts::TAU,
+    });
+
+    let mut source_entity_ids = Vec::with_capacity(revolution.face_ids.len() + 1);
+    source_entity_ids.push(revolution.solid_id);
+    source_entity_ids.extend(revolution.face_ids.iter().copied());
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+
+    let proof = Provenance {
+        source_entity_ids,
+        proof: ProofStatus::WithinTolerance,
+        max_residual_mm: Some(revolution.max_residual_mm),
+    };
+    model.set_provenance(body, proof.clone())?;
+
+    let z_axis = cross(revolution.radial_direction, revolution.axis_direction);
+    let root = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            revolution.axis_origin_mm,
+            revolution.radial_direction,
+            revolution.axis_direction,
+            z_axis,
+        ),
+        child: body,
+    });
+    model.set_provenance(root, proof)?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::SolidRevolution {
+            solid_id: revolution.solid_id,
+            face_ids: revolution.face_ids.clone(),
+        },
+        model,
+        root,
+    })
+}
+
+pub fn recover_solid_revolution_fragments(
+    revolutions: &[RecoveredSolidRevolution],
+) -> Result<Vec<CadFragment>> {
+    revolutions
+        .iter()
+        .map(recover_solid_revolution_fragment)
+        .collect()
+}
+
 fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
     let loops = extrusion
         .profile_loops()
@@ -156,6 +228,65 @@ fn recovered_profile_curve_to_ir(curve: &RecoveredProfileCurve) -> Curve2d {
             weights: weights.clone(),
         },
     }
+}
+
+fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()> {
+    if revolution.profile_points_mm.len() < 3 {
+        bail!("solid revolution needs at least three meridian profile points");
+    }
+    if revolution
+        .profile_points_mm
+        .iter()
+        .any(|point| point.iter().any(|value| !value.is_finite()) || point[0] < -1.0e-7)
+    {
+        bail!("solid revolution profile contains invalid radius/axial coordinates");
+    }
+    if revolution
+        .profile_points_mm
+        .iter()
+        .enumerate()
+        .any(|(index, point)| {
+            let next =
+                revolution.profile_points_mm[(index + 1) % revolution.profile_points_mm.len()];
+            (point[0] - next[0]).abs() <= 1.0e-12 && (point[1] - next[1]).abs() <= 1.0e-12
+        })
+    {
+        bail!("solid revolution profile contains a degenerate edge");
+    }
+
+    if revolution
+        .axis_origin_mm
+        .iter()
+        .any(|value| !value.is_finite())
+        || revolution
+            .axis_direction
+            .iter()
+            .any(|value| !value.is_finite())
+        || revolution
+            .radial_direction
+            .iter()
+            .any(|value| !value.is_finite())
+    {
+        bail!("solid revolution frame contains non-finite values");
+    }
+    if (norm(revolution.axis_direction) - 1.0).abs() > 1.0e-10
+        || (norm(revolution.radial_direction) - 1.0).abs() > 1.0e-10
+        || dot(revolution.axis_direction, revolution.radial_direction).abs() > 1.0e-10
+    {
+        bail!("solid revolution axis/radial basis is not orthonormal");
+    }
+    let z_axis = cross(revolution.radial_direction, revolution.axis_direction);
+    if (norm(z_axis) - 1.0).abs() > 1.0e-10 {
+        bail!("solid revolution frame does not define a unit profile normal");
+    }
+
+    if !revolution.max_residual_mm.is_finite()
+        || revolution.max_residual_mm < 0.0
+        || revolution.max_residual_mm > 1.0e-7 + 1.0e-15
+    {
+        bail!("solid revolution has invalid proof residual");
+    }
+    Ok(())
 }
 
 fn validate_solid_extrusion(extrusion: &RecoveredSolidExtrusion) -> Result<()> {
@@ -737,6 +868,62 @@ mod tests {
                 .get("inner_profile_loops")
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn solid_revolution_becomes_local_full_revolve_plus_world_frame() -> Result<()> {
+        let revolution = RecoveredSolidRevolution {
+            solid_id: 50,
+            face_ids: vec![60, 61, 62],
+            profile_points_mm: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]],
+            axis_origin_mm: [10.0, 20.0, 30.0],
+            axis_direction: [0.0, 1.0, 0.0],
+            radial_direction: [1.0, 0.0, 0.0],
+            max_residual_mm: 3.0e-12,
+        };
+
+        let fragment = recover_solid_revolution_fragment(&revolution)?;
+        let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
+            panic!("expected transform root");
+        };
+        assert_eq!(
+            transform.matrix,
+            [
+                [1.0, 0.0, 0.0, 10.0],
+                [0.0, 1.0, 0.0, 20.0],
+                [0.0, 0.0, 1.0, 30.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        );
+        let CadNode::Revolve {
+            profile,
+            axis,
+            angle_rad,
+        } = fragment.model.node(*child)?
+        else {
+            panic!("expected local revolution child");
+        };
+        assert_eq!(
+            profile.single_polygon_points(),
+            Some(revolution.profile_points_mm.clone())
+        );
+        assert_eq!(axis.origin_mm, [0.0, 0.0, 0.0]);
+        assert_eq!(axis.direction, [0.0, 1.0, 0.0]);
+        assert_eq!(*angle_rad, std::f64::consts::TAU);
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].max_residual_mm,
+            Some(3.0e-12)
+        );
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+        }
         Ok(())
     }
 

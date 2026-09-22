@@ -24,7 +24,7 @@ pub trait CadKernel {
 #[cfg(feature = "cad-kernel-monstertruck")]
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
-    use crate::cad_ir::{CadModel, CadNode, Curve2d, NodeId, Profile2d};
+    use crate::cad_ir::{Axis3, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform};
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::*;
@@ -37,23 +37,161 @@ pub mod monstertruck {
         solid: Solid,
     }
 
+    fn profile_wires(profile: &Profile2d) -> Result<Vec<Wire>> {
+        if profile.loops.is_empty() {
+            bail!("profile must contain at least one loop");
+        }
+        profile
+            .loops
+            .iter()
+            .map(|loop_| profile_loop_wire(&loop_.curves))
+            .collect::<Result<Vec<_>>>()
+    }
+
     fn extrude_profile_z(profile: &Profile2d, length_mm: f64) -> Result<Solid> {
         if !length_mm.is_finite() || length_mm == 0.0 {
             bail!("extrusion length must be finite and nonzero");
         }
-        if profile.loops.is_empty() {
-            bail!("profile must contain at least one loop");
-        }
-        let wires = profile
-            .loops
-            .iter()
-            .map(|loop_| profile_loop_wire(&loop_.curves))
-            .collect::<Result<Vec<_>>>()?;
-
         Ok(profile::solid_from_planar_profile(
-            wires,
+            profile_wires(profile)?,
             Vector3::new(0.0, 0.0, length_mm),
         )?)
+    }
+
+    fn revolve_profile(profile: &Profile2d, axis: Axis3, angle_rad: f64) -> Result<Solid> {
+        revolve_wires(profile_wires(profile)?, axis, angle_rad)
+    }
+
+    fn revolve_profile_transformed(
+        profile: &Profile2d,
+        axis: Axis3,
+        angle_rad: f64,
+        transform: &RigidTransform,
+    ) -> Result<Solid> {
+        let matrix = rigid_matrix(transform);
+        let wires = profile_wires(profile)?
+            .into_iter()
+            .map(|wire| builder::transformed(&wire, matrix))
+            .collect::<Vec<_>>();
+        revolve_wires(wires, transform_axis(axis, transform), angle_rad)
+    }
+
+    fn revolve_wires(mut wires: Vec<Wire>, axis: Axis3, angle_rad: f64) -> Result<Solid> {
+        if !angle_rad.is_finite() || angle_rad == 0.0 {
+            bail!("revolution angle must be finite and nonzero");
+        }
+        if angle_rad.abs() > std::f64::consts::TAU + 1.0e-10 {
+            bail!("revolution angle must not exceed one full turn");
+        }
+        if axis.origin_mm.iter().any(|value| !value.is_finite())
+            || axis.direction.iter().any(|value| !value.is_finite())
+        {
+            bail!("revolution axis must be finite");
+        }
+
+        let direction = Vector3::new(axis.direction[0], axis.direction[1], axis.direction[2]);
+        let magnitude = direction.magnitude();
+        if !magnitude.is_finite() || magnitude <= 1.0e-12 {
+            bail!("revolution axis direction must be nonzero");
+        }
+        let direction = direction / magnitude;
+        let origin = Point3::new(axis.origin_mm[0], axis.origin_mm[1], axis.origin_mm[2]);
+        let closed = (angle_rad.abs() - std::f64::consts::TAU).abs() <= 1.0e-10;
+        let sweep = if closed {
+            builder::SweepAngle::Closed
+        } else {
+            builder::SweepAngle::Partial(Rad(angle_rad))
+        };
+
+        let touches_axis = wires.iter().any(|wire| {
+            wire.vertex_iter()
+                .any(|vertex| point_axis_distance(vertex.point(), origin, direction) <= 1.0e-9)
+        });
+
+        if touches_axis {
+            if !closed {
+                bail!("partial revolution with a profile touching the axis is not yet supported");
+            }
+            if wires.len() != 1 {
+                bail!("axis-touching revolution with profile holes is not yet supported");
+            }
+
+            let mut wire = wires
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("missing profile wire"))?;
+            let axis_edges = wire
+                .iter()
+                .enumerate()
+                .filter_map(|(index, edge)| {
+                    (point_axis_distance(edge.front().point(), origin, direction) <= 1.0e-9
+                        && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9)
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let [axis_edge_index] = axis_edges.as_slice() else {
+                bail!("axis-touching closed profile needs exactly one line segment on the axis");
+            };
+
+            wire.rotate_left(*axis_edge_index);
+            wire.pop_front()
+                .ok_or_else(|| anyhow::anyhow!("missing axis profile edge"))?;
+            let Some(front) = wire.front_vertex() else {
+                bail!("axis-touching revolution has no generatrix");
+            };
+            let Some(back) = wire.back_vertex() else {
+                bail!("axis-touching revolution has no generatrix");
+            };
+            if point_axis_distance(front.point(), origin, direction) > 1.0e-9
+                || point_axis_distance(back.point(), origin, direction) > 1.0e-9
+            {
+                bail!("revolution generatrix endpoints must lie on the axis");
+            }
+
+            let shell =
+                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 4);
+            return Ok(Solid::try_new(vec![shell])?);
+        }
+
+        let face = profile::attach_plane_normalized(wires)?;
+        Ok(builder::revolve(
+            &face,
+            origin,
+            direction,
+            sweep,
+            if closed { 4 } else { 1 },
+        ))
+    }
+
+    fn rigid_matrix(transform: &RigidTransform) -> Matrix4 {
+        let m = transform.matrix;
+        Matrix4::from_cols(
+            Vector4::new(m[0][0], m[1][0], m[2][0], m[3][0]),
+            Vector4::new(m[0][1], m[1][1], m[2][1], m[3][1]),
+            Vector4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
+            Vector4::new(m[0][3], m[1][3], m[2][3], m[3][3]),
+        )
+    }
+
+    fn transform_axis(axis: Axis3, transform: &RigidTransform) -> Axis3 {
+        let m = transform.matrix;
+        let [x, y, z] = axis.origin_mm;
+        let [dx, dy, dz] = axis.direction;
+        Axis3 {
+            origin_mm: [
+                m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
+                m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
+                m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3],
+            ],
+            direction: [
+                m[0][0] * dx + m[0][1] * dy + m[0][2] * dz,
+                m[1][0] * dx + m[1][1] * dy + m[1][2] * dz,
+                m[2][0] * dx + m[2][1] * dy + m[2][2] * dz,
+            ],
+        }
+    }
+
+    fn point_axis_distance(point: Point3, origin: Point3, direction: Vector3) -> f64 {
+        (point - origin).cross(direction).magnitude()
     }
 
     fn profile_loop_wire(curves: &[Curve2d]) -> Result<Wire> {
@@ -268,16 +406,22 @@ pub mod monstertruck {
                 }
                 extrude_profile_z(profile, vector_mm[2])
             }
+            CadNode::Revolve {
+                profile,
+                axis,
+                angle_rad,
+            } => revolve_profile(profile, *axis, *angle_rad),
             CadNode::Transform { transform, child } => {
+                if let CadNode::Revolve {
+                    profile,
+                    axis,
+                    angle_rad,
+                } = model.node(*child)?
+                {
+                    return revolve_profile_transformed(profile, *axis, *angle_rad, transform);
+                }
                 let child = evaluate_node(model, *child)?;
-                let m = transform.matrix;
-                let matrix = Matrix4::from_cols(
-                    Vector4::new(m[0][0], m[1][0], m[2][0], m[3][0]),
-                    Vector4::new(m[0][1], m[1][1], m[2][1], m[3][1]),
-                    Vector4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
-                    Vector4::new(m[0][3], m[1][3], m[2][3], m[3][3]),
-                );
-                Ok(builder::transformed(&child, matrix))
+                Ok(builder::transformed(&child, rigid_matrix(transform)))
             }
             unsupported => {
                 bail!("Monstertruck backend does not yet evaluate node {root:?}: {unsupported:?}")
@@ -320,7 +464,7 @@ pub mod monstertruck {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::cad_ir::{CadNode, Curve2d, Profile2d, ProfileLoop};
+        use crate::cad_ir::{Axis3, CadNode, Curve2d, Profile2d, ProfileLoop};
 
         fn box_model() -> Result<(CadModel, NodeId)> {
             let mut model = CadModel::new();
@@ -370,6 +514,127 @@ pub mod monstertruck {
             let step = kernel.to_step(&evaluated)?;
             assert!(step.contains(expected_step_fragment));
             ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_full_profile_revolution() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile =
+                Profile2d::polygon(vec![[1.0, -1.0], [2.0, -1.0], [2.0, 1.0], [1.0, 1.0]])?;
+            let root = model.add_node(CadNode::Revolve {
+                profile,
+                axis: Axis3 {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    direction: [0.0, 1.0, 0.0],
+                },
+                angle_rad: std::f64::consts::TAU,
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            let recovered = crate::detect_solid_revolutions_bytes(step.as_bytes())?;
+            assert_eq!(recovered.len(), 1);
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_partial_profile_revolution() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile = Profile2d::polygon(vec![[2.0, 0.0], [3.0, 0.0], [3.0, 1.0], [2.0, 1.0]])?;
+            let root = model.add_node(CadNode::Revolve {
+                profile,
+                axis: Axis3 {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    direction: [0.0, 1.0, 0.0],
+                },
+                angle_rad: std::f64::consts::FRAC_PI_2,
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_on_axis_profile_revolution() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile =
+                Profile2d::polygon(vec![[0.0, -1.0], [2.0, -1.0], [2.0, 1.0], [0.0, 1.0]])?;
+            let root = model.add_node(CadNode::Revolve {
+                profile,
+                axis: Axis3 {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    direction: [0.0, 1.0, 0.0],
+                },
+                angle_rad: std::f64::consts::TAU,
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            let recovered = crate::detect_solid_revolutions_bytes(step.as_bytes())?;
+            assert_eq!(recovered.len(), 1);
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_transformed_profile_revolution_without_post_transform_breakage() -> Result<()>
+        {
+            let mut model = CadModel::new();
+            let profile = Profile2d::polygon(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]])?;
+            let body = model.add_node(CadNode::Revolve {
+                profile,
+                axis: Axis3 {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    direction: [0.0, 1.0, 0.0],
+                },
+                angle_rad: std::f64::consts::TAU,
+            });
+            let root = model.add_node(CadNode::Transform {
+                transform: RigidTransform {
+                    matrix: [
+                        [0.0, 0.0, 1.0, 10.0],
+                        [1.0, 0.0, 0.0, 20.0],
+                        [0.0, 1.0, 0.0, 30.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ],
+                },
+                child: body,
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
             Ok(())
         }
 

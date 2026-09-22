@@ -31,6 +31,13 @@ pub(crate) struct VExtrusionEvidence {
     pub max_residual_mm: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlanarSurfaceEvidence {
+    pub origin_mm: [f64; 3],
+    pub normal: [f64; 3],
+    pub max_residual_mm: f64,
+}
+
 #[derive(Debug, Clone)]
 struct ParsedSurface {
     name: Parameter,
@@ -38,9 +45,12 @@ struct ParsedSurface {
     v_degree: usize,
     control_points: Vec<Vec<u64>>,
     u_closed: Parameter,
+    v_closed: Parameter,
     self_intersect: Parameter,
     u_multiplicities: Parameter,
+    v_multiplicities: Parameter,
     u_knots: Parameter,
+    v_knots: Parameter,
     knot_spec: Parameter,
     weights: Option<Vec<Vec<Parameter>>>,
 }
@@ -237,19 +247,18 @@ fn parse_simple_bspline_surface(record: &Record) -> Option<ParsedSurface> {
     let u_degree = positive_degree(params.get(1)?)?;
     let v_degree = positive_degree(params.get(2)?)?;
     let control_points = parse_control_points(params.get(3)?)?;
-    if !is_not_true(params.get(6)?) || !canonical_unit_linear_v(params.get(9)?, params.get(11)?)? {
-        return None;
-    }
-
     Some(ParsedSurface {
         name: params.first()?.clone(),
         u_degree,
         v_degree,
         control_points,
         u_closed: params.get(5)?.clone(),
+        v_closed: params.get(6)?.clone(),
         self_intersect: params.get(7)?.clone(),
         u_multiplicities: params.get(8)?.clone(),
+        v_multiplicities: params.get(9)?.clone(),
         u_knots: params.get(10)?.clone(),
+        v_knots: params.get(11)?.clone(),
         knot_spec: params.get(12)?.clone(),
         weights: None,
     })
@@ -284,12 +293,6 @@ fn parse_complex_rational_surface(subsuper: &SubSuperRecord) -> Option<ParsedSur
     // S(u,v) = C(u) + v * D, exactly the native extrusion parameterization.
     // A different knot interval would describe the same locus but a different
     // V parameter mapping and would require rewriting every trimming p-curve.
-    if !is_not_true(bspline_params.get(5)?)
-        || !canonical_unit_linear_v(knot_params.get(1)?, knot_params.get(3)?)?
-    {
-        return None;
-    }
-
     let Parameter::List(rational_params) = &rational.parameter else {
         return None;
     };
@@ -326,9 +329,12 @@ fn parse_complex_rational_surface(subsuper: &SubSuperRecord) -> Option<ParsedSur
         v_degree,
         control_points,
         u_closed: bspline_params.get(4)?.clone(),
+        v_closed: bspline_params.get(5)?.clone(),
         self_intersect: bspline_params.get(6)?.clone(),
         u_multiplicities: knot_params.first()?.clone(),
+        v_multiplicities: knot_params.get(1)?.clone(),
         u_knots: knot_params.get(2)?.clone(),
+        v_knots: knot_params.get(3)?.clone(),
         knot_spec: knot_params.get(4)?.clone(),
         weights: Some(weights),
     })
@@ -380,6 +386,8 @@ fn detect_v_extrusion(
     // surface parameters and was observed to change how OCCT rebuilds
     // trims/pcurves even when the surface locus itself is exact.
     if surface.v_degree != 1
+        || !is_not_true(&surface.v_closed)
+        || !canonical_unit_linear_v(&surface.v_multiplicities, &surface.v_knots)?
         || surface.control_points.len() < 2
         || surface.control_points.iter().any(|row| row.len() != 2)
     {
@@ -441,6 +449,57 @@ fn detect_v_extrusion(
         extrusion: shared_delta?,
         max_residual_mm,
         old_points,
+    })
+}
+
+pub(crate) fn analyze_planar_surface(
+    surface_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    geometry_tolerance_mm: f64,
+) -> Option<PlanarSurfaceEvidence> {
+    if !geometry_tolerance_mm.is_finite() || geometry_tolerance_mm < 0.0 {
+        return None;
+    }
+    let parsed = parse_surface(surface_id, entities, index)?;
+
+    if let Some(weight_rows) = &parsed.weights {
+        for row in weight_rows {
+            for weight in row {
+                let value = number(weight)?;
+                if !value.is_finite() || value <= 0.0 {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let points = parsed
+        .control_points
+        .iter()
+        .flatten()
+        .map(|&id| cartesian_point(id, entities, index))
+        .collect::<Option<Vec<_>>>()?;
+    let origin_mm = *points.first()?;
+    let first_direction = points
+        .iter()
+        .copied()
+        .map(|point| sub(point, origin_mm))
+        .find(|vector| norm(*vector) > geometry_tolerance_mm)?;
+    let normal = points
+        .iter()
+        .copied()
+        .map(|point| cross(first_direction, sub(point, origin_mm)))
+        .find(|vector| norm(*vector) > geometry_tolerance_mm)
+        .and_then(normalize)?;
+    let max_residual_mm = points
+        .iter()
+        .map(|&point| dot(normal, sub(point, origin_mm)).abs())
+        .fold(0.0_f64, f64::max);
+    (max_residual_mm <= geometry_tolerance_mm).then_some(PlanarSurfaceEvidence {
+        origin_mm,
+        normal,
+        max_residual_mm,
     })
 }
 
@@ -722,6 +781,26 @@ fn integer(parameter: &Parameter) -> Option<i64> {
     }
 }
 
+fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = norm(vector);
+    if !length.is_finite() || length <= 0.0 {
+        return None;
+    }
+    Some([vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -846,6 +925,58 @@ mod tests {
                 ]),
             },
         }
+    }
+
+    #[test]
+    fn proves_planar_bspline_control_nets() {
+        let entities = vec![
+            point(1, [0.0, 0.0, 3.0]),
+            point(2, [0.0, 2.0, 3.0]),
+            point(3, [1.0, 0.0, 3.0]),
+            point(4, [1.0, 2.0, 3.0]),
+            point(5, [2.0, 0.0, 3.0]),
+            point(6, [2.0, 2.0, 3.0]),
+            bspline_surface(10, [[1, 2], [3, 4], [5, 6]]),
+        ];
+        let index = build_index(&entities);
+        let evidence = analyze_planar_surface(10, &entities, &index, 1.0e-7)
+            .expect("planar control net should prove a plane");
+        assert!(evidence.max_residual_mm <= 1.0e-12);
+        assert!((evidence.origin_mm[2] - 3.0).abs() <= 1.0e-12);
+        assert!((evidence.normal[2].abs() - 1.0).abs() <= 1.0e-12);
+
+        let rational = vec![
+            point(1, [0.0, 0.0, 3.0]),
+            point(2, [0.0, 2.0, 3.0]),
+            point(3, [1.0, 0.0, 3.0]),
+            point(4, [1.0, 2.0, 3.0]),
+            point(5, [2.0, 0.0, 3.0]),
+            point(6, [2.0, 2.0, 3.0]),
+            rational_surface(
+                10,
+                [[1, 2], [3, 4], [5, 6]],
+                [[1.0, 1.0], [0.8, 0.8], [1.0, 1.0]],
+            ),
+        ];
+        let index = build_index(&rational);
+        let evidence = analyze_planar_surface(10, &rational, &index, 1.0e-7)
+            .expect("positive rational planar control net should prove a plane");
+        assert!(evidence.max_residual_mm <= 1.0e-12);
+    }
+
+    #[test]
+    fn rejects_nonplanar_bspline_control_net() {
+        let entities = vec![
+            point(1, [0.0, 0.0, 0.0]),
+            point(2, [0.0, 2.0, 0.0]),
+            point(3, [1.0, 0.0, 0.0]),
+            point(4, [1.0, 2.0, 0.0]),
+            point(5, [2.0, 0.0, 0.0]),
+            point(6, [2.0, 2.0, 0.01]),
+            bspline_surface(10, [[1, 2], [3, 4], [5, 6]]),
+        ];
+        let index = build_index(&entities);
+        assert!(analyze_planar_surface(10, &entities, &index, 1.0e-7).is_none());
     }
 
     #[test]
