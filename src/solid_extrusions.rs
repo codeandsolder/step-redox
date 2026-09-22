@@ -17,13 +17,37 @@ pub struct RecoveredSolidExtrusion {
     pub solid_id: u64,
     pub cap_face_ids: [u64; 2],
     pub side_face_ids: Vec<u64>,
+    /// Canonical outer profile loop. Kept as the historical field for single-loop API/JSON compatibility.
     pub profile_curves: Vec<RecoveredProfileCurve>,
+    /// Canonical hole loops. Empty for the historical single-loop case and omitted from JSON then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inner_profile_loops: Vec<Vec<RecoveredProfileCurve>>,
     pub origin_mm: [f64; 3],
     pub x_axis: [f64; 3],
     pub y_axis: [f64; 3],
     pub z_axis: [f64; 3],
     pub height_mm: f64,
     pub max_residual_mm: f64,
+}
+
+impl RecoveredSolidExtrusion {
+    pub fn profile_loops(&self) -> impl Iterator<Item = &[RecoveredProfileCurve]> {
+        std::iter::once(self.profile_curves.as_slice())
+            .chain(self.inner_profile_loops.iter().map(Vec::as_slice))
+    }
+
+    fn profile_complexity(&self) -> usize {
+        self.profile_loops()
+            .flatten()
+            .map(RecoveredProfileCurve::complexity)
+            .sum()
+    }
+
+    fn profile_curve_count(&self) -> usize {
+        self.profile_loops()
+            .map(<[RecoveredProfileCurve]>::len)
+            .sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -192,6 +216,8 @@ impl RecoveredProfileCurve {
 struct FaceInfo {
     id: u64,
     surface: SurfaceSupport,
+    loops: Vec<brep::FaceLoop>,
+    /// Flattened boundary edges retained for the existing manifold/side proof.
     loop_edges: Vec<OrientedEdgeUse>,
 }
 
@@ -201,6 +227,7 @@ struct CanonicalProfile {
     x_axis: [f64; 3],
     y_axis: [f64; 3],
     curves: Vec<RecoveredProfileCurve>,
+    inner_loops: Vec<Vec<RecoveredProfileCurve>>,
 }
 
 pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSolidExtrusion> {
@@ -267,20 +294,14 @@ fn candidate_order(
     first: &RecoveredSolidExtrusion,
     second: &RecoveredSolidExtrusion,
 ) -> std::cmp::Ordering {
-    let first_cost = first
-        .profile_curves
-        .iter()
-        .map(RecoveredProfileCurve::complexity)
-        .sum::<usize>();
-    let second_cost = second
-        .profile_curves
-        .iter()
-        .map(RecoveredProfileCurve::complexity)
-        .sum::<usize>();
-
-    first_cost
-        .cmp(&second_cost)
-        .then_with(|| first.profile_curves.len().cmp(&second.profile_curves.len()))
+    first
+        .profile_complexity()
+        .cmp(&second.profile_complexity())
+        .then_with(|| {
+            first
+                .profile_curve_count()
+                .cmp(&second.profile_curve_count())
+        })
         .then_with(|| first.z_axis[0].total_cmp(&second.z_axis[0]))
         .then_with(|| first.z_axis[1].total_cmp(&second.z_axis[1]))
         .then_with(|| first.z_axis[2].total_cmp(&second.z_axis[2]))
@@ -301,7 +322,10 @@ fn cap_pair_candidate(
     else {
         return None;
     };
-    if first.loop_edges.is_empty() || first.loop_edges.len() != second.loop_edges.len() {
+    if first.loop_edges.is_empty()
+        || first.loop_edges.len() != second.loop_edges.len()
+        || first.loops.len() != second.loops.len()
+    {
         return None;
     }
     if !parallel(first_plane.normal, second_plane.normal) {
@@ -329,6 +353,8 @@ fn cap_pair_candidate(
         return None;
     };
     let extrusion = mul(z_axis, height_mm);
+    let bottom_loop_roles = cap_loop_roles(bottom, z_axis)?;
+    let top_loop_roles = cap_loop_roles(top, z_axis)?;
 
     if !face_lies_on_plane(bottom, *bottom_plane) || !face_lies_on_plane(top, *top_plane) {
         return None;
@@ -357,11 +383,12 @@ fn cap_pair_candidate(
 
     let mut used_bottom_edges = HashSet::new();
     let mut used_top_edges = HashSet::new();
+    let mut translated_edges = HashMap::new();
     let mut max_residual_mm = 0.0_f64;
 
     for &side_index in &side_indices {
         let side = &faces[side_index];
-        if side.loop_edges.len() != 4 {
+        if side.loops.len() != 1 || side.loop_edges.len() != 4 {
             return None;
         }
 
@@ -384,6 +411,12 @@ fn cap_pair_candidate(
         let bottom_edge_id = shared_bottom[0];
         let top_edge_id = shared_top[0];
         if !used_bottom_edges.insert(bottom_edge_id) || !used_top_edges.insert(top_edge_id) {
+            return None;
+        }
+        if translated_edges
+            .insert(bottom_edge_id, top_edge_id)
+            .is_some()
+        {
             return None;
         }
 
@@ -427,19 +460,29 @@ fn cap_pair_candidate(
     if used_bottom_edges != bottom_edges || used_top_edges != top_edges {
         return None;
     }
+    if !translated_cap_loops_match(
+        bottom,
+        top,
+        &translated_edges,
+        &bottom_loop_roles,
+        &top_loop_roles,
+    ) {
+        return None;
+    }
     if edge_faces.iter().any(|(edge, attached)| {
         (bottom_edges.contains(edge) || top_edges.contains(edge)) && attached.len() != 2
     }) {
         return None;
     }
 
-    let profile = canonical_profile(bottom, z_axis)?;
+    let profile = canonical_profile(bottom, z_axis, &bottom_loop_roles)?;
 
     Some(RecoveredSolidExtrusion {
         solid_id,
         cap_face_ids: [bottom.id, top.id],
         side_face_ids: side_indices.iter().map(|&index| faces[index].id).collect(),
         profile_curves: profile.curves,
+        inner_profile_loops: profile.inner_loops,
         origin_mm: profile.origin_mm,
         x_axis: profile.x_axis,
         y_axis: profile.y_axis,
@@ -449,6 +492,310 @@ fn cap_pair_candidate(
     })
 }
 
+fn cap_loop_roles(face: &FaceInfo, z_axis: [f64; 3]) -> Option<Vec<bool>> {
+    if face.loops.is_empty() {
+        return None;
+    }
+    if face.loops.len() == 1 {
+        return Some(vec![true]);
+    }
+
+    let explicit_outer = face
+        .loops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, loop_)| loop_.outer.then_some(index))
+        .collect::<Vec<_>>();
+    if explicit_outer.len() > 1 {
+        return None;
+    }
+    if let [outer_index] = explicit_outer.as_slice() {
+        let mut roles = vec![false; face.loops.len()];
+        roles[*outer_index] = true;
+        return Some(roles);
+    }
+
+    // Some exporters emit every boundary as FACE_BOUND. Recover that case only
+    // when the geometry itself proves one unambiguous outer loop.
+    let loops = projected_cap_loops(face, z_axis)?;
+    convex_polygon_outer_roles(&loops)
+}
+
+fn projected_cap_loops(
+    face: &FaceInfo,
+    z_axis: [f64; 3],
+) -> Option<Vec<Vec<RecoveredProfileCurve>>> {
+    let (x_axis, y_axis) = profile_axes(z_axis)?;
+    let origin_mm = face.loop_edges.first()?.start_mm;
+    face.loops
+        .iter()
+        .map(|loop_| {
+            loop_
+                .edges
+                .iter()
+                .map(|edge| recovered_profile_curve(edge, origin_mm, x_axis, y_axis, z_axis))
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect()
+}
+
+fn convex_polygon_outer_roles(loops: &[Vec<RecoveredProfileCurve>]) -> Option<Vec<bool>> {
+    let candidates = loops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, curves)| {
+            let (polygon, orientation) = convex_line_polygon(curves)?;
+            loops
+                .iter()
+                .enumerate()
+                .all(|(other_index, other)| {
+                    other_index == index || loop_inside_convex_polygon(other, &polygon, orientation)
+                })
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [outer_index] = candidates.as_slice() else {
+        return None;
+    };
+
+    let hole_boxes = loops
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index != outer_index)
+        .map(|(_, curves)| loop_conservative_bbox(curves))
+        .collect::<Option<Vec<_>>>()?;
+    for first in 0..hole_boxes.len() {
+        for second in first + 1..hole_boxes.len() {
+            if !bbox_disjoint(hole_boxes[first], hole_boxes[second]) {
+                return None;
+            }
+        }
+    }
+
+    let mut roles = vec![false; loops.len()];
+    roles[*outer_index] = true;
+    Some(roles)
+}
+
+fn convex_line_polygon(curves: &[RecoveredProfileCurve]) -> Option<(Vec<[f64; 2]>, f64)> {
+    if curves.len() < 3 {
+        return None;
+    }
+    let mut points = Vec::with_capacity(curves.len());
+    for (index, curve) in curves.iter().enumerate() {
+        let RecoveredProfileCurve::Line {
+            start_mm, end_mm, ..
+        } = curve
+        else {
+            return None;
+        };
+        let next_start = curves[(index + 1) % curves.len()].start_point()?;
+        if distance2(*end_mm, next_start) > GEOM_TOL_MM {
+            return None;
+        }
+        points.push(*start_mm);
+    }
+
+    let area = signed_area_curves(curves);
+    if !area.is_finite() || area.abs() <= GEOM_TOL_MM * GEOM_TOL_MM {
+        return None;
+    }
+    let orientation = area.signum();
+    let mut has_turn = false;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        let c = points[(index + 2) % points.len()];
+        let first = normalize2(sub2(b, a))?;
+        let second = normalize2(sub2(c, b))?;
+        let turn = cross2(first, second) * orientation;
+        if turn < -DIR_TOL {
+            return None;
+        }
+        has_turn |= turn > DIR_TOL;
+    }
+    has_turn.then_some((points, orientation))
+}
+
+fn loop_inside_convex_polygon(
+    curves: &[RecoveredProfileCurve],
+    polygon: &[[f64; 2]],
+    orientation: f64,
+) -> bool {
+    curves.iter().all(|curve| match curve {
+        RecoveredProfileCurve::Line {
+            start_mm, end_mm, ..
+        } => {
+            point_inside_convex_polygon(*start_mm, polygon, orientation)
+                && point_inside_convex_polygon(*end_mm, polygon, orientation)
+        }
+        RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            ..
+        } => circle_inside_convex_polygon(*center_mm, *radius_mm, polygon, orientation),
+        RecoveredProfileCurve::Bezier {
+            control_points_mm, ..
+        }
+        | RecoveredProfileCurve::BSpline {
+            control_points_mm, ..
+        } => control_points_mm
+            .iter()
+            .all(|point| point_inside_convex_polygon(*point, polygon, orientation)),
+    })
+}
+
+fn point_inside_convex_polygon(point: [f64; 2], polygon: &[[f64; 2]], orientation: f64) -> bool {
+    polygon.iter().enumerate().all(|(index, &a)| {
+        let b = polygon[(index + 1) % polygon.len()];
+        let edge = sub2(b, a);
+        let Some(direction) = normalize2(edge) else {
+            return false;
+        };
+        orientation * cross2(direction, sub2(point, a)) > GEOM_TOL_MM
+    })
+}
+
+fn circle_inside_convex_polygon(
+    center: [f64; 2],
+    radius: f64,
+    polygon: &[[f64; 2]],
+    orientation: f64,
+) -> bool {
+    radius.is_finite()
+        && radius > 0.0
+        && polygon.iter().enumerate().all(|(index, &a)| {
+            let b = polygon[(index + 1) % polygon.len()];
+            let edge = sub2(b, a);
+            let Some(direction) = normalize2(edge) else {
+                return false;
+            };
+            orientation * cross2(direction, sub2(center, a)) - radius > GEOM_TOL_MM
+        })
+}
+
+fn loop_conservative_bbox(curves: &[RecoveredProfileCurve]) -> Option<([f64; 2], [f64; 2])> {
+    let mut min = [f64::INFINITY; 2];
+    let mut max = [f64::NEG_INFINITY; 2];
+    let mut include = |point: [f64; 2]| {
+        min[0] = min[0].min(point[0]);
+        min[1] = min[1].min(point[1]);
+        max[0] = max[0].max(point[0]);
+        max[1] = max[1].max(point[1]);
+    };
+
+    for curve in curves {
+        match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => {
+                include(*start_mm);
+                include(*end_mm);
+            }
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                ..
+            } => {
+                if !radius_mm.is_finite() || *radius_mm <= 0.0 {
+                    return None;
+                }
+                include([center_mm[0] - radius_mm, center_mm[1] - radius_mm]);
+                include([center_mm[0] + radius_mm, center_mm[1] + radius_mm]);
+            }
+            RecoveredProfileCurve::Bezier {
+                control_points_mm, ..
+            }
+            | RecoveredProfileCurve::BSpline {
+                control_points_mm, ..
+            } => {
+                if control_points_mm.is_empty() {
+                    return None;
+                }
+                for &point in control_points_mm {
+                    include(point);
+                }
+            }
+        }
+    }
+    min[0].is_finite().then_some((min, max))
+}
+
+fn bbox_disjoint(first: ([f64; 2], [f64; 2]), second: ([f64; 2], [f64; 2])) -> bool {
+    first.1[0] + GEOM_TOL_MM < second.0[0]
+        || second.1[0] + GEOM_TOL_MM < first.0[0]
+        || first.1[1] + GEOM_TOL_MM < second.0[1]
+        || second.1[1] + GEOM_TOL_MM < first.0[1]
+}
+
+fn profile_axes(z_axis: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+    let reference = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        .into_iter()
+        .min_by(|a, b| dot(*a, z_axis).abs().total_cmp(&dot(*b, z_axis).abs()))?;
+    let x_axis = normalize(sub(reference, mul(z_axis, dot(reference, z_axis))))?;
+    let y_axis = normalize(cross(z_axis, x_axis))?;
+    Some((x_axis, y_axis))
+}
+
+fn translated_cap_loops_match(
+    bottom: &FaceInfo,
+    top: &FaceInfo,
+    translated_edges: &HashMap<u64, u64>,
+    bottom_roles: &[bool],
+    top_roles: &[bool],
+) -> bool {
+    if bottom.loops.len() != top.loops.len()
+        || bottom_roles.len() != bottom.loops.len()
+        || top_roles.len() != top.loops.len()
+    {
+        return false;
+    }
+    if bottom.loops.len() <= 1 {
+        return true;
+    }
+
+    let top_sets = top
+        .loops
+        .iter()
+        .zip(top_roles.iter().copied())
+        .map(|(loop_, outer)| {
+            (
+                outer,
+                loop_
+                    .edges
+                    .iter()
+                    .map(|edge| edge.edge_id)
+                    .collect::<HashSet<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut used_top_loops = HashSet::new();
+
+    for (bottom_loop, bottom_outer) in bottom.loops.iter().zip(bottom_roles.iter().copied()) {
+        let mapped = bottom_loop
+            .edges
+            .iter()
+            .map(|edge| translated_edges.get(&edge.edge_id).copied())
+            .collect::<Option<HashSet<_>>>();
+        let Some(mapped) = mapped else {
+            return false;
+        };
+        let matches = top_sets
+            .iter()
+            .enumerate()
+            .filter(|(index, (outer, edges))| {
+                !used_top_loops.contains(index) && *outer == bottom_outer && *edges == mapped
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [top_index] = matches.as_slice() else {
+            return false;
+        };
+        used_top_loops.insert(*top_index);
+    }
+
+    used_top_loops.len() == top.loops.len()
+}
 fn face_info(
     face_id: u64,
     entities: &[EntityInstance],
@@ -461,21 +808,26 @@ fn face_info(
     }
 
     let loops = brep::face_loops(face_id, entities, index)?;
-    if loops.len() != 1 {
-        return None;
-    }
-    let loop_edges = loops.into_iter().next()?.edges;
-    if loop_edges.is_empty()
-        || loop_edges
-            .iter()
-            .any(|edge| matches!(edge.support, CurveSupport::Other { .. }))
+    if loops.is_empty()
+        || loops.iter().any(|loop_| {
+            loop_.edges.is_empty()
+                || loop_
+                    .edges
+                    .iter()
+                    .any(|edge| matches!(edge.support, CurveSupport::Other { .. }))
+        })
     {
         return None;
     }
+    let loop_edges = loops
+        .iter()
+        .flat_map(|loop_| loop_.edges.iter().cloned())
+        .collect::<Vec<_>>();
 
     Some(FaceInfo {
         id: face_id,
         surface,
+        loops,
         loop_edges,
     })
 }
@@ -702,7 +1054,18 @@ fn connector_residual(edge: &OrientedEdgeUse, extrusion: [f64; 3]) -> Option<f64
     Some(forward.min(reverse))
 }
 
-fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfile> {
+fn canonical_profile(
+    cap: &FaceInfo,
+    z_axis: [f64; 3],
+    loop_roles: &[bool],
+) -> Option<CanonicalProfile> {
+    if loop_roles.len() != cap.loops.len() || loop_roles.iter().filter(|outer| **outer).count() != 1
+    {
+        return None;
+    }
+    if cap.loops.len() > 1 {
+        return canonical_multi_loop_profile(cap, z_axis, loop_roles);
+    }
     if cap.loop_edges.is_empty() {
         return None;
     }
@@ -740,6 +1103,7 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
                 start_angle_rad: 0.0,
                 end_angle_rad: TAU,
             }],
+            inner_loops: Vec::new(),
         });
     }
 
@@ -796,6 +1160,7 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
                 start_angle_rad: 0.0,
                 end_angle_rad: TAU,
             }],
+            inner_loops: Vec::new(),
         });
     }
 
@@ -832,7 +1197,202 @@ fn canonical_profile(cap: &FaceInfo, z_axis: [f64; 3]) -> Option<CanonicalProfil
         x_axis,
         y_axis,
         curves,
+        inner_loops: Vec::new(),
     })
+}
+
+fn canonical_multi_loop_profile(
+    cap: &FaceInfo,
+    z_axis: [f64; 3],
+    loop_roles: &[bool],
+) -> Option<CanonicalProfile> {
+    let outer_index = loop_roles.iter().position(|outer| *outer)?;
+    let outer = cap.loops.get(outer_index)?;
+    if cap
+        .loops
+        .iter()
+        .any(|loop_| !raw_loop_is_continuous(&loop_.edges))
+    {
+        return None;
+    }
+
+    let (x_axis, y_axis) = profile_axes(z_axis)?;
+    let origin_mm = canonical_outer_origin(outer, x_axis, y_axis, z_axis)?;
+
+    let curves = canonical_profile_loop(&outer.edges, origin_mm, x_axis, y_axis, z_axis, true)?;
+    let mut inner_loops = cap
+        .loops
+        .iter()
+        .zip(loop_roles.iter().copied())
+        .filter(|(_, outer)| !*outer)
+        .map(|(loop_, _)| {
+            canonical_profile_loop(&loop_.edges, origin_mm, x_axis, y_axis, z_axis, false)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    inner_loops.sort_by(|first, second| profile_loop_order(first, second));
+
+    Some(CanonicalProfile {
+        origin_mm,
+        x_axis,
+        y_axis,
+        curves,
+        inner_loops,
+    })
+}
+fn canonical_outer_origin(
+    outer: &brep::FaceLoop,
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    z_axis: [f64; 3],
+) -> Option<[f64; 3]> {
+    if outer.edges.len() == 1
+        && let CurveSupport::Circle(circle) = &outer.edges[0].support
+        && distance(outer.edges[0].start_mm, outer.edges[0].end_mm) <= GEOM_TOL_MM
+        && parallel(circle.normal, z_axis)
+    {
+        return Some(circle.center_mm);
+    }
+
+    outer
+        .edges
+        .iter()
+        .flat_map(|edge| [edge.start_mm, edge.end_mm])
+        .min_by(|a, b| {
+            let aa = [dot(*a, x_axis), dot(*a, y_axis)];
+            let bb = [dot(*b, x_axis), dot(*b, y_axis)];
+            aa[0]
+                .total_cmp(&bb[0])
+                .then_with(|| aa[1].total_cmp(&bb[1]))
+        })
+}
+
+fn raw_loop_is_continuous(edges: &[OrientedEdgeUse]) -> bool {
+    !edges.is_empty()
+        && edges.iter().enumerate().all(|(index, current)| {
+            let next = &edges[(index + 1) % edges.len()];
+            current.end_vertex == next.start_vertex
+                && distance(current.end_mm, next.start_mm) <= GEOM_TOL_MM
+        })
+}
+
+fn canonical_profile_loop(
+    edges: &[OrientedEdgeUse],
+    origin_mm: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    z_axis: [f64; 3],
+    outer: bool,
+) -> Option<Vec<RecoveredProfileCurve>> {
+    if !raw_loop_is_continuous(edges) {
+        return None;
+    }
+    let mut curves = edges
+        .iter()
+        .map(|edge| recovered_profile_curve(edge, origin_mm, x_axis, y_axis, z_axis))
+        .collect::<Option<Vec<_>>>()?;
+
+    if !curves.iter().any(RecoveredProfileCurve::is_spline) {
+        let area = signed_area_curves(&curves);
+        let wrong_winding = if outer { area < 0.0 } else { area > 0.0 };
+        if wrong_winding {
+            curves = curves
+                .iter()
+                .rev()
+                .map(RecoveredProfileCurve::reversed)
+                .collect();
+        }
+    }
+    curves = simplify_profile_curves(curves);
+
+    if curves.len() == 1
+        && let RecoveredProfileCurve::CircleArc {
+            source_edge_ids,
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            end_angle_rad,
+        } = &curves[0]
+        && ((end_angle_rad - start_angle_rad).abs() - TAU).abs() <= ANGLE_TOL_RAD
+    {
+        curves = vec![RecoveredProfileCurve::CircleArc {
+            source_edge_ids: source_edge_ids.clone(),
+            center_mm: *center_mm,
+            radius_mm: *radius_mm,
+            start_angle_rad: 0.0,
+            end_angle_rad: if outer { TAU } else { -TAU },
+        }];
+    }
+
+    let endpoints = curves
+        .iter()
+        .map(|curve| Some((curve.start_point()?, curve.end_point()?)))
+        .collect::<Option<Vec<_>>>()?;
+    let start_index = (0..curves.len()).min_by(|&a, &b| {
+        let aa = endpoints[a].0;
+        let bb = endpoints[b].0;
+        aa[0]
+            .total_cmp(&bb[0])
+            .then_with(|| aa[1].total_cmp(&bb[1]))
+            .then_with(|| {
+                curves[a]
+                    .first_source_edge_id()
+                    .cmp(&curves[b].first_source_edge_id())
+            })
+    })?;
+    curves.rotate_left(start_index);
+
+    let endpoints = curves
+        .iter()
+        .map(|curve| Some((curve.start_point()?, curve.end_point()?)))
+        .collect::<Option<Vec<_>>>()?;
+    if endpoints.iter().enumerate().any(|(index, (_, end))| {
+        distance2(*end, endpoints[(index + 1) % endpoints.len()].0) > GEOM_TOL_MM
+    }) {
+        return None;
+    }
+    Some(curves)
+}
+
+fn profile_loop_order(
+    first: &[RecoveredProfileCurve],
+    second: &[RecoveredProfileCurve],
+) -> std::cmp::Ordering {
+    let first_point = first
+        .iter()
+        .filter_map(RecoveredProfileCurve::start_point)
+        .min_by(|a, b| a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1])));
+    let second_point = second
+        .iter()
+        .filter_map(RecoveredProfileCurve::start_point)
+        .min_by(|a, b| a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1])));
+    first_point
+        .cmp_by_total(second_point)
+        .then_with(|| first.len().cmp(&second.len()))
+        .then_with(|| {
+            first
+                .first()
+                .map(RecoveredProfileCurve::first_source_edge_id)
+                .cmp(
+                    &second
+                        .first()
+                        .map(RecoveredProfileCurve::first_source_edge_id),
+                )
+        })
+}
+
+trait TotalPointOrder {
+    fn cmp_by_total(self, other: Self) -> std::cmp::Ordering;
+}
+
+impl TotalPointOrder for Option<[f64; 2]> {
+    fn cmp_by_total(self, other: Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Some(a), Some(b)) => a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1])),
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+        }
+    }
 }
 
 fn recovered_profile_curve(
@@ -862,7 +1422,8 @@ fn recovered_profile_curve(
             } else {
                 !edge.parameter_forward
             };
-            let sweep = directional_sweep(start_angle, end_angle, increasing, false);
+            let closed = distance(edge.start_mm, edge.end_mm) <= GEOM_TOL_MM;
+            let sweep = directional_sweep(start_angle, end_angle, increasing, closed);
             Some(RecoveredProfileCurve::CircleArc {
                 source_edge_ids: vec![edge.edge_id],
                 center_mm,
@@ -1298,6 +1859,54 @@ mod tests {
         assert_eq!(source_edge_ids, &vec![10, 11]);
         assert!((*start_angle_rad).abs() < 1.0e-12);
         assert!((*end_angle_rad - TAU).abs() < 1.0e-12);
+    }
+
+    fn profile_line(id: u64, start_mm: [f64; 2], end_mm: [f64; 2]) -> RecoveredProfileCurve {
+        RecoveredProfileCurve::Line {
+            source_edge_ids: vec![id],
+            start_mm,
+            end_mm,
+        }
+    }
+
+    fn rectangle_loop(id: u64, min: [f64; 2], max: [f64; 2]) -> Vec<RecoveredProfileCurve> {
+        vec![
+            profile_line(id, [min[0], min[1]], [max[0], min[1]]),
+            profile_line(id + 1, [max[0], min[1]], [max[0], max[1]]),
+            profile_line(id + 2, [max[0], max[1]], [min[0], max[1]]),
+            profile_line(id + 3, [min[0], max[1]], [min[0], min[1]]),
+        ]
+    }
+
+    #[test]
+    fn inferred_outer_requires_geometric_containment() {
+        let outer = rectangle_loop(1, [0.0, 0.0], [10.0, 10.0]);
+        let spline_hole = vec![RecoveredProfileCurve::BSpline {
+            source_edge_ids: vec![10],
+            degree: 3,
+            control_points_mm: vec![[3.0, 3.0], [4.0, 3.0], [4.0, 4.0], [3.0, 4.0]],
+            knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            weights: Some(vec![1.0, 0.8, 0.8, 1.0]),
+        }];
+        assert_eq!(
+            convex_polygon_outer_roles(&[outer, spline_hole]),
+            Some(vec![true, false])
+        );
+
+        let first = rectangle_loop(20, [0.0, 0.0], [2.0, 2.0]);
+        let second = rectangle_loop(30, [4.0, 0.0], [6.0, 2.0]);
+        assert_eq!(convex_polygon_outer_roles(&[first, second]), None);
+    }
+
+    #[test]
+    fn inferred_outer_rejects_overlapping_hole_bounds() {
+        let outer = rectangle_loop(1, [0.0, 0.0], [10.0, 10.0]);
+        let first_hole = rectangle_loop(10, [2.0, 2.0], [5.0, 5.0]);
+        let second_hole = rectangle_loop(20, [4.0, 4.0], [7.0, 7.0]);
+        assert_eq!(
+            convex_polygon_outer_roles(&[outer, first_hole, second_hole]),
+            None
+        );
     }
 
     #[test]
