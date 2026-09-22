@@ -6,6 +6,44 @@ on:
   workflow_dispatch:
 
 jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz safe cleanup idempotence
+        run: cargo +nightly fuzz run clean_idempotent -- -runs=10000 -dict=fuzz/step.dict
+
+      - name: Fuzz solid extrusion recovery
+        run: cargo +nightly fuzz run solid_extrusions -- -runs=10000 -dict=fuzz/step.dict
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv-1.88
+
+      - name: Check declared Rust 1.88 MSRV
+        run: cargo +1.88.0 check --locked --lib --bins --features cad-kernel-monstertruck
+
   validate:
     runs-on: ubuntu-latest
     env:
@@ -21,7 +59,7 @@ jobs:
           cache: pip
           cache-dependency-path: validation/requirements.txt
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 

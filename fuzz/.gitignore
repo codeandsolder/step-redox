@@ -1,0 +1,6 @@
+target/
+artifacts/
+corpus/clean_idempotent/*
+!corpus/clean_idempotent/minimal.step
+corpus/solid_extrusions/*
+!corpus/solid_extrusions/minimal.step

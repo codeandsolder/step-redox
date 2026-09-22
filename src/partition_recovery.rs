@@ -719,8 +719,7 @@ fn replace_and_dedup_direct_ref_lists(
             if all_refs {
                 let mut seen = HashSet::new();
                 let mut out = Vec::new();
-                for item in items.iter() {
-                    let old = entity_ref_value(item).expect("checked");
+                for old in items.iter().filter_map(entity_ref_value) {
                     let new = mapping.get(&old).copied().unwrap_or(old);
                     if seen.insert(new) { out.push(entity_ref(new)); }
                 }

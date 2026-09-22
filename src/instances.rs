@@ -659,12 +659,8 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             .collect();
         let mut patched_residual_items = residual_items.clone();
         patched_residual_items.push(residual_origin);
-        set_representation_items(
-            entities
-                .get_mut(top_idx)
-                .expect("existing top representation index"),
-            &patched_residual_items,
-        );
+        let Some(top_representation) = entities.get_mut(top_idx) else { return false; };
+        set_representation_items(top_representation, &patched_residual_items);
 
         let mut root_items = vec![root_origin];
         if !residual_items.is_empty() {
@@ -688,13 +684,9 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 entity_ref(context_id),
             ],
         );
-        if !replace_direct_ref_in_simple(
-            entities
-                .get_mut(*index.get(&root_sdr).expect("existing SDR index"))
-                .expect("existing SDR"),
-            top_rep,
-            root_rep,
-        ) {
+        let Some(&root_sdr_index) = index.get(&root_sdr) else { return false; };
+        let Some(root_sdr_entity) = entities.get_mut(root_sdr_index) else { return false; };
+        if !replace_direct_ref_in_simple(root_sdr_entity, top_rep, root_rep) {
             return false;
         }
 

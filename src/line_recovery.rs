@@ -332,8 +332,9 @@ fn direction_group_accepts(representative: [f64; 3], candidate: &Candidate) -> b
         return false;
     }
 
-    let first = candidate.points[0];
-    let last = *candidate.points.last().expect("candidate has poles");
+    let (Some(&first), Some(&last)) = (candidate.points.first(), candidate.points.last()) else {
+        return false;
+    };
     let chord = sub(last, first);
     let projection = dot(chord, representative);
     let projected = add(first, scale(representative, projection));

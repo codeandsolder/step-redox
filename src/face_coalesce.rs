@@ -81,8 +81,7 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
     for users in edge_faces.values() {
         if users.len() != 2 { continue; }
         let mut it = users.iter();
-        let a = *it.next().expect("len checked");
-        let b = *it.next().expect("len checked");
+        let (Some(&a), Some(&b)) = (it.next(), it.next()) else { continue; };
         let (Some(ai), Some(bi)) = (face_info.get(&a), face_info.get(&b)) else { continue; };
         if ai.support != bi.support || ai.sense != bi.sense { continue; }
         adjacency.entry(a).or_default().insert(b);
