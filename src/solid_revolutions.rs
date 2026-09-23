@@ -138,6 +138,9 @@ fn detect_one_solid(
     if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, &faces) {
         return Some(torus);
     }
+    if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, &faces) {
+        return Some(cap);
+    }
     if face_ids.len() < 3 {
         return None;
     }
@@ -299,6 +302,164 @@ fn detect_full_ring_torus(
             start_angle_rad: 0.0,
             end_angle_rad: std::f64::consts::TAU,
         }],
+        axis_origin_mm,
+        axis_direction,
+        radial_direction,
+        max_residual_mm,
+    })
+}
+
+fn detect_spherical_cap(
+    solid_id: u64,
+    face_ids: &[u64],
+    faces: &[FaceInfo],
+) -> Option<RecoveredSolidRevolution> {
+    if faces.len() < 2 {
+        return None;
+    }
+
+    let mut sphere_faces = Vec::new();
+    let mut plane_face = None;
+    for face in faces {
+        match face.surface {
+            SurfaceSupport::Sphere(sphere) => sphere_faces.push((face, sphere)),
+            SurfaceSupport::Plane(plane) if plane_face.is_none() => {
+                plane_face = Some((face, plane))
+            }
+            _ => return None,
+        }
+    }
+    let (plane_face, plane) = plane_face?;
+    let (_, first_sphere) = *sphere_faces.first()?;
+    if !first_sphere.radius_mm.is_finite() || first_sphere.radius_mm <= GEOM_TOL_MM {
+        return None;
+    }
+
+    let axis_direction = canonical_axis(normalize(plane.normal)?);
+    let axis_origin_mm =
+        closest_axis_point_to_global_origin(first_sphere.center_mm, axis_direction);
+    let center_t = axial_coordinate(first_sphere.center_mm, axis_origin_mm, axis_direction);
+    let plane_t = axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction);
+    let plane_offset = plane_t - center_t;
+    let cap_radius_squared = first_sphere.radius_mm.powi(2) - plane_offset.powi(2);
+    if !cap_radius_squared.is_finite() || cap_radius_squared <= GEOM_TOL_MM.powi(2) {
+        return None;
+    }
+    let cap_radius = cap_radius_squared.sqrt();
+    let radial_direction = radial_basis(axis_direction)?;
+    let mut max_residual_mm = plane.max_residual_mm;
+    let mut side = 0_i8;
+    let mut reached_pole = false;
+    let mut sphere_cap_edges = 0_usize;
+
+    for (face, sphere) in &sphere_faces {
+        if face.loops.len() != 1
+            || !sphere.radius_mm.is_finite()
+            || (sphere.radius_mm - first_sphere.radius_mm).abs() > GEOM_TOL_MM
+        {
+            return None;
+        }
+        max_residual_mm = max_residual_mm
+            .max(norm(sub(sphere.center_mm, first_sphere.center_mm)))
+            .max((sphere.radius_mm - first_sphere.radius_mm).abs());
+
+        for edge in &face.loops[0].edges {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return None;
+            };
+            max_residual_mm = max_residual_mm.max(sphere_circle_residual(circle, first_sphere)?);
+            if cap_circle_residual(circle, axis_origin_mm, axis_direction, plane_t, cap_radius)
+                .is_some_and(|residual| residual <= GEOM_TOL_MM)
+            {
+                sphere_cap_edges += 1;
+            }
+
+            for point in [edge.start_mm, edge.end_mm] {
+                max_residual_mm = max_residual_mm
+                    .max(circle_point_residual(point, circle))
+                    .max(sphere_point_residual(point, first_sphere));
+                let signed = axial_coordinate(point, axis_origin_mm, axis_direction) - plane_t;
+                if signed.abs() > GEOM_TOL_MM {
+                    let point_side = if signed > 0.0 { 1 } else { -1 };
+                    if side != 0 && side != point_side {
+                        return None;
+                    }
+                    side = point_side;
+                }
+            }
+        }
+    }
+
+    if plane_face.loops.len() != 1 || plane_face.loops[0].edges.is_empty() {
+        return None;
+    }
+    for edge in &plane_face.loops[0].edges {
+        let CurveSupport::Circle(circle) = edge.support else {
+            return None;
+        };
+        max_residual_mm = max_residual_mm.max(cap_circle_residual(
+            circle,
+            axis_origin_mm,
+            axis_direction,
+            plane_t,
+            cap_radius,
+        )?);
+        for point in [edge.start_mm, edge.end_mm] {
+            max_residual_mm = max_residual_mm
+                .max(circle_point_residual(point, circle))
+                .max(sphere_point_residual(point, first_sphere))
+                .max((axial_coordinate(point, axis_origin_mm, axis_direction) - plane_t).abs());
+        }
+    }
+
+    if side == 0 || sphere_cap_edges == 0 || max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+    let pole_t = center_t + f64::from(side) * first_sphere.radius_mm;
+    for (face, _) in &sphere_faces {
+        for edge in &face.loops[0].edges {
+            for point in [edge.start_mm, edge.end_mm] {
+                if (axial_coordinate(point, axis_origin_mm, axis_direction) - pole_t).abs()
+                    <= GEOM_TOL_MM
+                    && point_axis_distance(point, axis_origin_mm, axis_direction) <= GEOM_TOL_MM
+                {
+                    reached_pole = true;
+                }
+            }
+        }
+    }
+    if !reached_pole {
+        return None;
+    }
+
+    let cap_angle = plane_offset.atan2(cap_radius);
+    let pole_angle = if side > 0 {
+        std::f64::consts::FRAC_PI_2
+    } else {
+        -std::f64::consts::FRAC_PI_2
+    };
+    Some(RecoveredSolidRevolution {
+        solid_id,
+        face_ids: face_ids.to_vec(),
+        profile_curves: vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, plane_t],
+                end_mm: [cap_radius, plane_t],
+            },
+            RecoveredProfileCurve::CircleArc {
+                source_edge_ids: Vec::new(),
+                center_mm: [0.0, center_t],
+                radius_mm: first_sphere.radius_mm,
+                start_angle_rad: cap_angle,
+                end_angle_rad: pole_angle,
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, pole_t],
+                end_mm: [0.0, plane_t],
+            },
+        ],
         axis_origin_mm,
         axis_direction,
         radial_direction,
@@ -1175,6 +1336,44 @@ fn circle_point_residual(point: [f64; 3], circle: brep::CircleSupport) -> f64 {
     plane_residual.max(radius_residual)
 }
 
+fn sphere_point_residual(point: [f64; 3], sphere: brep::SphereSupport) -> f64 {
+    (norm(sub(point, sphere.center_mm)) - sphere.radius_mm).abs()
+}
+
+fn sphere_circle_residual(circle: brep::CircleSupport, sphere: brep::SphereSupport) -> Option<f64> {
+    let normal = normalize(circle.normal)?;
+    let relative = sub(circle.center_mm, sphere.center_mm);
+    let offset = dot(relative, normal);
+    let lateral = norm(sub(relative, mul(normal, offset)));
+    let expected_squared = sphere.radius_mm.powi(2) - offset.powi(2);
+    if expected_squared < -GEOM_TOL_MM.powi(2) {
+        return None;
+    }
+    let expected_radius = expected_squared.max(0.0).sqrt();
+    Some(
+        lateral
+            .max((circle.radius_mm - expected_radius).abs())
+            .max((norm(circle.normal) - 1.0).abs()),
+    )
+}
+
+fn cap_circle_residual(
+    circle: brep::CircleSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    plane_t: f64,
+    radius: f64,
+) -> Option<f64> {
+    if !parallel(circle.normal, axis) {
+        return None;
+    }
+    Some(
+        axis_distance(circle.center_mm, axis_origin, axis)
+            .max((axial_coordinate(circle.center_mm, axis_origin, axis) - plane_t).abs())
+            .max((circle.radius_mm - radius).abs()),
+    )
+}
+
 fn torus_point_residual(point: [f64; 3], torus: brep::TorusSupport, axis: [f64; 3]) -> f64 {
     let relative = sub(point, torus.center_mm);
     let axial = dot(relative, axis);
@@ -1405,6 +1604,110 @@ mod tests {
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
             let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+        }
+    }
+
+    #[test]
+    fn recovers_native_spherical_cap_fixture() {
+        let bytes = include_bytes!("../validation/fixtures/native_spherical_cap.step");
+        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].face_ids.len(), 2);
+        assert_eq!(recovered[0].profile_curves.len(), 3);
+
+        let RecoveredProfileCurve::Line {
+            start_mm: plane_axis,
+            end_mm: cap_edge,
+            ..
+        } = &recovered[0].profile_curves[0]
+        else {
+            panic!("expected planar radial segment");
+        };
+        assert!(plane_axis[0].abs() < 1.0e-12);
+        assert!((plane_axis[1] - 0.073).abs() < 1.0e-12);
+        assert!((cap_edge[0] - 0.107568582774).abs() < 1.0e-12);
+        assert!((cap_edge[1] - 0.073).abs() < 1.0e-12);
+
+        let RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            end_angle_rad,
+            ..
+        } = &recovered[0].profile_curves[1]
+        else {
+            panic!("expected spherical meridian arc");
+        };
+        assert!(center_mm[0].abs() < 1.0e-12);
+        assert!(center_mm[1].abs() < 1.0e-12);
+        assert!((*radius_mm - 0.13).abs() < 1.0e-12);
+        assert!((*start_angle_rad - 0.596243908486).abs() < 1.0e-12);
+        assert!((*end_angle_rad + std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
+
+        let RecoveredProfileCurve::Line {
+            start_mm: pole,
+            end_mm: close,
+            ..
+        } = &recovered[0].profile_curves[2]
+        else {
+            panic!("expected axis closure");
+        };
+        assert!(pole[0].abs() < 1.0e-12);
+        assert!((pole[1] + 0.13).abs() < 1.0e-12);
+        assert_eq!(*close, *plane_axis);
+        assert!(recovered[0].max_residual_mm < 1.0e-9);
+
+        let malformed = String::from_utf8_lossy(bytes).replacen(
+            "CIRCLE('',#26,0.107568582774)",
+            "CIRCLE('',#26,0.117568582774)",
+            1,
+        );
+        assert!(
+            crate::detect_solid_revolutions_bytes(malformed.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let fragment =
+                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovers_positive_spherical_cap_fixture() {
+        let bytes = include_bytes!("../validation/fixtures/native_spherical_cap_positive.step");
+        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].profile_curves.len(), 3);
+        let RecoveredProfileCurve::CircleArc { end_angle_rad, .. } =
+            &recovered[0].profile_curves[1]
+        else {
+            panic!("expected spherical meridian arc");
+        };
+        assert!((*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
+        let RecoveredProfileCurve::Line { start_mm: pole, .. } = &recovered[0].profile_curves[2]
+        else {
+            panic!("expected axis closure");
+        };
+        assert!((pole[1] - 0.13).abs() < 1.0e-12);
+        assert!(recovered[0].max_residual_mm < 1.0e-10);
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let fragment =
+                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
         }
     }
 
