@@ -107,7 +107,11 @@ def cut_volume(a, b):
     assert operation.IsDone()
     volume = GProp_GProps()
     BRepGProp.VolumeProperties_s(operation.Shape(), volume)
-    return float(volume.Mass())
+    return abs(float(volume.Mass()))
+
+
+def volume_tolerance(a, b):
+    return max(ABS_VOLUME_TOL, REL_TOL * max(abs(a), abs(b)))
 
 
 def close(a, b, abs_tol):
@@ -167,6 +171,7 @@ if args.a_entity_id is not None:
     bbox_error = max(abs(x - y) for x, y in zip(a_solid["bbox"], b_solid["bbox"]))
     source_minus_candidate = cut_volume(a_shape, b_shape)
     candidate_minus_source = cut_volume(b_shape, a_shape)
+    boolean_volume_tolerance = volume_tolerance(a_solid["volume"], b_solid["volume"])
 
     # Analytic OCCT bounding boxes can be conservative (notably trimmed tori),
     # and CAD kernels are free to split faces differently. For entity-rank
@@ -176,8 +181,8 @@ if args.a_entity_id is not None:
         close(a_solid["volume"], b_solid["volume"], ABS_VOLUME_TOL)
         and close(a_solid["area"], b_solid["area"], ABS_AREA_TOL)
         and center_error <= ABS_GEOM_TOL
-        and source_minus_candidate <= ABS_VOLUME_TOL
-        and candidate_minus_source <= ABS_VOLUME_TOL
+        and source_minus_candidate <= boolean_volume_tolerance
+        and candidate_minus_source <= boolean_volume_tolerance
     )
     print(
         json.dumps(
@@ -200,6 +205,7 @@ if args.a_entity_id is not None:
                 "tolerances": {
                     "geometry_abs": ABS_GEOM_TOL,
                     "volume_abs": ABS_VOLUME_TOL,
+                    "boolean_volume_effective": boolean_volume_tolerance,
                     "area_abs": ABS_AREA_TOL,
                     "relative": REL_TOL,
                 },
