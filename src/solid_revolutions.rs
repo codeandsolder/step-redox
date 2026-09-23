@@ -1066,7 +1066,7 @@ fn detect_mixed_torus_revolution(
         if !torus.major_radius_mm.is_finite()
             || !torus.minor_radius_mm.is_finite()
             || torus.minor_radius_mm <= GEOM_TOL_MM
-            || torus.major_radius_mm <= torus.minor_radius_mm + GEOM_TOL_MM
+            || torus.major_radius_mm <= GEOM_TOL_MM
             || !parallel(torus.axis, axis_direction)
             || axis_distance(torus.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
         {
@@ -1137,7 +1137,10 @@ fn torus_profile_arc(
     faces: &[FaceInfo],
     edge_faces: &HashMap<u64, Vec<usize>>,
 ) -> Option<(RecoveredProfileCurve, f64)> {
-    if face_indices.is_empty() || torus.major_radius_mm <= torus.minor_radius_mm + GEOM_TOL_MM {
+    if face_indices.is_empty()
+        || torus.major_radius_mm <= GEOM_TOL_MM
+        || torus.minor_radius_mm <= GEOM_TOL_MM
+    {
         return None;
     }
     let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
@@ -1231,6 +1234,15 @@ fn torus_profile_arc(
     let [(start_angle_rad, end_angle_rad)] = valid.as_slice() else {
         return None;
     };
+    if circle_arc_min_radius(
+        center_mm[0],
+        torus.minor_radius_mm,
+        *start_angle_rad,
+        *end_angle_rad,
+    ) < -GEOM_TOL_MM
+    {
+        return None;
+    }
 
     source_edge_ids.sort_unstable();
     source_edge_ids.dedup();
@@ -1368,6 +1380,21 @@ fn angle_on_arc(angle: f64, start: f64, end: f64, tolerance: f64) -> bool {
     } else {
         positive_angle_delta(angle, start) <= start - end + tolerance
     }
+}
+
+fn circle_arc_min_radius(center_radius: f64, radius: f64, start_angle: f64, end_angle: f64) -> f64 {
+    let mut minimum =
+        (center_radius + radius * start_angle.cos()).min(center_radius + radius * end_angle.cos());
+    let angle_tolerance = (GEOM_TOL_MM / radius.max(GEOM_TOL_MM)).max(1.0e-12);
+    if angle_on_arc(
+        std::f64::consts::PI,
+        start_angle,
+        end_angle,
+        angle_tolerance,
+    ) {
+        minimum = minimum.min(center_radius - radius);
+    }
+    minimum
 }
 
 fn push_unique_point(points: &mut Vec<[f64; 2]>, candidate: [f64; 2]) {
@@ -2807,8 +2834,11 @@ fn torus_point_residual(point: [f64; 3], torus: brep::TorusSupport, axis: [f64; 
     let axial = dot(relative, axis);
     let radial_vector = sub(relative, mul(axis, axial));
     let radial = norm(radial_vector);
-    let tube_distance = ((radial - torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
-    (tube_distance - torus.minor_radius_mm).abs()
+    let outer_tube_distance = ((radial - torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
+    let inner_tube_distance = ((radial + torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
+    (outer_tube_distance - torus.minor_radius_mm)
+        .abs()
+        .min((inner_tube_distance - torus.minor_radius_mm).abs())
 }
 
 fn axial_coordinate(point: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f64 {
@@ -3290,19 +3320,22 @@ mod tests {
         ));
     }
 
-    fn split_quarter_torus_faces(torus_minor_radius_mm: f64) -> Vec<FaceInfo> {
+    fn split_quarter_torus_faces(
+        torus_major_radius_mm: f64,
+        torus_minor_radius_mm: f64,
+    ) -> Vec<FaceInfo> {
         let torus = brep::TorusSupport {
             center_mm: [0.0, 0.0, 1.4],
             axis: [0.0, 0.0, 1.0],
             x_direction: [1.0, 0.0, 0.0],
-            major_radius_mm: 0.9,
+            major_radius_mm: torus_major_radius_mm,
             minor_radius_mm: torus_minor_radius_mm,
         };
         let cylinder = brep::CylinderSupport {
             axis_origin_mm: [0.0, 0.0, 0.0],
             axis: [0.0, 0.0, 1.0],
             x_direction: [1.0, 0.0, 0.0],
-            radius_mm: 1.0,
+            radius_mm: torus_major_radius_mm + torus_minor_radius_mm,
         };
         let bottom_plane = brep::PlaneSupport {
             origin_mm: [0.0, 0.0, 1.0],
@@ -3310,77 +3343,81 @@ mod tests {
             max_residual_mm: 0.0,
         };
         let top_plane = brep::PlaneSupport {
-            origin_mm: [0.0, 0.0, 1.5],
+            origin_mm: [0.0, 0.0, 1.4 + torus_minor_radius_mm],
             normal: [0.0, 0.0, 1.0],
             max_residual_mm: 0.0,
         };
 
+        let outer_radius = torus_major_radius_mm + torus_minor_radius_mm;
+        let top_z = 1.4 + torus_minor_radius_mm;
         let top_a = test_circle_edge(
             110,
-            [0.9, 0.0, 1.5],
-            [-0.9, 0.0, 1.5],
-            [0.0, 0.0, 1.5],
+            [torus_major_radius_mm, 0.0, top_z],
+            [-torus_major_radius_mm, 0.0, top_z],
+            [0.0, 0.0, top_z],
             [0.0, 0.0, 1.0],
-            0.9,
+            torus_major_radius_mm,
         );
         let top_b = test_circle_edge(
             111,
-            [-0.9, 0.0, 1.5],
-            [0.9, 0.0, 1.5],
-            [0.0, 0.0, 1.5],
+            [-torus_major_radius_mm, 0.0, top_z],
+            [torus_major_radius_mm, 0.0, top_z],
+            [0.0, 0.0, top_z],
             [0.0, 0.0, 1.0],
-            0.9,
+            torus_major_radius_mm,
         );
         let side_a = test_circle_edge(
             112,
-            [1.0, 0.0, 1.4],
-            [-1.0, 0.0, 1.4],
+            [outer_radius, 0.0, 1.4],
+            [-outer_radius, 0.0, 1.4],
             [0.0, 0.0, 1.4],
             [0.0, 0.0, 1.0],
-            1.0,
+            outer_radius,
         );
         let side_b = test_circle_edge(
             113,
-            [-1.0, 0.0, 1.4],
-            [1.0, 0.0, 1.4],
+            [-outer_radius, 0.0, 1.4],
+            [outer_radius, 0.0, 1.4],
             [0.0, 0.0, 1.4],
             [0.0, 0.0, 1.0],
-            1.0,
+            outer_radius,
         );
         let bottom_a = test_circle_edge(
             114,
-            [1.0, 0.0, 1.0],
-            [-1.0, 0.0, 1.0],
+            [outer_radius, 0.0, 1.0],
+            [-outer_radius, 0.0, 1.0],
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
-            1.0,
+            outer_radius,
         );
         let bottom_b = test_circle_edge(
             115,
-            [-1.0, 0.0, 1.0],
-            [1.0, 0.0, 1.0],
+            [-outer_radius, 0.0, 1.0],
+            [outer_radius, 0.0, 1.0],
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
-            1.0,
+            outer_radius,
         );
         let torus_seam_positive = test_circle_edge(
             116,
-            [0.9, 0.0, 1.5],
-            [1.0, 0.0, 1.4],
-            [0.9, 0.0, 1.4],
+            [torus_major_radius_mm, 0.0, top_z],
+            [outer_radius, 0.0, 1.4],
+            [torus_major_radius_mm, 0.0, 1.4],
             [0.0, 1.0, 0.0],
-            0.1,
+            torus_minor_radius_mm,
         );
         let torus_seam_negative = test_circle_edge(
             117,
-            [-0.9, 0.0, 1.5],
-            [-1.0, 0.0, 1.4],
-            [-0.9, 0.0, 1.4],
+            [-torus_major_radius_mm, 0.0, top_z],
+            [-outer_radius, 0.0, 1.4],
+            [-torus_major_radius_mm, 0.0, 1.4],
             [0.0, -1.0, 0.0],
-            0.1,
+            torus_minor_radius_mm,
         );
-        let cylinder_seam_positive = test_line_edge(118, [1.0, 0.0, 1.0], [1.0, 0.0, 1.4]);
-        let cylinder_seam_negative = test_line_edge(119, [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.4]);
+        let cylinder_seam_positive =
+            test_line_edge(118, [outer_radius, 0.0, 1.0], [outer_radius, 0.0, 1.4]);
+        let cylinder_seam_negative =
+            test_line_edge(119, [-outer_radius, 0.0, 1.0], [-outer_radius, 0.0, 1.4]);
 
         vec![
             test_face(
@@ -3429,7 +3466,7 @@ mod tests {
 
     #[test]
     fn recovers_split_quarter_torus_fillet_topology() {
-        let faces = split_quarter_torus_faces(0.1);
+        let faces = split_quarter_torus_faces(0.9, 0.1);
         let edge_faces = edge_face_map(&faces);
         let entities = Vec::new();
         let index = HashMap::new();
@@ -3454,14 +3491,7 @@ mod tests {
                 && (*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
         )));
 
-        let mut spindle = split_quarter_torus_faces(0.1);
-        for face in spindle.iter_mut().take(2) {
-            let SurfaceSupport::Torus(mut torus) = face.surface else {
-                panic!("expected torus test face");
-            };
-            torus.major_radius_mm = 0.05;
-            face.surface = SurfaceSupport::Torus(torus);
-        }
+        let spindle = split_quarter_torus_faces(0.05, 0.1);
         let edge_faces = edge_face_map(&spindle);
         let context = TopologyContext {
             faces: &spindle,
@@ -3469,11 +3499,31 @@ mod tests {
             entities: &entities,
             index: &index,
         };
-        assert!(
-            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).is_none()
-        );
+        let recovered =
+            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).unwrap();
+        assert!(recovered.profile_curves.iter().any(|curve| matches!(
+            curve,
+            RecoveredProfileCurve::CircleArc {
+                center_mm: [0.05, 1.4],
+                radius_mm: 0.1,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } if start_angle_rad.abs() <= 1.0e-12
+                && (*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+        )));
 
-        let tampered = split_quarter_torus_faces(0.11);
+        assert!(circle_arc_min_radius(0.05, 0.1, 0.0, std::f64::consts::FRAC_PI_2) >= 0.0);
+        assert!(circle_arc_min_radius(0.05, 0.1, 0.0, std::f64::consts::PI) < -GEOM_TOL_MM);
+
+        let mut tampered = split_quarter_torus_faces(0.9, 0.1);
+        for face in tampered.iter_mut().take(2) {
+            let SurfaceSupport::Torus(mut torus) = face.surface else {
+                panic!("expected torus test face");
+            };
+            torus.minor_radius_mm = 0.11;
+            face.surface = SurfaceSupport::Torus(torus);
+        }
         let edge_faces = edge_face_map(&tampered);
         let context = TopologyContext {
             faces: &tampered,
