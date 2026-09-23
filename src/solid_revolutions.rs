@@ -299,6 +299,9 @@ fn detect_one_solid(
     if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, &faces, &context) {
         return Some(end);
     }
+    if let Some(mixed) = detect_mixed_torus_revolution(solid_id, &face_ids, &faces, &context) {
+        return Some(mixed);
+    }
     if face_ids.len() < 3 {
         return None;
     }
@@ -963,6 +966,421 @@ fn detect_hemispherical_end(
         radial_direction,
         max_residual_mm,
     })
+}
+
+fn detect_mixed_torus_revolution(
+    solid_id: u64,
+    face_ids: &[u64],
+    faces: &[FaceInfo],
+    context: &TopologyContext<'_>,
+) -> Option<RecoveredSolidRevolution> {
+    let torus_count = faces
+        .iter()
+        .filter(|face| matches!(face.surface, SurfaceSupport::Torus(_)))
+        .count();
+    if torus_count == 0 || torus_count == faces.len() {
+        return None;
+    }
+
+    let (axis_reference_origin_mm, axis_reference_direction) =
+        faces.iter().find_map(|face| match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => Some((cylinder.axis_origin_mm, cylinder.axis)),
+            SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
+            SurfaceSupport::Revolution(revolution) => {
+                Some((revolution.axis_origin_mm, revolution.axis))
+            }
+            SurfaceSupport::Torus(torus) => Some((torus.center_mm, torus.axis)),
+            _ => None,
+        })?;
+    let axis_direction = canonical_axis(normalize(axis_reference_direction)?);
+    let axis_origin_mm =
+        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+    let radial_direction = radial_basis(axis_direction)?;
+
+    let mut max_residual_mm = 0.0_f64;
+    let mut segments = Vec::new();
+    let mut torus_faces = Vec::<(usize, brep::TorusSupport)>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => {
+                let (segment, residual) = cylinder_profile_segment(
+                    face_index,
+                    face,
+                    cylinder,
+                    axis_origin_mm,
+                    axis_direction,
+                    faces,
+                    context.edge_faces,
+                )?;
+                max_residual_mm = max_residual_mm.max(residual);
+                push_unique_segment(&mut segments, segment);
+            }
+            SurfaceSupport::Cone(cone) => {
+                let (segment, residual) = cone_profile_segment(
+                    face_index,
+                    face,
+                    cone,
+                    axis_origin_mm,
+                    axis_direction,
+                    faces,
+                    context.edge_faces,
+                )?;
+                max_residual_mm = max_residual_mm.max(residual);
+                push_unique_segment(&mut segments, segment);
+            }
+            SurfaceSupport::Revolution(revolution) => {
+                let (segment, residual) = revolution_line_profile_segment(
+                    face_index,
+                    face,
+                    revolution,
+                    axis_origin_mm,
+                    axis_direction,
+                    context,
+                )?;
+                max_residual_mm = max_residual_mm.max(residual);
+                push_unique_segment(&mut segments, segment);
+            }
+            SurfaceSupport::Plane(plane) => {
+                let (segment, residual) = plane_profile_segment(
+                    face_index,
+                    face,
+                    plane,
+                    axis_origin_mm,
+                    axis_direction,
+                    context,
+                )?;
+                max_residual_mm = max_residual_mm.max(residual);
+                push_unique_segment(&mut segments, segment);
+            }
+            SurfaceSupport::Torus(torus) => torus_faces.push((face_index, torus)),
+            _ => return None,
+        }
+    }
+    if max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+
+    let mut groups = Vec::<Vec<usize>>::new();
+    let mut supports = Vec::<brep::TorusSupport>::new();
+    for (face_index, torus) in torus_faces {
+        if !torus.major_radius_mm.is_finite()
+            || !torus.minor_radius_mm.is_finite()
+            || torus.minor_radius_mm <= GEOM_TOL_MM
+            || torus.major_radius_mm <= torus.minor_radius_mm + GEOM_TOL_MM
+            || !parallel(torus.axis, axis_direction)
+            || axis_distance(torus.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+        {
+            return None;
+        }
+        if let Some(group_index) = supports
+            .iter()
+            .position(|existing| same_torus_support(*existing, torus, axis_direction))
+        {
+            groups[group_index].push(face_index);
+        } else {
+            supports.push(torus);
+            groups.push(vec![face_index]);
+        }
+    }
+
+    // Start with one curved support in the profile. This covers the dominant
+    // torus-fillet clusters while keeping arc/arc intersections fail-closed.
+    let [group] = groups.as_slice() else {
+        return None;
+    };
+    let [torus] = supports.as_slice() else {
+        return None;
+    };
+    let (arc, residual) = torus_profile_arc(
+        group,
+        *torus,
+        axis_origin_mm,
+        axis_direction,
+        faces,
+        context.edge_faces,
+    )?;
+    max_residual_mm = max_residual_mm.max(residual);
+    if max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+
+    let mut curves = segments
+        .into_iter()
+        .map(|segment| RecoveredProfileCurve::Line {
+            source_edge_ids: Vec::new(),
+            start_mm: segment.a,
+            end_mm: segment.b,
+        })
+        .collect::<Vec<_>>();
+    curves.push(arc);
+    let profile_curves = closed_profile_from_curves(curves)?;
+    Some(RecoveredSolidRevolution {
+        solid_id,
+        face_ids: face_ids.to_vec(),
+        profile_curves,
+        axis_origin_mm,
+        axis_direction,
+        radial_direction,
+        max_residual_mm,
+    })
+}
+
+fn same_torus_support(a: brep::TorusSupport, b: brep::TorusSupport, axis: [f64; 3]) -> bool {
+    parallel(a.axis, axis)
+        && parallel(b.axis, axis)
+        && norm(sub(a.center_mm, b.center_mm)) <= GEOM_TOL_MM
+        && (a.major_radius_mm - b.major_radius_mm).abs() <= GEOM_TOL_MM
+        && (a.minor_radius_mm - b.minor_radius_mm).abs() <= GEOM_TOL_MM
+}
+
+fn torus_profile_arc(
+    face_indices: &[usize],
+    torus: brep::TorusSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+    faces: &[FaceInfo],
+    edge_faces: &HashMap<u64, Vec<usize>>,
+) -> Option<(RecoveredProfileCurve, f64)> {
+    if face_indices.is_empty() || torus.major_radius_mm <= torus.minor_radius_mm + GEOM_TOL_MM {
+        return None;
+    }
+    let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
+    let center_mm = [torus.major_radius_mm, center_t];
+    let mut boundary_points = Vec::<[f64; 2]>::new();
+    let mut witness_points = Vec::<[f64; 2]>::new();
+    let mut source_edge_ids = Vec::<u64>::new();
+    let mut max_residual_mm = axis_distance(torus.center_mm, axis_origin_mm, axis_direction);
+
+    for &face_index in face_indices {
+        let face = faces.get(face_index)?;
+        let SurfaceSupport::Torus(face_torus) = face.surface else {
+            return None;
+        };
+        if !same_torus_support(torus, face_torus, axis_direction) || face.loops.len() != 1 {
+            return None;
+        }
+        for edge in &face.loops[0].edges {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return None;
+            };
+            source_edge_ids.push(edge.edge_id);
+            for point in [edge.start_mm, edge.end_mm] {
+                max_residual_mm = max_residual_mm
+                    .max(circle_point_residual(point, circle))
+                    .max(torus_point_residual(point, torus, axis_direction));
+            }
+            let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
+            match faces.get(neighbor)?.surface {
+                SurfaceSupport::Torus(neighbor_torus)
+                    if same_torus_support(torus, neighbor_torus, axis_direction) =>
+                {
+                    max_residual_mm = max_residual_mm.max(torus_meridian_circle_residual(
+                        circle,
+                        torus,
+                        axis_origin_mm,
+                        axis_direction,
+                    )?);
+                    let midpoint = circle_trim_midpoint(edge, circle)?;
+                    max_residual_mm =
+                        max_residual_mm.max(torus_point_residual(midpoint, torus, axis_direction));
+                    push_unique_point(
+                        &mut witness_points,
+                        [
+                            point_axis_distance(midpoint, axis_origin_mm, axis_direction),
+                            axial_coordinate(midpoint, axis_origin_mm, axis_direction),
+                        ],
+                    );
+                }
+                _ => {
+                    let (point, residual) = torus_parallel_boundary_point(
+                        circle,
+                        torus,
+                        axis_origin_mm,
+                        axis_direction,
+                    )?;
+                    max_residual_mm = max_residual_mm.max(residual);
+                    push_unique_point(&mut boundary_points, point);
+                }
+            }
+        }
+    }
+
+    let [start, end] = boundary_points.as_slice() else {
+        return None;
+    };
+    if witness_points.is_empty() || max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+    let start_angle = meridian_angle(*start, center_mm, torus.minor_radius_mm)?;
+    let end_angle = meridian_angle(*end, center_mm, torus.minor_radius_mm)?;
+    let ccw_delta = positive_angle_delta(start_angle, end_angle);
+    let cw_delta = std::f64::consts::TAU - ccw_delta;
+    let angle_tol = (GEOM_TOL_MM / torus.minor_radius_mm).max(1.0e-12);
+    if ccw_delta <= angle_tol || cw_delta <= angle_tol {
+        return None;
+    }
+    let candidates = [
+        (start_angle, start_angle + ccw_delta),
+        (start_angle, start_angle - cw_delta),
+    ];
+    let valid = candidates
+        .into_iter()
+        .filter(|&(arc_start, arc_end)| {
+            witness_points.iter().all(|point| {
+                meridian_angle(*point, center_mm, torus.minor_radius_mm)
+                    .is_some_and(|angle| angle_on_arc(angle, arc_start, arc_end, angle_tol))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(start_angle_rad, end_angle_rad)] = valid.as_slice() else {
+        return None;
+    };
+
+    source_edge_ids.sort_unstable();
+    source_edge_ids.dedup();
+    Some((
+        RecoveredProfileCurve::CircleArc {
+            source_edge_ids,
+            center_mm,
+            radius_mm: torus.minor_radius_mm,
+            start_angle_rad: *start_angle_rad,
+            end_angle_rad: *end_angle_rad,
+        },
+        max_residual_mm,
+    ))
+}
+
+fn torus_parallel_boundary_point(
+    circle: brep::CircleSupport,
+    torus: brep::TorusSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+) -> Option<([f64; 2], f64)> {
+    if !parallel(circle.normal, axis_direction) || circle.radius_mm <= GEOM_TOL_MM {
+        return None;
+    }
+    let axial = axial_coordinate(circle.center_mm, axis_origin_mm, axis_direction);
+    let radial = circle.radius_mm;
+    let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
+    let meridian_residual =
+        (((radial - torus.major_radius_mm).powi(2) + (axial - center_t).powi(2)).sqrt()
+            - torus.minor_radius_mm)
+            .abs();
+    let residual = axis_distance(circle.center_mm, axis_origin_mm, axis_direction)
+        .max(meridian_residual)
+        .max((norm(circle.normal) - 1.0).abs());
+    (residual <= GEOM_TOL_MM).then_some(([radial, axial], residual))
+}
+
+fn torus_meridian_circle_residual(
+    circle: brep::CircleSupport,
+    torus: brep::TorusSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+) -> Option<f64> {
+    let normal = normalize(circle.normal)?;
+    if dot(normal, axis_direction).abs() > DIR_TOL {
+        return None;
+    }
+    let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
+    let axis_point = add(axis_origin_mm, mul(axis_direction, center_t));
+    let plane_residual = dot(sub(axis_point, circle.center_mm), normal).abs();
+    let mut residual = (circle.radius_mm - torus.minor_radius_mm)
+        .abs()
+        .max((axial_coordinate(circle.center_mm, axis_origin_mm, axis_direction) - center_t).abs())
+        .max(
+            (point_axis_distance(circle.center_mm, axis_origin_mm, axis_direction)
+                - torus.major_radius_mm)
+                .abs(),
+        )
+        .max(plane_residual)
+        .max((norm(circle.normal) - 1.0).abs());
+
+    let x_direction = normalize(circle.x_direction)?;
+    if dot(x_direction, normal).abs() > DIR_TOL {
+        return None;
+    }
+    let y_direction = normalize(cross(normal, x_direction))?;
+    for sample in 0..16 {
+        let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+        let point = add(
+            circle.center_mm,
+            add(
+                mul(x_direction, circle.radius_mm * angle.cos()),
+                mul(y_direction, circle.radius_mm * angle.sin()),
+            ),
+        );
+        residual = residual.max(torus_point_residual(point, torus, axis_direction));
+    }
+    (residual <= GEOM_TOL_MM).then_some(residual)
+}
+
+fn circle_trim_midpoint(
+    edge: &brep::OrientedEdgeUse,
+    circle: brep::CircleSupport,
+) -> Option<[f64; 3]> {
+    let normal = normalize(circle.normal)?;
+    let x_direction = normalize(circle.x_direction)?;
+    if dot(normal, x_direction).abs() > DIR_TOL {
+        return None;
+    }
+    let y_direction = normalize(cross(normal, x_direction))?;
+    let parameter = |point: [f64; 3]| {
+        let relative = sub(point, circle.center_mm);
+        dot(relative, y_direction).atan2(dot(relative, x_direction))
+    };
+    let start = parameter(edge.start_mm);
+    let end = parameter(edge.end_mm);
+    let delta = if edge.parameter_forward {
+        positive_angle_delta(start, end)
+    } else {
+        -positive_angle_delta(end, start)
+    };
+    let angle_tol = (GEOM_TOL_MM / circle.radius_mm.max(GEOM_TOL_MM)).max(1.0e-12);
+    if delta.abs() <= angle_tol || (std::f64::consts::TAU - delta.abs()) <= angle_tol {
+        return None;
+    }
+    let midpoint = start + 0.5 * delta;
+    Some(add(
+        circle.center_mm,
+        add(
+            mul(x_direction, circle.radius_mm * midpoint.cos()),
+            mul(y_direction, circle.radius_mm * midpoint.sin()),
+        ),
+    ))
+}
+
+fn meridian_angle(point: [f64; 2], center: [f64; 2], radius: f64) -> Option<f64> {
+    if !point[0].is_finite()
+        || !point[1].is_finite()
+        || !radius.is_finite()
+        || radius <= GEOM_TOL_MM
+        || (distance2(point, center) - radius).abs() > GEOM_TOL_MM
+    {
+        return None;
+    }
+    Some((point[1] - center[1]).atan2(point[0] - center[0]))
+}
+
+fn positive_angle_delta(start: f64, end: f64) -> f64 {
+    (end - start).rem_euclid(std::f64::consts::TAU)
+}
+
+fn angle_on_arc(angle: f64, start: f64, end: f64, tolerance: f64) -> bool {
+    if end >= start {
+        positive_angle_delta(start, angle) <= end - start + tolerance
+    } else {
+        positive_angle_delta(angle, start) <= start - end + tolerance
+    }
+}
+
+fn push_unique_point(points: &mut Vec<[f64; 2]>, candidate: [f64; 2]) {
+    if !points
+        .iter()
+        .any(|point| distance2(*point, candidate) <= GEOM_TOL_MM)
+    {
+        points.push(candidate);
+    }
 }
 
 fn cylinder_profile_segment(
@@ -1654,6 +2072,381 @@ fn closed_profile_from_segments(mut segments: Vec<Segment2>) -> Option<Vec<[f64;
     Some(points)
 }
 
+fn closed_profile_from_curves(
+    mut curves: Vec<RecoveredProfileCurve>,
+) -> Option<Vec<RecoveredProfileCurve>> {
+    if curves.len() < 3
+        || curves
+            .iter()
+            .filter(|curve| matches!(curve, RecoveredProfileCurve::CircleArc { .. }))
+            .count()
+            != 1
+        || curves.iter().any(RecoveredProfileCurve::is_spline)
+    {
+        return None;
+    }
+
+    let mut nodes = Vec::<[f64; 2]>::new();
+    let mut edges = Vec::<(usize, usize, usize)>::new();
+    for (curve_index, curve) in curves.iter().enumerate() {
+        let start = curve.start_point()?;
+        let end = curve.end_point()?;
+        if start[0] < -GEOM_TOL_MM || end[0] < -GEOM_TOL_MM || distance2(start, end) <= GEOM_TOL_MM
+        {
+            return None;
+        }
+        let a = intern_point(&mut nodes, start);
+        let b = intern_point(&mut nodes, end);
+        if a == b {
+            return None;
+        }
+        edges.push((a, b, curve_index));
+    }
+
+    let degree_one = nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| curve_node_degree(*index, &edges) == 1)
+        .map(|(index, point)| (index, *point))
+        .collect::<Vec<_>>();
+    if !degree_one.is_empty() {
+        let [(first_index, first), (second_index, second)] = degree_one.as_slice() else {
+            return None;
+        };
+        if first[0].abs() > GEOM_TOL_MM
+            || second[0].abs() > GEOM_TOL_MM
+            || (first[1] - second[1]).abs() <= GEOM_TOL_MM
+        {
+            return None;
+        }
+        let curve_index = curves.len();
+        curves.push(RecoveredProfileCurve::Line {
+            source_edge_ids: Vec::new(),
+            start_mm: [0.0, first[1]],
+            end_mm: [0.0, second[1]],
+        });
+        edges.push((*first_index, *second_index, curve_index));
+    }
+
+    if edges.len() != nodes.len()
+        || nodes
+            .iter()
+            .enumerate()
+            .any(|(index, _)| curve_node_degree(index, &edges) != 2)
+    {
+        return None;
+    }
+
+    let start = (0..nodes.len()).min_by(|&a, &b| point_order(nodes[a], nodes[b]))?;
+    let mut incident = edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge_index, &(a, b, _))| {
+            if a == start {
+                Some((edge_index, b))
+            } else if b == start {
+                Some((edge_index, a))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    incident.sort_by(|(_, a), (_, b)| point_order(nodes[*a], nodes[*b]));
+    let &(first_edge, _) = incident.first()?;
+
+    let mut used = vec![false; edges.len()];
+    let mut ordered = Vec::<RecoveredProfileCurve>::with_capacity(edges.len());
+    let mut current = start;
+    let mut edge_index = first_edge;
+    loop {
+        if used[edge_index] {
+            return None;
+        }
+        used[edge_index] = true;
+        let (a, b, curve_index) = edges[edge_index];
+        let (next, curve) = if a == current {
+            (b, curves[curve_index].clone())
+        } else if b == current {
+            (a, curves[curve_index].reversed())
+        } else {
+            return None;
+        };
+        ordered.push(curve);
+        current = next;
+        if current == start {
+            break;
+        }
+        edge_index = edges
+            .iter()
+            .enumerate()
+            .find_map(|(candidate, &(ea, eb, _))| {
+                (!used[candidate] && (ea == current || eb == current)).then_some(candidate)
+            })?;
+        if ordered.len() > edges.len() {
+            return None;
+        }
+    }
+    if used.iter().any(|used| !used) || mixed_profile_self_intersects(&ordered) {
+        return None;
+    }
+
+    let area = signed_curve_area(&ordered)?;
+    if !area.is_finite() || area.abs() <= GEOM_TOL_MM * GEOM_TOL_MM {
+        return None;
+    }
+    if area < 0.0 {
+        ordered = ordered
+            .into_iter()
+            .rev()
+            .map(|curve| curve.reversed())
+            .collect();
+    }
+    rotate_curves_to_minimum(&mut ordered)?;
+    Some(ordered)
+}
+
+fn curve_node_degree(node: usize, edges: &[(usize, usize, usize)]) -> usize {
+    edges
+        .iter()
+        .filter(|&&(a, b, _)| a == node || b == node)
+        .count()
+}
+
+fn rotate_curves_to_minimum(curves: &mut [RecoveredProfileCurve]) -> Option<()> {
+    let index = (0..curves.len()).min_by(|&a, &b| {
+        let a = curves[a].start_point().unwrap_or([f64::INFINITY; 2]);
+        let b = curves[b].start_point().unwrap_or([f64::INFINITY; 2]);
+        point_order(a, b)
+    })?;
+    curves.rotate_left(index);
+    Some(())
+}
+
+fn mixed_profile_self_intersects(curves: &[RecoveredProfileCurve]) -> bool {
+    for first in 0..curves.len() {
+        for second in first + 1..curves.len() {
+            let adjacent = second == first + 1 || (first == 0 && second + 1 == curves.len());
+            match (&curves[first], &curves[second]) {
+                (
+                    RecoveredProfileCurve::Line {
+                        start_mm: a,
+                        end_mm: b,
+                        ..
+                    },
+                    RecoveredProfileCurve::Line {
+                        start_mm: c,
+                        end_mm: d,
+                        ..
+                    },
+                ) => {
+                    if line_pair_has_extra_intersection(*a, *b, *c, *d, adjacent) {
+                        return true;
+                    }
+                }
+                (RecoveredProfileCurve::Line { .. }, RecoveredProfileCurve::CircleArc { .. }) => {
+                    if line_arc_has_extra_intersection(&curves[first], &curves[second], adjacent) {
+                        return true;
+                    }
+                }
+                (RecoveredProfileCurve::CircleArc { .. }, RecoveredProfileCurve::Line { .. }) => {
+                    if line_arc_has_extra_intersection(&curves[second], &curves[first], adjacent) {
+                        return true;
+                    }
+                }
+                (
+                    RecoveredProfileCurve::CircleArc { .. },
+                    RecoveredProfileCurve::CircleArc { .. },
+                ) => {
+                    return true;
+                }
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
+fn line_pair_has_extra_intersection(
+    a: [f64; 2],
+    b: [f64; 2],
+    c: [f64; 2],
+    d: [f64; 2],
+    adjacent: bool,
+) -> bool {
+    if !segments_intersect(a, b, c, d) {
+        return false;
+    }
+    if !adjacent {
+        return true;
+    }
+
+    let shared = [a, b]
+        .into_iter()
+        .find(|point| distance2(*point, c) <= GEOM_TOL_MM || distance2(*point, d) <= GEOM_TOL_MM);
+    let Some(shared) = shared else {
+        return true;
+    };
+    let other_ab = if distance2(shared, a) <= GEOM_TOL_MM {
+        b
+    } else {
+        a
+    };
+    let other_cd = if distance2(shared, c) <= GEOM_TOL_MM {
+        d
+    } else {
+        c
+    };
+    let u = sub2(other_ab, shared);
+    let v = sub2(other_cd, shared);
+    let scale = (distance2(shared, other_ab) * distance2(shared, other_cd)).max(GEOM_TOL_MM);
+    cross2(u, v).abs() <= GEOM_TOL_MM * scale && dot2(u, v) > GEOM_TOL_MM.powi(2)
+}
+
+fn line_arc_has_extra_intersection(
+    line: &RecoveredProfileCurve,
+    arc: &RecoveredProfileCurve,
+    adjacent: bool,
+) -> bool {
+    let RecoveredProfileCurve::Line {
+        start_mm, end_mm, ..
+    } = line
+    else {
+        return true;
+    };
+    let RecoveredProfileCurve::CircleArc {
+        center_mm,
+        radius_mm,
+        start_angle_rad,
+        end_angle_rad,
+        ..
+    } = arc
+    else {
+        return true;
+    };
+
+    for point in line_arc_intersections(
+        *start_mm,
+        *end_mm,
+        *center_mm,
+        *radius_mm,
+        *start_angle_rad,
+        *end_angle_rad,
+    ) {
+        if !adjacent || !curve_shared_endpoint_at(line, arc, point) {
+            return true;
+        }
+    }
+    false
+}
+
+fn line_arc_intersections(
+    start: [f64; 2],
+    end: [f64; 2],
+    center: [f64; 2],
+    radius: f64,
+    arc_start: f64,
+    arc_end: f64,
+) -> Vec<[f64; 2]> {
+    let direction = sub2(end, start);
+    let offset = sub2(start, center);
+    let a = dot2(direction, direction);
+    if a <= GEOM_TOL_MM.powi(2) {
+        return Vec::new();
+    }
+    let b = 2.0 * dot2(offset, direction);
+    let c = dot2(offset, offset) - radius.powi(2);
+    let discriminant = b * b - 4.0 * a * c;
+    let discriminant_tol = GEOM_TOL_MM.powi(2) * (b.abs().max((4.0 * a * c).abs()).max(1.0));
+    if discriminant < -discriminant_tol {
+        return Vec::new();
+    }
+
+    let sqrt_discriminant = discriminant.max(0.0).sqrt();
+    let mut out = Vec::new();
+    for numerator in [-b - sqrt_discriminant, -b + sqrt_discriminant] {
+        let t = numerator / (2.0 * a);
+        let parameter_tol = GEOM_TOL_MM / a.sqrt();
+        if t < -parameter_tol || t > 1.0 + parameter_tol {
+            continue;
+        }
+        let point = [start[0] + t * direction[0], start[1] + t * direction[1]];
+        if point_on_arc(point, center, radius, arc_start, arc_end)
+            && !out
+                .iter()
+                .any(|existing| distance2(*existing, point) <= GEOM_TOL_MM)
+        {
+            out.push(point);
+        }
+    }
+    out
+}
+
+fn point_on_arc(point: [f64; 2], center: [f64; 2], radius: f64, start: f64, end: f64) -> bool {
+    if (distance2(point, center) - radius).abs() > GEOM_TOL_MM {
+        return false;
+    }
+    let angle = (point[1] - center[1]).atan2(point[0] - center[0]);
+    angle_on_arc(
+        angle,
+        start,
+        end,
+        (GEOM_TOL_MM / radius.max(GEOM_TOL_MM)).max(1.0e-12),
+    )
+}
+
+fn curve_shared_endpoint_at(
+    a: &RecoveredProfileCurve,
+    b: &RecoveredProfileCurve,
+    point: [f64; 2],
+) -> bool {
+    let Some(a_start) = a.start_point() else {
+        return false;
+    };
+    let Some(a_end) = a.end_point() else {
+        return false;
+    };
+    let Some(b_start) = b.start_point() else {
+        return false;
+    };
+    let Some(b_end) = b.end_point() else {
+        return false;
+    };
+    (distance2(point, a_start) <= GEOM_TOL_MM || distance2(point, a_end) <= GEOM_TOL_MM)
+        && (distance2(point, b_start) <= GEOM_TOL_MM || distance2(point, b_end) <= GEOM_TOL_MM)
+}
+
+fn dot2(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+fn signed_curve_area(curves: &[RecoveredProfileCurve]) -> Option<f64> {
+    let mut twice_area = 0.0_f64;
+    for curve in curves {
+        match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => {
+                twice_area += start_mm[0] * end_mm[1] - end_mm[0] * start_mm[1];
+            }
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } => {
+                let a = *start_angle_rad;
+                let b = *end_angle_rad;
+                twice_area += radius_mm * center_mm[0] * (b.sin() - a.sin())
+                    + radius_mm * center_mm[1] * (a.cos() - b.cos())
+                    + radius_mm.powi(2) * (b - a);
+            }
+            _ => return None,
+        }
+    }
+    Some(0.5 * twice_area)
+}
+
 fn line_profile_curves(points: &[[f64; 2]]) -> Vec<RecoveredProfileCurve> {
     (0..points.len())
         .map(|index| RecoveredProfileCurve::Line {
@@ -2172,6 +2965,270 @@ mod tests {
             index: &index,
         };
         assert!(detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none());
+    }
+
+    fn quarter_fillet_profile() -> Vec<RecoveredProfileCurve> {
+        vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, 1.0],
+                end_mm: [1.0, 1.0],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [1.0, 1.0],
+                end_mm: [1.0, 1.4],
+            },
+            RecoveredProfileCurve::CircleArc {
+                source_edge_ids: Vec::new(),
+                center_mm: [0.9, 1.4],
+                radius_mm: 0.1,
+                start_angle_rad: 0.0,
+                end_angle_rad: std::f64::consts::FRAC_PI_2,
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.9, 1.5],
+                end_mm: [0.0, 1.5],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, 1.5],
+                end_mm: [0.0, 1.0],
+            },
+        ]
+    }
+
+    #[test]
+    fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() {
+        let profile = quarter_fillet_profile();
+        let scrambled = vec![
+            profile[2].reversed(),
+            profile[4].clone(),
+            profile[1].clone(),
+            profile[3].reversed(),
+            profile[0].clone(),
+        ];
+        let ordered = closed_profile_from_curves(scrambled).unwrap();
+        assert_eq!(ordered.len(), 5);
+        assert!(matches!(
+            &ordered[2],
+            RecoveredProfileCurve::CircleArc {
+                center_mm: [0.9, 1.4],
+                radius_mm: 0.1,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } if start_angle_rad.abs() <= 1.0e-12
+                && (*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+        ));
+
+        let crossing = RecoveredProfileCurve::Line {
+            source_edge_ids: Vec::new(),
+            start_mm: [0.95, 1.2],
+            end_mm: [0.95, 1.6],
+        };
+        assert!(line_arc_has_extra_intersection(
+            &crossing,
+            &profile[2],
+            false
+        ));
+    }
+
+    fn split_quarter_torus_faces(torus_minor_radius_mm: f64) -> Vec<FaceInfo> {
+        let torus = brep::TorusSupport {
+            center_mm: [0.0, 0.0, 1.4],
+            axis: [0.0, 0.0, 1.0],
+            x_direction: [1.0, 0.0, 0.0],
+            major_radius_mm: 0.9,
+            minor_radius_mm: torus_minor_radius_mm,
+        };
+        let cylinder = brep::CylinderSupport {
+            axis_origin_mm: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            x_direction: [1.0, 0.0, 0.0],
+            radius_mm: 1.0,
+        };
+        let bottom_plane = brep::PlaneSupport {
+            origin_mm: [0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let top_plane = brep::PlaneSupport {
+            origin_mm: [0.0, 0.0, 1.5],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+
+        let top_a = test_circle_edge(
+            110,
+            [0.9, 0.0, 1.5],
+            [-0.9, 0.0, 1.5],
+            [0.0, 0.0, 1.5],
+            [0.0, 0.0, 1.0],
+            0.9,
+        );
+        let top_b = test_circle_edge(
+            111,
+            [-0.9, 0.0, 1.5],
+            [0.9, 0.0, 1.5],
+            [0.0, 0.0, 1.5],
+            [0.0, 0.0, 1.0],
+            0.9,
+        );
+        let side_a = test_circle_edge(
+            112,
+            [1.0, 0.0, 1.4],
+            [-1.0, 0.0, 1.4],
+            [0.0, 0.0, 1.4],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let side_b = test_circle_edge(
+            113,
+            [-1.0, 0.0, 1.4],
+            [1.0, 0.0, 1.4],
+            [0.0, 0.0, 1.4],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let bottom_a = test_circle_edge(
+            114,
+            [1.0, 0.0, 1.0],
+            [-1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let bottom_b = test_circle_edge(
+            115,
+            [-1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let torus_seam_positive = test_circle_edge(
+            116,
+            [0.9, 0.0, 1.5],
+            [1.0, 0.0, 1.4],
+            [0.9, 0.0, 1.4],
+            [0.0, 1.0, 0.0],
+            0.1,
+        );
+        let torus_seam_negative = test_circle_edge(
+            117,
+            [-0.9, 0.0, 1.5],
+            [-1.0, 0.0, 1.4],
+            [-0.9, 0.0, 1.4],
+            [0.0, -1.0, 0.0],
+            0.1,
+        );
+        let cylinder_seam_positive = test_line_edge(118, [1.0, 0.0, 1.0], [1.0, 0.0, 1.4]);
+        let cylinder_seam_negative = test_line_edge(119, [-1.0, 0.0, 1.0], [-1.0, 0.0, 1.4]);
+
+        vec![
+            test_face(
+                SurfaceSupport::Torus(torus),
+                vec![
+                    top_a.clone(),
+                    torus_seam_positive.clone(),
+                    side_a.clone(),
+                    torus_seam_negative.clone(),
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Torus(torus),
+                vec![
+                    top_b.clone(),
+                    torus_seam_positive,
+                    side_b.clone(),
+                    torus_seam_negative,
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Cylinder(cylinder),
+                vec![
+                    bottom_a.clone(),
+                    cylinder_seam_positive.clone(),
+                    side_a,
+                    cylinder_seam_negative.clone(),
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Cylinder(cylinder),
+                vec![
+                    bottom_b.clone(),
+                    cylinder_seam_positive,
+                    side_b,
+                    cylinder_seam_negative,
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Plane(bottom_plane),
+                vec![bottom_a, bottom_b],
+            ),
+            test_face(SurfaceSupport::Plane(top_plane), vec![top_a, top_b]),
+        ]
+    }
+
+    #[test]
+    fn recovers_split_quarter_torus_fillet_topology() {
+        let faces = split_quarter_torus_faces(0.1);
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        let recovered =
+            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &faces, &context).unwrap();
+        assert_eq!(recovered.profile_curves.len(), 5);
+        assert!(recovered.profile_curves.iter().any(|curve| matches!(
+            curve,
+            RecoveredProfileCurve::CircleArc {
+                center_mm: [0.9, 1.4],
+                radius_mm: 0.1,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } if start_angle_rad.abs() <= 1.0e-12
+                && (*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+        )));
+
+        let mut spindle = split_quarter_torus_faces(0.1);
+        for face in spindle.iter_mut().take(2) {
+            let SurfaceSupport::Torus(mut torus) = face.surface else {
+                panic!("expected torus test face");
+            };
+            torus.major_radius_mm = 0.05;
+            face.surface = SurfaceSupport::Torus(torus);
+        }
+        let edge_faces = edge_face_map(&spindle);
+        let context = TopologyContext {
+            faces: &spindle,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(
+            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).is_none()
+        );
+
+        let tampered = split_quarter_torus_faces(0.11);
+        let edge_faces = edge_face_map(&tampered);
+        let context = TopologyContext {
+            faces: &tampered,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(
+            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &tampered, &context).is_none()
+        );
     }
 
     #[test]
