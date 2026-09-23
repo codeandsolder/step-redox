@@ -1083,24 +1083,20 @@ fn detect_mixed_torus_revolution(
         }
     }
 
-    // Start with one curved support in the profile. This covers the dominant
-    // torus-fillet clusters while keeping arc/arc intersections fail-closed.
-    let [group] = groups.as_slice() else {
-        return None;
-    };
-    let [torus] = supports.as_slice() else {
-        return None;
-    };
-    let (arc, residual) = torus_profile_arc(
-        group,
-        *torus,
-        axis_origin_mm,
-        axis_direction,
-        faces,
-        context.edge_faces,
-    )?;
-    max_residual_mm = max_residual_mm.max(residual);
-    if max_residual_mm > GEOM_TOL_MM {
+    let mut arcs = Vec::with_capacity(groups.len());
+    for (group, torus) in groups.iter().zip(&supports) {
+        let (arc, residual) = torus_profile_arc(
+            group,
+            *torus,
+            axis_origin_mm,
+            axis_direction,
+            faces,
+            context.edge_faces,
+        )?;
+        max_residual_mm = max_residual_mm.max(residual);
+        arcs.push(arc);
+    }
+    if arcs.is_empty() || max_residual_mm > GEOM_TOL_MM {
         return None;
     }
 
@@ -1112,7 +1108,7 @@ fn detect_mixed_torus_revolution(
             end_mm: segment.b,
         })
         .collect::<Vec<_>>();
-    curves.push(arc);
+    curves.extend(arcs);
     let profile_curves = closed_profile_from_curves(curves)?;
     Some(RecoveredSolidRevolution {
         solid_id,
@@ -2075,14 +2071,7 @@ fn closed_profile_from_segments(mut segments: Vec<Segment2>) -> Option<Vec<[f64;
 fn closed_profile_from_curves(
     mut curves: Vec<RecoveredProfileCurve>,
 ) -> Option<Vec<RecoveredProfileCurve>> {
-    if curves.len() < 3
-        || curves
-            .iter()
-            .filter(|curve| matches!(curve, RecoveredProfileCurve::CircleArc { .. }))
-            .count()
-            != 1
-        || curves.iter().any(RecoveredProfileCurve::is_spline)
-    {
+    if curves.len() < 3 || curves.iter().any(RecoveredProfileCurve::is_spline) {
         return None;
     }
 
@@ -2257,7 +2246,9 @@ fn mixed_profile_self_intersects(curves: &[RecoveredProfileCurve]) -> bool {
                     RecoveredProfileCurve::CircleArc { .. },
                     RecoveredProfileCurve::CircleArc { .. },
                 ) => {
-                    return true;
+                    if arc_pair_has_extra_intersection(&curves[first], &curves[second], adjacent) {
+                        return true;
+                    }
                 }
                 _ => return true,
             }
@@ -2339,6 +2330,140 @@ fn line_arc_has_extra_intersection(
     false
 }
 
+fn arc_pair_has_extra_intersection(
+    first: &RecoveredProfileCurve,
+    second: &RecoveredProfileCurve,
+    adjacent: bool,
+) -> bool {
+    let (
+        RecoveredProfileCurve::CircleArc {
+            center_mm: first_center,
+            radius_mm: first_radius,
+            start_angle_rad: first_start,
+            end_angle_rad: first_end,
+            ..
+        },
+        RecoveredProfileCurve::CircleArc {
+            center_mm: second_center,
+            radius_mm: second_radius,
+            start_angle_rad: second_start,
+            end_angle_rad: second_end,
+            ..
+        },
+    ) = (first, second)
+    else {
+        return true;
+    };
+    if !first_radius.is_finite()
+        || !second_radius.is_finite()
+        || *first_radius <= GEOM_TOL_MM
+        || *second_radius <= GEOM_TOL_MM
+    {
+        return true;
+    }
+
+    let center_distance = distance2(*first_center, *second_center);
+    if center_distance <= GEOM_TOL_MM && (*first_radius - *second_radius).abs() <= GEOM_TOL_MM {
+        let mut shared_endpoints = Vec::<[f64; 2]>::new();
+        for point in [
+            first.start_point(),
+            first.end_point(),
+            second.start_point(),
+            second.end_point(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if point_on_arc(
+                point,
+                *first_center,
+                *first_radius,
+                *first_start,
+                *first_end,
+            ) && point_on_arc(
+                point,
+                *second_center,
+                *second_radius,
+                *second_start,
+                *second_end,
+            ) && !shared_endpoints
+                .iter()
+                .any(|existing| distance2(*existing, point) <= GEOM_TOL_MM)
+            {
+                shared_endpoints.push(point);
+            }
+        }
+        return !adjacent
+            || shared_endpoints.len() != 1
+            || !curve_shared_endpoint_at(first, second, shared_endpoints[0]);
+    }
+
+    for point in
+        circle_circle_intersections(*first_center, *first_radius, *second_center, *second_radius)
+    {
+        if !point_on_arc(
+            point,
+            *first_center,
+            *first_radius,
+            *first_start,
+            *first_end,
+        ) || !point_on_arc(
+            point,
+            *second_center,
+            *second_radius,
+            *second_start,
+            *second_end,
+        ) {
+            continue;
+        }
+        if !adjacent || !curve_shared_endpoint_at(first, second, point) {
+            return true;
+        }
+    }
+    false
+}
+
+fn circle_circle_intersections(
+    first_center: [f64; 2],
+    first_radius: f64,
+    second_center: [f64; 2],
+    second_radius: f64,
+) -> Vec<[f64; 2]> {
+    let delta = sub2(second_center, first_center);
+    let distance = norm2(delta);
+    if !distance.is_finite()
+        || distance <= GEOM_TOL_MM
+        || distance > first_radius + second_radius + GEOM_TOL_MM
+        || distance < (first_radius - second_radius).abs() - GEOM_TOL_MM
+    {
+        return Vec::new();
+    }
+
+    let along =
+        (first_radius.powi(2) - second_radius.powi(2) + distance.powi(2)) / (2.0 * distance);
+    let height_sq = first_radius.powi(2) - along.powi(2);
+    let scale = first_radius
+        .abs()
+        .max(second_radius.abs())
+        .max(distance)
+        .max(1.0);
+    let height_tol = GEOM_TOL_MM * scale;
+    if height_sq < -height_tol {
+        return Vec::new();
+    }
+
+    let unit = mul2(delta, 1.0 / distance);
+    let base = add2(first_center, mul2(unit, along));
+    let height = height_sq.max(0.0).sqrt();
+    let perpendicular = [-unit[1], unit[0]];
+    let first = add2(base, mul2(perpendicular, height));
+    if height <= GEOM_TOL_MM {
+        return vec![first];
+    }
+    let second = add2(base, mul2(perpendicular, -height));
+    vec![first, second]
+}
+
 fn line_arc_intersections(
     start: [f64; 2],
     end: [f64; 2],
@@ -2413,6 +2538,18 @@ fn curve_shared_endpoint_at(
     };
     (distance2(point, a_start) <= GEOM_TOL_MM || distance2(point, a_end) <= GEOM_TOL_MM)
         && (distance2(point, b_start) <= GEOM_TOL_MM || distance2(point, b_end) <= GEOM_TOL_MM)
+}
+
+fn add2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+fn mul2(a: [f64; 2], factor: f64) -> [f64; 2] {
+    [a[0] * factor, a[1] * factor]
+}
+
+fn norm2(a: [f64; 2]) -> f64 {
+    dot2(a, a).sqrt()
 }
 
 fn dot2(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -3032,6 +3169,124 @@ mod tests {
             &crossing,
             &profile[2],
             false
+        ));
+    }
+
+    #[test]
+    fn orders_two_arc_profile_and_rejects_arc_crossings() {
+        let profile = vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, 0.0],
+                end_mm: [0.9, 0.0],
+            },
+            RecoveredProfileCurve::CircleArc {
+                source_edge_ids: Vec::new(),
+                center_mm: [0.9, 0.1],
+                radius_mm: 0.1,
+                start_angle_rad: -std::f64::consts::FRAC_PI_2,
+                end_angle_rad: 0.0,
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [1.0, 0.1],
+                end_mm: [1.0, 0.9],
+            },
+            RecoveredProfileCurve::CircleArc {
+                source_edge_ids: Vec::new(),
+                center_mm: [0.9, 0.9],
+                radius_mm: 0.1,
+                start_angle_rad: 0.0,
+                end_angle_rad: std::f64::consts::FRAC_PI_2,
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.9, 1.0],
+                end_mm: [0.0, 1.0],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, 1.0],
+                end_mm: [0.0, 0.0],
+            },
+        ];
+        let scrambled = vec![
+            profile[3].reversed(),
+            profile[0].clone(),
+            profile[5].clone(),
+            profile[2].reversed(),
+            profile[4].clone(),
+            profile[1].clone(),
+        ];
+        let ordered = closed_profile_from_curves(scrambled).unwrap();
+        assert_eq!(ordered.len(), 6);
+        assert_eq!(
+            ordered
+                .iter()
+                .filter(|curve| matches!(curve, RecoveredProfileCurve::CircleArc { .. }))
+                .count(),
+            2
+        );
+        assert!(!mixed_profile_self_intersects(&ordered));
+
+        let first = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [0.0, 0.0],
+            radius_mm: 1.0,
+            start_angle_rad: 0.0,
+            end_angle_rad: std::f64::consts::PI,
+        };
+        let crossing = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [1.0, 0.0],
+            radius_mm: 1.0,
+            start_angle_rad: std::f64::consts::FRAC_PI_2,
+            end_angle_rad: 3.0 * std::f64::consts::FRAC_PI_2,
+        };
+        assert!(arc_pair_has_extra_intersection(&first, &crossing, false));
+
+        let tangent_a = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [0.0, 0.0],
+            radius_mm: 1.0,
+            start_angle_rad: 0.0,
+            end_angle_rad: std::f64::consts::FRAC_PI_2,
+        };
+        let tangent_b = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [0.0, 2.0],
+            radius_mm: 1.0,
+            start_angle_rad: -std::f64::consts::FRAC_PI_2,
+            end_angle_rad: 0.0,
+        };
+        assert!(!arc_pair_has_extra_intersection(
+            &tangent_a, &tangent_b, true
+        ));
+
+        let coincident_adjacent = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [0.0, 0.0],
+            radius_mm: 1.0,
+            start_angle_rad: std::f64::consts::FRAC_PI_2,
+            end_angle_rad: std::f64::consts::PI,
+        };
+        assert!(!arc_pair_has_extra_intersection(
+            &tangent_a,
+            &coincident_adjacent,
+            true
+        ));
+
+        let coincident_overlap = RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [0.0, 0.0],
+            radius_mm: 1.0,
+            start_angle_rad: std::f64::consts::FRAC_PI_4,
+            end_angle_rad: std::f64::consts::PI,
+        };
+        assert!(arc_pair_has_extra_intersection(
+            &tangent_a,
+            &coincident_overlap,
+            true
         ));
     }
 
