@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -60,6 +61,24 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
     expected = spec["sha256"].lower()
     if path.exists() and sha256_file(path) == expected:
         return path
+
+    bundled_gzip = spec.get("bundled_gzip")
+    if bundled_gzip:
+        bundled_path = Path(__file__).resolve().parent / bundled_gzip
+        if bundled_path.exists():
+            tmp = path.with_suffix(path.suffix + ".part")
+            tmp.unlink(missing_ok=True)
+            with gzip.open(bundled_path, "rb") as src, tmp.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            got = sha256_file(tmp)
+            if got != expected:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"fixture {name}: bundled SHA-256 mismatch: "
+                    f"expected {expected}, got {got}"
+                )
+            os.replace(tmp, path)
+            return path
 
     archive_kind = spec.get("archive")
     if archive_kind:
