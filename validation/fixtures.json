@@ -45,6 +45,7 @@
     },
     "te_3_353293_4": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4",
+      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4"],
       "archive": "zip",
       "archive_filename": "te-3-353293-4.zip",
       "archive_sha256": "b030e5430fdd3536e84bdfcd5e82f729c137b9e89b2f61ef938cd8fd89123d13",
@@ -70,6 +71,7 @@
     },
     "te_3_353293_5": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5",
+      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5"],
       "archive": "zip",
       "archive_filename": "te-3-353293-5.zip",
       "archive_sha256": "9b22d82552cfa8122eea505d85d4273a344d24fb9dcaccfba0f2800a26e7c88d",
@@ -95,6 +97,7 @@
     },
     "te_3_353293_8": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8",
+      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8"],
       "archive": "zip",
       "archive_filename": "te-3-353293-8.zip",
       "archive_sha256": "6c68c71f591ec57812ff57705cbf3a20bddaa3dbf3a5506840bf06cbfd3fb7f1",
@@ -120,6 +123,7 @@
     },
     "te_dsub_9_t2111092004_000": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000",
+      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000"],
       "archive": "zip",
       "archive_filename": "te-T2111092004-000.zip",
       "archive_sha256": "bc95ffeebb96b07eb4a9c1c0e1acd4fa4a66c0e096c2dd7cc8f3eeb989700656",
@@ -131,6 +135,7 @@
     },
     "te_2513069_1_heavy": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_2513069-1&DocType=Customer+View+Model&PartCntxt=2513069-1",
+      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_2513069-1&DocType=Customer+View+Model&PartCntxt=2513069-1"],
       "archive": "zip",
       "archive_filename": "te-2513069-1.zip",
       "archive_sha256": "e5ea35357c10192b96eb254c57deb8d3b2f316df3179d0030b60c1f03987f8e1",

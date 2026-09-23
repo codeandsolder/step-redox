@@ -54,6 +54,40 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def download_verified(
+    name: str,
+    urls: list[str],
+    tmp: Path,
+    expected: str,
+    label: str,
+) -> None:
+    errors = []
+    for url in urls:
+        tmp.unlink(missing_ok=True)
+        try:
+            req = Request(
+                url,
+                headers={"User-Agent": "step-redox-validation/0.1"},
+            )
+            with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
+                shutil.copyfileobj(response, out, length=1024 * 1024)
+            if expected:
+                got = sha256_file(tmp)
+                if got != expected:
+                    raise RuntimeError(
+                        f"{label} SHA-256 mismatch from {url}: "
+                        f"expected {expected}, got {got}"
+                    )
+            return
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {exc}")
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"fixture {name}: all {label} download URLs failed: "
+        + " | ".join(errors)
+    )
+
+
 def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     filename = spec.get("filename") or f"{name}.step"
@@ -91,21 +125,8 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
             archive_ok = sha256_file(archive_path) == archive_expected
         if not archive_ok:
             tmp = archive_path.with_suffix(archive_path.suffix + ".part")
-            tmp.unlink(missing_ok=True)
-            req = Request(
-                spec["url"],
-                headers={"User-Agent": "step-redox-validation/0.1"},
-            )
-            with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 1024)
-            if archive_expected:
-                got = sha256_file(tmp)
-                if got != archive_expected:
-                    tmp.unlink(missing_ok=True)
-                    raise RuntimeError(
-                        f"fixture {name}: archive SHA-256 mismatch: "
-                        f"expected {archive_expected}, got {got}"
-                    )
+            urls = [spec["url"], *spec.get("fallback_urls", [])]
+            download_verified(name, urls, tmp, archive_expected, "archive")
             os.replace(tmp, archive_path)
 
         if archive_kind != "zip":
@@ -127,16 +148,8 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
         return path
 
     tmp = path.with_suffix(path.suffix + ".part")
-    tmp.unlink(missing_ok=True)
-    req = Request(spec["url"], headers={"User-Agent": "step-redox-validation/0.1"})
-    with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
-        shutil.copyfileobj(response, out, length=1024 * 1024)
-    got = sha256_file(tmp)
-    if got != expected:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"fixture {name}: SHA-256 mismatch: expected {expected}, got {got}"
-        )
+    urls = [spec["url"], *spec.get("fallback_urls", [])]
+    download_verified(name, urls, tmp, expected, "STEP")
     os.replace(tmp, path)
     return path
 
