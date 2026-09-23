@@ -225,12 +225,35 @@ pub fn detect_formed_sheet_evidence_bytes(
         .collect())
 }
 
+/// Report per-solid analytic surface and loop-topology signatures.
+///
+/// This is diagnostic evidence for recovery work: it does not claim that a
+/// constructive solid has been proven. It is intentionally deterministic so
+/// corpus censuses can be compared across detector revisions.
+pub fn detect_solid_surface_signatures_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_revolutions::SolidSurfaceSignature>> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_revolutions::detect_solid_surface_signatures(&section.entities))
+        .collect())
+}
+
 /// Detect proven full-turn axisymmetric solid grammars in a STEP exchange.
 ///
-/// The current pass is intentionally strict: accepted solids are closed two-manifold
-/// lathes whose meridian is a non-self-intersecting axis-aligned polygon and whose
-/// faces are coaxial cylinders plus axis-normal planar disks/annuli. Planar B-spline
-/// supports are accepted only when their complete control net proves coplanarity.
+/// The current pass is intentionally strict and fail-closed. It accepts proven
+/// linear-meridian lathes plus narrowly proven analytic torus and spherical-cap
+/// grammars; unsupported curved-meridian combinations remain unrecovered.
 pub fn detect_solid_revolutions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::RecoveredSolidRevolution>> {

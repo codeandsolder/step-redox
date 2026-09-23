@@ -3,7 +3,7 @@ use crate::instances::{build_index, entity_id, simple_record};
 use crate::profile_curves::RecoveredProfileCurve;
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const GEOM_TOL_MM: f64 = 1.0e-7;
 const DIR_TOL: f64 = 1.0e-9;
@@ -21,6 +21,76 @@ pub struct RecoveredSolidRevolution {
     /// Deterministic local +X radial direction, perpendicular to the axis.
     pub radial_direction: [f64; 3],
     pub max_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SolidSurfaceSignature {
+    pub solid_id: u64,
+    pub face_count: usize,
+    pub support_counts: BTreeMap<String, usize>,
+    pub faces: Vec<SolidFaceSignature>,
+    pub unique_edge_count: usize,
+    pub edge_use_count: usize,
+    pub closed_two_manifold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SolidFaceSignature {
+    pub face_id: u64,
+    pub support: String,
+    pub geometry: SolidSurfaceGeometrySignature,
+    pub loops: Vec<SolidLoopSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SolidSurfaceGeometrySignature {
+    Plane {
+        origin_mm: [f64; 3],
+        normal: [f64; 3],
+        max_residual_mm: f64,
+    },
+    Cylinder {
+        axis_origin_mm: [f64; 3],
+        axis: [f64; 3],
+        radius_mm: f64,
+    },
+    Cone {
+        reference_origin_mm: [f64; 3],
+        axis: [f64; 3],
+        reference_radius_mm: f64,
+        semi_angle_rad: f64,
+    },
+    Sphere {
+        center_mm: [f64; 3],
+        axis: [f64; 3],
+        radius_mm: f64,
+    },
+    Torus {
+        center_mm: [f64; 3],
+        axis: [f64; 3],
+        major_radius_mm: f64,
+        minor_radius_mm: f64,
+    },
+    Revolution {
+        axis_origin_mm: [f64; 3],
+        axis: [f64; 3],
+        swept_curve_id: u64,
+    },
+    SplineExtrusion {
+        extrusion_mm: [f64; 3],
+        max_residual_mm: f64,
+    },
+    Other {
+        entity_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SolidLoopSignature {
+    pub outer: bool,
+    pub edge_count: usize,
+    pub curve_counts: BTreeMap<String, usize>,
 }
 
 impl RecoveredSolidRevolution {
@@ -76,6 +146,85 @@ struct TopologyContext<'a> {
     edge_faces: &'a HashMap<u64, Vec<usize>>,
     entities: &'a [EntityInstance],
     index: &'a HashMap<u64, usize>,
+}
+
+pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<SolidSurfaceSignature> {
+    let index = build_index(entities);
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        let Some(face_ids) = brep::solid_face_ids(solid_id, entities, &index) else {
+            continue;
+        };
+        let Some(faces) = face_ids
+            .iter()
+            .copied()
+            .map(|face_id| {
+                let surface_id = brep::face_surface(face_id, entities, &index)?;
+                let surface = brep::surface_support(surface_id, entities, &index);
+                let loops = brep::face_loops(face_id, entities, &index)?;
+                Some((face_id, surface, loops))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+
+        let mut support_counts = BTreeMap::new();
+        let mut signatures = Vec::with_capacity(faces.len());
+        let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+        let mut unique_edges = HashSet::new();
+        let mut edge_use_count = 0_usize;
+        for (face_index, (face_id, surface, loops)) in faces.iter().enumerate() {
+            let support = surface_kind(surface).to_owned();
+            *support_counts.entry(support.clone()).or_insert(0) += 1;
+            let loop_signatures = loops
+                .iter()
+                .map(|loop_| {
+                    let mut curve_counts = BTreeMap::new();
+                    for edge in &loop_.edges {
+                        unique_edges.insert(edge.edge_id);
+                        edge_faces.entry(edge.edge_id).or_default().push(face_index);
+                        edge_use_count += 1;
+                        *curve_counts
+                            .entry(curve_kind(&edge.support).to_owned())
+                            .or_insert(0) += 1;
+                    }
+                    SolidLoopSignature {
+                        outer: loop_.outer,
+                        edge_count: loop_.edges.len(),
+                        curve_counts,
+                    }
+                })
+                .collect();
+            signatures.push(SolidFaceSignature {
+                face_id: *face_id,
+                support,
+                geometry: surface_geometry(surface),
+                loops: loop_signatures,
+            });
+        }
+
+        let closed_two_manifold = edge_faces.values().all(|attached| attached.len() == 2)
+            && shell_faces_connected(faces.len(), &edge_faces);
+        out.push(SolidSurfaceSignature {
+            solid_id,
+            face_count: face_ids.len(),
+            support_counts,
+            faces: signatures,
+            unique_edge_count: unique_edges.len(),
+            edge_use_count,
+            closed_two_manifold,
+        });
+    }
+    out.sort_by_key(|signature| signature.solid_id);
+    out
 }
 
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
@@ -134,12 +283,21 @@ fn detect_one_solid(
     {
         return None;
     }
+    let context = TopologyContext {
+        faces: &faces,
+        edge_faces: &edge_faces,
+        entities,
+        index,
+    };
 
     if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, &faces) {
         return Some(torus);
     }
     if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, &faces) {
         return Some(cap);
+    }
+    if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, &faces, &context) {
+        return Some(end);
     }
     if face_ids.len() < 3 {
         return None;
@@ -158,12 +316,6 @@ fn detect_one_solid(
     let axis_origin_mm =
         closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
-    let context = TopologyContext {
-        faces: &faces,
-        edge_faces: &edge_faces,
-        entities,
-        index,
-    };
 
     let mut max_residual_mm = 0.0_f64;
     let mut segments = Vec::new();
@@ -223,6 +375,72 @@ fn detect_one_solid(
         radial_direction,
         max_residual_mm,
     })
+}
+
+fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
+    match surface {
+        SurfaceSupport::Plane(plane) => SolidSurfaceGeometrySignature::Plane {
+            origin_mm: plane.origin_mm,
+            normal: plane.normal,
+            max_residual_mm: plane.max_residual_mm,
+        },
+        SurfaceSupport::Cylinder(cylinder) => SolidSurfaceGeometrySignature::Cylinder {
+            axis_origin_mm: cylinder.axis_origin_mm,
+            axis: cylinder.axis,
+            radius_mm: cylinder.radius_mm,
+        },
+        SurfaceSupport::Cone(cone) => SolidSurfaceGeometrySignature::Cone {
+            reference_origin_mm: cone.reference_origin_mm,
+            axis: cone.axis,
+            reference_radius_mm: cone.reference_radius_mm,
+            semi_angle_rad: cone.semi_angle_rad,
+        },
+        SurfaceSupport::Sphere(sphere) => SolidSurfaceGeometrySignature::Sphere {
+            center_mm: sphere.center_mm,
+            axis: sphere.axis,
+            radius_mm: sphere.radius_mm,
+        },
+        SurfaceSupport::Torus(torus) => SolidSurfaceGeometrySignature::Torus {
+            center_mm: torus.center_mm,
+            axis: torus.axis,
+            major_radius_mm: torus.major_radius_mm,
+            minor_radius_mm: torus.minor_radius_mm,
+        },
+        SurfaceSupport::Revolution(revolution) => SolidSurfaceGeometrySignature::Revolution {
+            axis_origin_mm: revolution.axis_origin_mm,
+            axis: revolution.axis,
+            swept_curve_id: revolution.swept_curve_id,
+        },
+        SurfaceSupport::SplineExtrusion(spline) => SolidSurfaceGeometrySignature::SplineExtrusion {
+            extrusion_mm: spline.extrusion_mm,
+            max_residual_mm: spline.max_residual_mm,
+        },
+        SurfaceSupport::Other { entity_id } => SolidSurfaceGeometrySignature::Other {
+            entity_id: *entity_id,
+        },
+    }
+}
+
+fn curve_kind(curve: &CurveSupport) -> &'static str {
+    match curve {
+        CurveSupport::Line(_) => "line",
+        CurveSupport::Circle(_) => "circle",
+        CurveSupport::BSpline(_) => "bspline",
+        CurveSupport::Other { .. } => "other",
+    }
+}
+
+fn surface_kind(surface: &SurfaceSupport) -> &'static str {
+    match surface {
+        SurfaceSupport::Plane(_) => "plane",
+        SurfaceSupport::Cylinder(_) => "cylinder",
+        SurfaceSupport::Cone(_) => "cone",
+        SurfaceSupport::Sphere(_) => "sphere",
+        SurfaceSupport::Torus(_) => "torus",
+        SurfaceSupport::Revolution(_) => "surface_of_revolution",
+        SurfaceSupport::SplineExtrusion(_) => "spline_extrusion",
+        SurfaceSupport::Other { .. } => "other",
+    }
 }
 
 fn detect_full_ring_torus(
@@ -453,6 +671,286 @@ fn detect_spherical_cap(
                 radius_mm: first_sphere.radius_mm,
                 start_angle_rad: cap_angle,
                 end_angle_rad: pole_angle,
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, pole_t],
+                end_mm: [0.0, plane_t],
+            },
+        ],
+        axis_origin_mm,
+        axis_direction,
+        radial_direction,
+        max_residual_mm,
+    })
+}
+
+fn detect_hemispherical_end(
+    solid_id: u64,
+    face_ids: &[u64],
+    faces: &[FaceInfo],
+    context: &TopologyContext<'_>,
+) -> Option<RecoveredSolidRevolution> {
+    if faces.len() != 5 {
+        return None;
+    }
+
+    let mut sphere_faces = Vec::new();
+    let mut cylinder_faces = Vec::new();
+    let mut plane_face = None;
+    for (face_index, face) in faces.iter().enumerate() {
+        match face.surface {
+            SurfaceSupport::Sphere(sphere) => sphere_faces.push((face_index, face, sphere)),
+            SurfaceSupport::Cylinder(cylinder) => {
+                cylinder_faces.push((face_index, face, cylinder));
+            }
+            SurfaceSupport::Plane(plane) if plane_face.is_none() => {
+                plane_face = Some((face_index, face, plane));
+            }
+            _ => return None,
+        }
+    }
+    let [
+        (sphere_index_a, sphere_face_a, first_sphere),
+        (sphere_index_b, sphere_face_b, sphere_b),
+    ] = sphere_faces.as_slice()
+    else {
+        return None;
+    };
+    let [
+        (cylinder_index_a, cylinder_face_a, first_cylinder),
+        (cylinder_index_b, cylinder_face_b, cylinder_b),
+    ] = cylinder_faces.as_slice()
+    else {
+        return None;
+    };
+    let (plane_index, plane_face, plane) = plane_face?;
+
+    if !first_sphere.radius_mm.is_finite()
+        || first_sphere.radius_mm <= GEOM_TOL_MM
+        || !first_cylinder.radius_mm.is_finite()
+        || first_cylinder.radius_mm <= GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let axis_direction = canonical_axis(normalize(first_cylinder.axis)?);
+    let axis_origin_mm =
+        closest_axis_point_to_global_origin(first_sphere.center_mm, axis_direction);
+    let radial_direction = radial_basis(axis_direction)?;
+    let center_t = axial_coordinate(first_sphere.center_mm, axis_origin_mm, axis_direction);
+    let plane_t = axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction);
+    if (plane_t - center_t).abs() <= GEOM_TOL_MM || !parallel(plane.normal, axis_direction) {
+        return None;
+    }
+
+    let radius_mm = first_sphere.radius_mm;
+    let mut max_residual_mm = plane
+        .max_residual_mm
+        .max((first_cylinder.radius_mm - radius_mm).abs())
+        .max(norm(sub(sphere_b.center_mm, first_sphere.center_mm)))
+        .max((sphere_b.radius_mm - radius_mm).abs())
+        .max(axis_distance(
+            first_sphere.center_mm,
+            axis_origin_mm,
+            axis_direction,
+        ))
+        .max(axis_distance(
+            first_cylinder.axis_origin_mm,
+            axis_origin_mm,
+            axis_direction,
+        ))
+        .max(axis_distance(
+            cylinder_b.axis_origin_mm,
+            axis_origin_mm,
+            axis_direction,
+        ))
+        .max((cylinder_b.radius_mm - radius_mm).abs());
+    if !parallel(first_cylinder.axis, axis_direction)
+        || !parallel(cylinder_b.axis, axis_direction)
+        || max_residual_mm > GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let (plane_segment, plane_residual) = plane_profile_segment(
+        plane_index,
+        plane_face,
+        plane,
+        axis_origin_mm,
+        axis_direction,
+        context,
+    )?;
+    max_residual_mm = max_residual_mm.max(plane_residual);
+    let plane_radii = [plane_segment.a[0], plane_segment.b[0]];
+    if (plane_segment.a[1] - plane_t).abs() > GEOM_TOL_MM
+        || (plane_segment.b[1] - plane_t).abs() > GEOM_TOL_MM
+        || !plane_radii.iter().any(|radius| radius.abs() <= GEOM_TOL_MM)
+        || !plane_radii
+            .iter()
+            .any(|radius| (*radius - radius_mm).abs() <= GEOM_TOL_MM)
+    {
+        return None;
+    }
+
+    for (face_index, face, cylinder) in [
+        (*cylinder_index_a, *cylinder_face_a, *first_cylinder),
+        (*cylinder_index_b, *cylinder_face_b, *cylinder_b),
+    ] {
+        let (segment, residual) = cylinder_profile_segment(
+            face_index,
+            face,
+            cylinder,
+            axis_origin_mm,
+            axis_direction,
+            faces,
+            context.edge_faces,
+        )?;
+        max_residual_mm = max_residual_mm.max(residual);
+        let axial = [segment.a[1], segment.b[1]];
+        if (segment.a[0] - radius_mm).abs() > GEOM_TOL_MM
+            || (segment.b[0] - radius_mm).abs() > GEOM_TOL_MM
+            || !axial
+                .iter()
+                .any(|value| (*value - center_t).abs() <= GEOM_TOL_MM)
+            || !axial
+                .iter()
+                .any(|value| (*value - plane_t).abs() <= GEOM_TOL_MM)
+        {
+            return None;
+        }
+    }
+
+    let plane_side = if plane_t > center_t { 1_i8 } else { -1_i8 };
+    let sphere_side = -plane_side;
+    let pole_t = center_t + f64::from(sphere_side) * radius_mm;
+    let mut reached_pole = false;
+    let mut sphere_cylinder_edges = 0_usize;
+    let mut plane_cylinder_edges = 0_usize;
+
+    for (face_index, face, _sphere) in [
+        (*sphere_index_a, *sphere_face_a, *first_sphere),
+        (*sphere_index_b, *sphere_face_b, *sphere_b),
+    ] {
+        if face.loops.len() != 1 {
+            return None;
+        }
+        for edge in &face.loops[0].edges {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return None;
+            };
+            max_residual_mm = max_residual_mm.max(sphere_circle_residual(circle, *first_sphere)?);
+            let neighbor = unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+            match faces.get(neighbor)?.surface {
+                SurfaceSupport::Sphere(neighbor_sphere) => {
+                    max_residual_mm = max_residual_mm
+                        .max(norm(sub(neighbor_sphere.center_mm, first_sphere.center_mm)))
+                        .max((neighbor_sphere.radius_mm - radius_mm).abs());
+                }
+                SurfaceSupport::Cylinder(neighbor_cylinder) => {
+                    max_residual_mm = max_residual_mm
+                        .max((neighbor_cylinder.radius_mm - radius_mm).abs())
+                        .max(cap_circle_residual(
+                            circle,
+                            axis_origin_mm,
+                            axis_direction,
+                            center_t,
+                            radius_mm,
+                        )?);
+                    sphere_cylinder_edges += 1;
+                }
+                _ => return None,
+            }
+
+            for point in [edge.start_mm, edge.end_mm] {
+                max_residual_mm = max_residual_mm
+                    .max(circle_point_residual(point, circle))
+                    .max(sphere_point_residual(point, *first_sphere));
+                let signed = axial_coordinate(point, axis_origin_mm, axis_direction) - center_t;
+                if signed.abs() > GEOM_TOL_MM && signed.signum() != f64::from(sphere_side) {
+                    return None;
+                }
+                if (axial_coordinate(point, axis_origin_mm, axis_direction) - pole_t).abs()
+                    <= GEOM_TOL_MM
+                    && point_axis_distance(point, axis_origin_mm, axis_direction) <= GEOM_TOL_MM
+                {
+                    reached_pole = true;
+                }
+            }
+        }
+    }
+
+    for (face_index, face, _) in [
+        (*cylinder_index_a, *cylinder_face_a, *first_cylinder),
+        (*cylinder_index_b, *cylinder_face_b, *cylinder_b),
+    ] {
+        for edge in &face.loops[0].edges {
+            let neighbor = unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+            match faces.get(neighbor)?.surface {
+                SurfaceSupport::Cylinder(_) => {
+                    if !matches!(edge.support, CurveSupport::Line(_)) {
+                        return None;
+                    }
+                }
+                SurfaceSupport::Sphere(_) => {
+                    let CurveSupport::Circle(circle) = edge.support else {
+                        return None;
+                    };
+                    max_residual_mm = max_residual_mm.max(cap_circle_residual(
+                        circle,
+                        axis_origin_mm,
+                        axis_direction,
+                        center_t,
+                        radius_mm,
+                    )?);
+                }
+                SurfaceSupport::Plane(_) => {
+                    let CurveSupport::Circle(circle) = edge.support else {
+                        return None;
+                    };
+                    max_residual_mm = max_residual_mm.max(cap_circle_residual(
+                        circle,
+                        axis_origin_mm,
+                        axis_direction,
+                        plane_t,
+                        radius_mm,
+                    )?);
+                    plane_cylinder_edges += 1;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    if sphere_cylinder_edges == 0
+        || plane_cylinder_edges == 0
+        || !reached_pole
+        || max_residual_mm > GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let cap_angle = f64::from(sphere_side) * std::f64::consts::FRAC_PI_2;
+    Some(RecoveredSolidRevolution {
+        solid_id,
+        face_ids: face_ids.to_vec(),
+        profile_curves: vec![
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [0.0, plane_t],
+                end_mm: [radius_mm, plane_t],
+            },
+            RecoveredProfileCurve::Line {
+                source_edge_ids: Vec::new(),
+                start_mm: [radius_mm, plane_t],
+                end_mm: [radius_mm, center_t],
+            },
+            RecoveredProfileCurve::CircleArc {
+                source_edge_ids: Vec::new(),
+                center_mm: [0.0, center_t],
+                radius_mm,
+                start_angle_rad: 0.0,
+                end_angle_rad: cap_angle,
             },
             RecoveredProfileCurve::Line {
                 source_edge_ids: Vec::new(),
@@ -1439,6 +1937,253 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_circle_edge(
+        edge_id: u64,
+        start_mm: [f64; 3],
+        end_mm: [f64; 3],
+        center_mm: [f64; 3],
+        normal: [f64; 3],
+        radius_mm: f64,
+    ) -> brep::OrientedEdgeUse {
+        brep::OrientedEdgeUse {
+            oriented_edge_id: edge_id + 10_000,
+            edge_id,
+            curve_id: edge_id + 20_000,
+            curve_same_sense: true,
+            parameter_forward: true,
+            start_vertex: edge_id + 30_000,
+            end_vertex: edge_id + 40_000,
+            start_mm,
+            end_mm,
+            support: CurveSupport::Circle(brep::CircleSupport {
+                center_mm,
+                normal,
+                x_direction: [1.0, 0.0, 0.0],
+                radius_mm,
+            }),
+        }
+    }
+
+    fn test_line_edge(edge_id: u64, start_mm: [f64; 3], end_mm: [f64; 3]) -> brep::OrientedEdgeUse {
+        brep::OrientedEdgeUse {
+            oriented_edge_id: edge_id + 10_000,
+            edge_id,
+            curve_id: edge_id + 20_000,
+            curve_same_sense: true,
+            parameter_forward: true,
+            start_vertex: edge_id + 30_000,
+            end_vertex: edge_id + 40_000,
+            start_mm,
+            end_mm,
+            support: CurveSupport::Line(brep::LineSupport {
+                origin_mm: start_mm,
+                direction: normalize(sub(end_mm, start_mm)).unwrap(),
+            }),
+        }
+    }
+
+    fn test_face(surface: SurfaceSupport, edges: Vec<brep::OrientedEdgeUse>) -> FaceInfo {
+        FaceInfo {
+            surface,
+            loops: vec![brep::FaceLoop {
+                bound_id: 1,
+                loop_id: 2,
+                outer: true,
+                orientation: true,
+                edges,
+            }],
+        }
+    }
+
+    fn split_hemisphere_faces(cylinder_radius_mm: f64) -> Vec<FaceInfo> {
+        let sphere = brep::SphereSupport {
+            center_mm: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            x_direction: [1.0, 0.0, 0.0],
+            radius_mm: 1.0,
+        };
+        let cylinder = brep::CylinderSupport {
+            axis_origin_mm: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            x_direction: [1.0, 0.0, 0.0],
+            radius_mm: cylinder_radius_mm,
+        };
+        let plane = brep::PlaneSupport {
+            origin_mm: [0.0, 0.0, 2.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+
+        let equator_a = test_circle_edge(
+            10,
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let equator_b = test_circle_edge(
+            11,
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let sphere_seam_a = test_circle_edge(
+            12,
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+        );
+        let sphere_seam_b = test_circle_edge(
+            13,
+            [0.0, 0.0, -1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+        );
+        let disk_a = test_circle_edge(
+            14,
+            [1.0, 0.0, 2.0],
+            [-1.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let disk_b = test_circle_edge(
+            15,
+            [-1.0, 0.0, 2.0],
+            [1.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 1.0],
+            1.0,
+        );
+        let cylinder_seam_a = test_line_edge(16, [1.0, 0.0, 0.0], [1.0, 0.0, 2.0]);
+        let cylinder_seam_b = test_line_edge(17, [-1.0, 0.0, 0.0], [-1.0, 0.0, 2.0]);
+
+        vec![
+            test_face(
+                SurfaceSupport::Sphere(sphere),
+                vec![
+                    equator_a.clone(),
+                    sphere_seam_a.clone(),
+                    sphere_seam_b.clone(),
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Sphere(sphere),
+                vec![equator_b.clone(), sphere_seam_a, sphere_seam_b],
+            ),
+            test_face(
+                SurfaceSupport::Cylinder(cylinder),
+                vec![
+                    equator_a,
+                    disk_a.clone(),
+                    cylinder_seam_a.clone(),
+                    cylinder_seam_b.clone(),
+                ],
+            ),
+            test_face(
+                SurfaceSupport::Cylinder(cylinder),
+                vec![equator_b, disk_b.clone(), cylinder_seam_a, cylinder_seam_b],
+            ),
+            test_face(SurfaceSupport::Plane(plane), vec![disk_a, disk_b]),
+        ]
+    }
+
+    fn edge_face_map(faces: &[FaceInfo]) -> HashMap<u64, Vec<usize>> {
+        let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+        for (face_index, face) in faces.iter().enumerate() {
+            for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+                edge_faces.entry(edge.edge_id).or_default().push(face_index);
+            }
+        }
+        edge_faces
+    }
+
+    #[test]
+    fn recovers_split_hemispherical_end_topology() {
+        let faces = split_hemisphere_faces(1.0);
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        let recovered = detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &faces, &context).unwrap();
+
+        assert_eq!(recovered.profile_curves.len(), 4);
+        assert!(recovered.max_residual_mm <= 1.0e-12);
+        assert_eq!(recovered.axis_direction, [0.0, 0.0, 1.0]);
+
+        assert!(matches!(
+            recovered.profile_curves.as_slice(),
+            [
+                RecoveredProfileCurve::Line {
+                    start_mm: [0.0, 2.0],
+                    end_mm: [1.0, 2.0],
+                    ..
+                },
+                RecoveredProfileCurve::Line {
+                    start_mm: [1.0, 2.0],
+                    end_mm: [1.0, 0.0],
+                    ..
+                },
+                RecoveredProfileCurve::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: 1.0,
+                    start_angle_rad: 0.0,
+                    end_angle_rad,
+                    ..
+                },
+                RecoveredProfileCurve::Line {
+                    start_mm: [0.0, -1.0],
+                    end_mm: [0.0, 2.0],
+                    ..
+                }
+            ] if (*end_angle_rad + std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+        ));
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let fragment =
+                crate::cad_recovery::recover_solid_revolution_fragment(&recovered).unwrap();
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+        }
+
+        let tampered = split_hemisphere_faces(1.01);
+        let edge_faces = edge_face_map(&tampered);
+        let context = TopologyContext {
+            faces: &tampered,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none());
+    }
+
+    #[test]
+    fn solid_surface_signature_reports_native_spherical_cap() {
+        let bytes = include_bytes!("../validation/fixtures/native_spherical_cap.step");
+        let signatures = crate::detect_solid_surface_signatures_bytes(bytes).unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].face_count, 2);
+        assert_eq!(signatures[0].support_counts.get("sphere"), Some(&1));
+        assert_eq!(signatures[0].support_counts.get("plane"), Some(&1));
+        assert!(signatures[0].closed_two_manifold);
+    }
 
     #[test]
     fn shell_connectivity_rejects_disconnected_two_manifolds() {
