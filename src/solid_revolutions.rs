@@ -1,5 +1,6 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
 use crate::instances::{build_index, entity_id, simple_record};
+use crate::profile_curves::RecoveredProfileCurve;
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,8 +12,8 @@ const DIR_TOL: f64 = 1.0e-9;
 pub struct RecoveredSolidRevolution {
     pub solid_id: u64,
     pub face_ids: Vec<u64>,
-    /// Closed meridian polygon in local [radius, axial] coordinates.
-    pub profile_points_mm: Vec<[f64; 2]>,
+    /// Closed meridian profile in local [radius, axial] coordinates.
+    pub profile_curves: Vec<RecoveredProfileCurve>,
     /// Canonical closest point on the revolution axis to global origin.
     pub axis_origin_mm: [f64; 3],
     /// Canonical axis direction.
@@ -20,6 +21,33 @@ pub struct RecoveredSolidRevolution {
     /// Deterministic local +X radial direction, perpendicular to the axis.
     pub radial_direction: [f64; 3],
     pub max_residual_mm: f64,
+}
+
+impl RecoveredSolidRevolution {
+    pub fn polygon_points(&self) -> Option<Vec<[f64; 2]>> {
+        if self.profile_curves.len() < 3 {
+            return None;
+        }
+        let mut points = Vec::with_capacity(self.profile_curves.len());
+        let mut previous_end = None;
+        for curve in &self.profile_curves {
+            let RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } = curve
+            else {
+                return None;
+            };
+            if previous_end.is_some_and(|end| distance2(end, *start_mm) > GEOM_TOL_MM) {
+                return None;
+            }
+            points.push(*start_mm);
+            previous_end = Some(*end_mm);
+        }
+        if previous_end.is_some_and(|end| distance2(end, points[0]) > GEOM_TOL_MM) {
+            return None;
+        }
+        Some(points)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -75,9 +103,6 @@ fn detect_one_solid(
     index: &HashMap<u64, usize>,
 ) -> Option<RecoveredSolidRevolution> {
     let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
-    if face_ids.len() < 3 {
-        return None;
-    }
     let faces = face_ids
         .iter()
         .copied()
@@ -107,6 +132,13 @@ fn detect_one_solid(
     if edge_faces.values().any(|attached| attached.len() != 2)
         || !shell_faces_connected(faces.len(), &edge_faces)
     {
+        return None;
+    }
+
+    if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, &faces) {
+        return Some(torus);
+    }
+    if face_ids.len() < 3 {
         return None;
     }
 
@@ -178,10 +210,95 @@ fn detect_one_solid(
     }
 
     let profile_points_mm = closed_profile_from_segments(segments)?;
+    let profile_curves = line_profile_curves(&profile_points_mm);
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids,
-        profile_points_mm,
+        profile_curves,
+        axis_origin_mm,
+        axis_direction,
+        radial_direction,
+        max_residual_mm,
+    })
+}
+
+fn detect_full_ring_torus(
+    solid_id: u64,
+    face_ids: &[u64],
+    faces: &[FaceInfo],
+) -> Option<RecoveredSolidRevolution> {
+    let first = match faces.first()?.surface {
+        SurfaceSupport::Torus(torus) => torus,
+        _ => return None,
+    };
+    if !first.major_radius_mm.is_finite()
+        || !first.minor_radius_mm.is_finite()
+        || first.minor_radius_mm <= GEOM_TOL_MM
+        || first.major_radius_mm <= first.minor_radius_mm + GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let axis_direction = canonical_axis(first.axis);
+    let axis_origin_mm = closest_axis_point_to_global_origin(first.center_mm, axis_direction);
+    let center_t = axial_coordinate(first.center_mm, axis_origin_mm, axis_direction);
+    let radial_direction = radial_basis(axis_direction)?;
+    let mut max_residual_mm = axis_distance(first.center_mm, axis_origin_mm, axis_direction);
+
+    for face in faces {
+        let SurfaceSupport::Torus(torus) = face.surface else {
+            return None;
+        };
+        if !torus.major_radius_mm.is_finite()
+            || !torus.minor_radius_mm.is_finite()
+            || !parallel(torus.axis, axis_direction)
+        {
+            return None;
+        }
+        max_residual_mm = max_residual_mm
+            .max(norm(sub(torus.center_mm, first.center_mm)))
+            .max((torus.major_radius_mm - first.major_radius_mm).abs())
+            .max((torus.minor_radius_mm - first.minor_radius_mm).abs());
+
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return None;
+            };
+            for point in [edge.start_mm, edge.end_mm] {
+                max_residual_mm = max_residual_mm
+                    .max(circle_point_residual(point, circle))
+                    .max(torus_point_residual(point, first, axis_direction));
+            }
+
+            let circle_y = normalize(cross(circle.normal, circle.x_direction))?;
+            for sample in 0..16 {
+                let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+                let point = add(
+                    circle.center_mm,
+                    add(
+                        mul(circle.x_direction, circle.radius_mm * angle.cos()),
+                        mul(circle_y, circle.radius_mm * angle.sin()),
+                    ),
+                );
+                max_residual_mm =
+                    max_residual_mm.max(torus_point_residual(point, first, axis_direction));
+            }
+        }
+    }
+    if max_residual_mm > GEOM_TOL_MM {
+        return None;
+    }
+
+    Some(RecoveredSolidRevolution {
+        solid_id,
+        face_ids: face_ids.to_vec(),
+        profile_curves: vec![RecoveredProfileCurve::CircleArc {
+            source_edge_ids: Vec::new(),
+            center_mm: [first.major_radius_mm, center_t],
+            radius_mm: first.minor_radius_mm,
+            start_angle_rad: 0.0,
+            end_angle_rad: std::f64::consts::TAU,
+        }],
         axis_origin_mm,
         axis_direction,
         radial_direction,
@@ -878,6 +995,16 @@ fn closed_profile_from_segments(mut segments: Vec<Segment2>) -> Option<Vec<[f64;
     Some(points)
 }
 
+fn line_profile_curves(points: &[[f64; 2]]) -> Vec<RecoveredProfileCurve> {
+    (0..points.len())
+        .map(|index| RecoveredProfileCurve::Line {
+            source_edge_ids: Vec::new(),
+            start_mm: points[index],
+            end_mm: points[(index + 1) % points.len()],
+        })
+        .collect()
+}
+
 fn graph_from_segments(segments: &[Segment2]) -> Option<ProfileGraph> {
     let mut nodes = Vec::<[f64; 2]>::new();
     let mut edges = Vec::<(usize, usize)>::new();
@@ -1041,6 +1168,22 @@ fn radial_basis(axis: [f64; 3]) -> Option<[f64; 3]> {
     normalize(sub(reference, mul(axis, dot(reference, axis))))
 }
 
+fn circle_point_residual(point: [f64; 3], circle: brep::CircleSupport) -> f64 {
+    let relative = sub(point, circle.center_mm);
+    let plane_residual = dot(relative, circle.normal).abs();
+    let radius_residual = (norm(relative) - circle.radius_mm).abs();
+    plane_residual.max(radius_residual)
+}
+
+fn torus_point_residual(point: [f64; 3], torus: brep::TorusSupport, axis: [f64; 3]) -> f64 {
+    let relative = sub(point, torus.center_mm);
+    let axial = dot(relative, axis);
+    let radial_vector = sub(relative, mul(axis, axial));
+    let radial = norm(radial_vector);
+    let tube_distance = ((radial - torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
+    (tube_distance - torus.minor_radius_mm).abs()
+}
+
 fn axial_coordinate(point: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f64 {
     dot(sub(point, axis_origin), axis)
 }
@@ -1072,6 +1215,10 @@ fn norm(v: [f64; 3]) -> f64 {
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1176,7 +1323,7 @@ mod tests {
         let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].profile_points_mm,
+            recovered[0].polygon_points().unwrap(),
             vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -1210,7 +1357,7 @@ mod tests {
         let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].profile_points_mm,
+            recovered[0].polygon_points().unwrap(),
             vec![[0.5, 2.0], [1.0, 0.0], [3.0, 0.0], [2.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -1234,7 +1381,7 @@ mod tests {
         let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].profile_points_mm,
+            recovered[0].polygon_points().unwrap(),
             vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -1258,6 +1405,52 @@ mod tests {
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
             let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+        }
+    }
+
+    #[test]
+    fn recovers_native_ring_torus_fixture() {
+        let bytes = include_bytes!("../validation/fixtures/native_torus.step");
+        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].face_ids.len(), 1);
+        assert_eq!(recovered[0].profile_curves.len(), 1);
+        let RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            end_angle_rad,
+            ..
+        } = &recovered[0].profile_curves[0]
+        else {
+            panic!("expected full-circle torus meridian");
+        };
+        assert!((center_mm[0] - 1.2).abs() < 1.0e-12);
+        assert!(center_mm[1].abs() < 1.0e-12);
+        assert!((*radius_mm - 0.09).abs() < 1.0e-12);
+        assert_eq!(*start_angle_rad, 0.0);
+        assert_eq!(*end_angle_rad, std::f64::consts::TAU);
+
+        let malformed = String::from_utf8_lossy(bytes).replacen(
+            "CIRCLE('',#26,1.29)",
+            "CIRCLE('',#26,1.31)",
+            1,
+        );
+        assert!(
+            crate::detect_solid_revolutions_bytes(malformed.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let fragment =
+                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            assert!(kernel.summarize(&rebuilt).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
         }
     }
 

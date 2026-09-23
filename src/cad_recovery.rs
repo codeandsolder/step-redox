@@ -3,7 +3,8 @@ use crate::cad_ir::{
     ProofStatus, Provenance, RigidTransform,
 };
 use crate::patterns::InstancePattern;
-use crate::solid_extrusions::{RecoveredProfileCurve, RecoveredSolidExtrusion};
+use crate::profile_curves::RecoveredProfileCurve;
+use crate::solid_extrusions::RecoveredSolidExtrusion;
 use crate::solid_revolutions::RecoveredSolidRevolution;
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -120,7 +121,15 @@ pub fn recover_solid_revolution_fragment(
     validate_solid_revolution(revolution)?;
 
     let mut model = CadModel::new();
-    let profile = Profile2d::polygon(revolution.profile_points_mm.clone())?;
+    let profile = Profile2d {
+        loops: vec![ProfileLoop {
+            curves: revolution
+                .profile_curves
+                .iter()
+                .map(recovered_profile_curve_to_ir)
+                .collect(),
+        }],
+    };
     let body = model.add_node(CadNode::Revolve {
         profile,
         axis: Axis3 {
@@ -231,27 +240,53 @@ fn recovered_profile_curve_to_ir(curve: &RecoveredProfileCurve) -> Curve2d {
 }
 
 fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()> {
-    if revolution.profile_points_mm.len() < 3 {
-        bail!("solid revolution needs at least three meridian profile points");
+    if revolution.profile_curves.is_empty() {
+        bail!("solid revolution needs a non-empty meridian profile");
     }
-    if revolution
-        .profile_points_mm
-        .iter()
-        .any(|point| point.iter().any(|value| !value.is_finite()) || point[0] < -1.0e-7)
-    {
-        bail!("solid revolution profile contains invalid radius/axial coordinates");
+    for curve in &revolution.profile_curves {
+        validate_profile_curve_geometry(curve)?;
+        match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => {
+                if start_mm[0] < -1.0e-7 || end_mm[0] < -1.0e-7 {
+                    bail!("solid revolution profile contains a negative radius");
+                }
+            }
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } => {
+                let sweep = end_angle_rad - start_angle_rad;
+                if sweep.abs() <= 1.0e-12 || sweep.abs() > std::f64::consts::TAU + 1.0e-9 {
+                    bail!("solid revolution circular meridian has invalid sweep");
+                }
+                if circle_arc_min_radius(center_mm[0], *radius_mm, *start_angle_rad, *end_angle_rad)
+                    < -1.0e-7
+                {
+                    bail!("solid revolution circular meridian crosses negative radius");
+                }
+            }
+            RecoveredProfileCurve::Bezier { .. } | RecoveredProfileCurve::BSpline { .. } => {
+                bail!("solid revolution spline meridians are not yet supported");
+            }
+        }
     }
-    if revolution
-        .profile_points_mm
-        .iter()
-        .enumerate()
-        .any(|(index, point)| {
-            let next =
-                revolution.profile_points_mm[(index + 1) % revolution.profile_points_mm.len()];
-            (point[0] - next[0]).abs() <= 1.0e-12 && (point[1] - next[1]).abs() <= 1.0e-12
-        })
-    {
-        bail!("solid revolution profile contains a degenerate edge");
+    for index in 0..revolution.profile_curves.len() {
+        let current = &revolution.profile_curves[index];
+        let next = &revolution.profile_curves[(index + 1) % revolution.profile_curves.len()];
+        let Some(end) = current.end_point() else {
+            bail!("solid revolution profile curve has no endpoint");
+        };
+        let Some(start) = next.start_point() else {
+            bail!("solid revolution profile curve has no start point");
+        };
+        if ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt() > 1.0e-7 {
+            bail!("solid revolution profile curves are not topologically continuous");
+        }
     }
 
     if revolution
@@ -342,7 +377,10 @@ fn validate_recovered_profile_curve(curve: &RecoveredProfileCurve) -> Result<()>
     if curve.source_edge_ids().is_empty() {
         bail!("recovered profile curve has no source edges");
     }
+    validate_profile_curve_geometry(curve)
+}
 
+fn validate_profile_curve_geometry(curve: &RecoveredProfileCurve) -> Result<()> {
     let finite_point = |point: &[f64; 2]| point.iter().all(|value| value.is_finite());
     match curve {
         RecoveredProfileCurve::Line {
@@ -420,6 +458,24 @@ fn validate_recovered_profile_curve(curve: &RecoveredProfileCurve) -> Result<()>
         }
     }
     Ok(())
+}
+
+fn circle_arc_min_radius(center_radius: f64, radius: f64, start_angle: f64, end_angle: f64) -> f64 {
+    let mut minimum =
+        (center_radius + radius * start_angle.cos()).min(center_radius + radius * end_angle.cos());
+    if angle_on_sweep(std::f64::consts::PI, start_angle, end_angle) {
+        minimum = minimum.min(center_radius - radius);
+    }
+    minimum
+}
+
+fn angle_on_sweep(angle: f64, start: f64, end: f64) -> bool {
+    let sweep = end - start;
+    if sweep >= 0.0 {
+        (angle - start).rem_euclid(std::f64::consts::TAU) <= sweep + 1.0e-12
+    } else {
+        (start - angle).rem_euclid(std::f64::consts::TAU) <= -sweep + 1.0e-12
+    }
 }
 
 fn local_frame_transform(
@@ -876,7 +932,28 @@ mod tests {
         let revolution = RecoveredSolidRevolution {
             solid_id: 50,
             face_ids: vec![60, 61, 62],
-            profile_points_mm: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]],
+            profile_curves: vec![
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: Vec::new(),
+                    start_mm: [0.0, 0.0],
+                    end_mm: [2.0, 0.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: Vec::new(),
+                    start_mm: [2.0, 0.0],
+                    end_mm: [2.0, 3.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: Vec::new(),
+                    start_mm: [2.0, 3.0],
+                    end_mm: [0.0, 3.0],
+                },
+                RecoveredProfileCurve::Line {
+                    source_edge_ids: Vec::new(),
+                    start_mm: [0.0, 3.0],
+                    end_mm: [0.0, 0.0],
+                },
+            ],
             axis_origin_mm: [10.0, 20.0, 30.0],
             axis_direction: [0.0, 1.0, 0.0],
             radial_direction: [1.0, 0.0, 0.0],
@@ -904,10 +981,7 @@ mod tests {
         else {
             panic!("expected local revolution child");
         };
-        assert_eq!(
-            profile.single_polygon_points(),
-            Some(revolution.profile_points_mm.clone())
-        );
+        assert_eq!(profile.single_polygon_points(), revolution.polygon_points());
         assert_eq!(axis.origin_mm, [0.0, 0.0, 0.0]);
         assert_eq!(axis.direction, [0.0, 1.0, 0.0]);
         assert_eq!(*angle_rad, std::f64::consts::TAU);
