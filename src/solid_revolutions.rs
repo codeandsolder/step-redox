@@ -299,7 +299,7 @@ fn detect_one_solid(
     if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, &faces, &context) {
         return Some(end);
     }
-    if let Some(mixed) = detect_mixed_torus_revolution(solid_id, &face_ids, &faces, &context) {
+    if let Some(mixed) = detect_mixed_curved_revolution(solid_id, &face_ids, &faces, &context) {
         return Some(mixed);
     }
     if face_ids.len() < 3 {
@@ -968,17 +968,22 @@ fn detect_hemispherical_end(
     })
 }
 
-fn detect_mixed_torus_revolution(
+fn detect_mixed_curved_revolution(
     solid_id: u64,
     face_ids: &[u64],
     faces: &[FaceInfo],
     context: &TopologyContext<'_>,
 ) -> Option<RecoveredSolidRevolution> {
-    let torus_count = faces
+    let curved_count = faces
         .iter()
-        .filter(|face| matches!(face.surface, SurfaceSupport::Torus(_)))
+        .filter(|face| {
+            matches!(
+                face.surface,
+                SurfaceSupport::Torus(_) | SurfaceSupport::Sphere(_)
+            )
+        })
         .count();
-    if torus_count == 0 || torus_count == faces.len() {
+    if curved_count == 0 || curved_count == faces.len() {
         return None;
     }
 
@@ -1000,6 +1005,7 @@ fn detect_mixed_torus_revolution(
     let mut max_residual_mm = 0.0_f64;
     let mut segments = Vec::new();
     let mut torus_faces = Vec::<(usize, brep::TorusSupport)>::new();
+    let mut sphere_faces = Vec::<(usize, brep::SphereSupport)>::new();
     for (face_index, face) in faces.iter().enumerate() {
         match face.surface {
             SurfaceSupport::Cylinder(cylinder) => {
@@ -1053,6 +1059,7 @@ fn detect_mixed_torus_revolution(
                 push_unique_segment(&mut segments, segment);
             }
             SurfaceSupport::Torus(torus) => torus_faces.push((face_index, torus)),
+            SurfaceSupport::Sphere(sphere) => sphere_faces.push((face_index, sphere)),
             _ => return None,
         }
     }
@@ -1060,8 +1067,8 @@ fn detect_mixed_torus_revolution(
         return None;
     }
 
-    let mut groups = Vec::<Vec<usize>>::new();
-    let mut supports = Vec::<brep::TorusSupport>::new();
+    let mut torus_groups = Vec::<Vec<usize>>::new();
+    let mut torus_supports = Vec::<brep::TorusSupport>::new();
     for (face_index, torus) in torus_faces {
         if !torus.major_radius_mm.is_finite()
             || !torus.minor_radius_mm.is_finite()
@@ -1072,22 +1079,54 @@ fn detect_mixed_torus_revolution(
         {
             return None;
         }
-        if let Some(group_index) = supports
+        if let Some(group_index) = torus_supports
             .iter()
             .position(|existing| same_torus_support(*existing, torus, axis_direction))
         {
-            groups[group_index].push(face_index);
+            torus_groups[group_index].push(face_index);
         } else {
-            supports.push(torus);
-            groups.push(vec![face_index]);
+            torus_supports.push(torus);
+            torus_groups.push(vec![face_index]);
         }
     }
 
-    let mut arcs = Vec::with_capacity(groups.len());
-    for (group, torus) in groups.iter().zip(&supports) {
+    let mut sphere_groups = Vec::<Vec<usize>>::new();
+    let mut sphere_supports = Vec::<brep::SphereSupport>::new();
+    for (face_index, sphere) in sphere_faces {
+        if !sphere.radius_mm.is_finite()
+            || sphere.radius_mm <= GEOM_TOL_MM
+            || axis_distance(sphere.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+        {
+            return None;
+        }
+        if let Some(group_index) = sphere_supports
+            .iter()
+            .position(|existing| same_sphere_support(*existing, sphere))
+        {
+            sphere_groups[group_index].push(face_index);
+        } else {
+            sphere_supports.push(sphere);
+            sphere_groups.push(vec![face_index]);
+        }
+    }
+
+    let mut arcs = Vec::with_capacity(torus_groups.len() + sphere_groups.len());
+    for (group, torus) in torus_groups.iter().zip(&torus_supports) {
         let (arc, residual) = torus_profile_arc(
             group,
             *torus,
+            axis_origin_mm,
+            axis_direction,
+            faces,
+            context.edge_faces,
+        )?;
+        max_residual_mm = max_residual_mm.max(residual);
+        arcs.push(arc);
+    }
+    for (group, sphere) in sphere_groups.iter().zip(&sphere_supports) {
+        let (arc, residual) = sphere_profile_arc(
+            group,
+            *sphere,
             axis_origin_mm,
             axis_direction,
             faces,
@@ -1119,6 +1158,181 @@ fn detect_mixed_torus_revolution(
         radial_direction,
         max_residual_mm,
     })
+}
+
+fn same_sphere_support(a: brep::SphereSupport, b: brep::SphereSupport) -> bool {
+    norm(sub(a.center_mm, b.center_mm)) <= GEOM_TOL_MM
+        && (a.radius_mm - b.radius_mm).abs() <= GEOM_TOL_MM
+}
+
+fn sphere_profile_arc(
+    face_indices: &[usize],
+    sphere: brep::SphereSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+    faces: &[FaceInfo],
+    edge_faces: &HashMap<u64, Vec<usize>>,
+) -> Option<(RecoveredProfileCurve, f64)> {
+    if face_indices.is_empty()
+        || !sphere.radius_mm.is_finite()
+        || sphere.radius_mm <= GEOM_TOL_MM
+        || axis_distance(sphere.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let center_t = axial_coordinate(sphere.center_mm, axis_origin_mm, axis_direction);
+    let center_mm = [0.0, center_t];
+    let mut boundary_points = Vec::<[f64; 2]>::new();
+    let mut witness_points = Vec::<[f64; 2]>::new();
+    let mut source_edge_ids = Vec::<u64>::new();
+    let mut max_residual_mm = axis_distance(sphere.center_mm, axis_origin_mm, axis_direction);
+
+    for &face_index in face_indices {
+        let face = faces.get(face_index)?;
+        let SurfaceSupport::Sphere(face_sphere) = face.surface else {
+            return None;
+        };
+        if !same_sphere_support(sphere, face_sphere) || face.loops.len() != 1 {
+            return None;
+        }
+
+        for edge in &face.loops[0].edges {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return None;
+            };
+            source_edge_ids.push(edge.edge_id);
+            for point in [edge.start_mm, edge.end_mm] {
+                max_residual_mm = max_residual_mm
+                    .max(circle_point_residual(point, circle))
+                    .max(sphere_point_residual(point, sphere));
+            }
+
+            let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
+            match faces.get(neighbor)?.surface {
+                SurfaceSupport::Sphere(neighbor_sphere)
+                    if same_sphere_support(sphere, neighbor_sphere) =>
+                {
+                    max_residual_mm = max_residual_mm.max(sphere_meridian_circle_residual(
+                        circle,
+                        sphere,
+                        axis_origin_mm,
+                        axis_direction,
+                    )?);
+                    let midpoint = circle_trim_midpoint(edge, circle)?;
+                    max_residual_mm = max_residual_mm.max(sphere_point_residual(midpoint, sphere));
+                    push_unique_point(
+                        &mut witness_points,
+                        [
+                            point_axis_distance(midpoint, axis_origin_mm, axis_direction),
+                            axial_coordinate(midpoint, axis_origin_mm, axis_direction),
+                        ],
+                    );
+                }
+                _ => {
+                    let (point, residual) = sphere_parallel_boundary_point(
+                        circle,
+                        sphere,
+                        axis_origin_mm,
+                        axis_direction,
+                    )?;
+                    max_residual_mm = max_residual_mm.max(residual);
+                    push_unique_point(&mut boundary_points, point);
+                }
+            }
+        }
+    }
+
+    if boundary_points.is_empty()
+        || boundary_points.len() > 2
+        || witness_points.is_empty()
+        || max_residual_mm > GEOM_TOL_MM
+    {
+        return None;
+    }
+
+    let angle_tol = (GEOM_TOL_MM / sphere.radius_mm).max(1.0e-12);
+    let mut candidates = Vec::<(f64, f64)>::new();
+    if boundary_points.len() == 1 {
+        let start = meridian_angle(boundary_points[0], center_mm, sphere.radius_mm)?;
+        candidates.push((start, std::f64::consts::FRAC_PI_2));
+        candidates.push((start, -std::f64::consts::FRAC_PI_2));
+    } else {
+        let start = meridian_angle(boundary_points[0], center_mm, sphere.radius_mm)?;
+        let end = meridian_angle(boundary_points[1], center_mm, sphere.radius_mm)?;
+        let ccw_delta = positive_angle_delta(start, end);
+        let cw_delta = std::f64::consts::TAU - ccw_delta;
+        if ccw_delta <= angle_tol || cw_delta <= angle_tol {
+            return None;
+        }
+        candidates.push((start, start + ccw_delta));
+        candidates.push((start, start - cw_delta));
+    }
+
+    let valid = candidates
+        .into_iter()
+        .filter(|&(arc_start, arc_end)| {
+            circle_arc_min_radius(0.0, sphere.radius_mm, arc_start, arc_end) >= -GEOM_TOL_MM
+                && witness_points.iter().all(|point| {
+                    meridian_angle(*point, center_mm, sphere.radius_mm)
+                        .is_some_and(|angle| angle_on_arc(angle, arc_start, arc_end, angle_tol))
+                })
+        })
+        .collect::<Vec<_>>();
+    let [(start_angle_rad, end_angle_rad)] = valid.as_slice() else {
+        return None;
+    };
+
+    source_edge_ids.sort_unstable();
+    source_edge_ids.dedup();
+    Some((
+        RecoveredProfileCurve::CircleArc {
+            source_edge_ids,
+            center_mm,
+            radius_mm: sphere.radius_mm,
+            start_angle_rad: *start_angle_rad,
+            end_angle_rad: *end_angle_rad,
+        },
+        max_residual_mm,
+    ))
+}
+
+fn sphere_parallel_boundary_point(
+    circle: brep::CircleSupport,
+    sphere: brep::SphereSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+) -> Option<([f64; 2], f64)> {
+    if !parallel(circle.normal, axis_direction) || circle.radius_mm <= GEOM_TOL_MM {
+        return None;
+    }
+    let axial = axial_coordinate(circle.center_mm, axis_origin_mm, axis_direction);
+    let residual = sphere_circle_residual(circle, sphere)?.max(axis_distance(
+        circle.center_mm,
+        axis_origin_mm,
+        axis_direction,
+    ));
+    (residual <= GEOM_TOL_MM).then_some(([circle.radius_mm, axial], residual))
+}
+
+fn sphere_meridian_circle_residual(
+    circle: brep::CircleSupport,
+    sphere: brep::SphereSupport,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
+) -> Option<f64> {
+    let normal = normalize(circle.normal)?;
+    if dot(normal, axis_direction).abs() > DIR_TOL {
+        return None;
+    }
+    let center_t = axial_coordinate(sphere.center_mm, axis_origin_mm, axis_direction);
+    let axis_point = add(axis_origin_mm, mul(axis_direction, center_t));
+    let plane_residual = dot(sub(axis_point, circle.center_mm), normal).abs();
+    let residual = sphere_circle_residual(circle, sphere)?
+        .max(norm(sub(circle.center_mm, sphere.center_mm)))
+        .max((circle.radius_mm - sphere.radius_mm).abs())
+        .max(plane_residual);
+    (residual <= GEOM_TOL_MM).then_some(residual)
 }
 
 fn same_torus_support(a: brep::TorusSupport, b: brep::TorusSupport, axis: [f64; 3]) -> bool {
@@ -3134,6 +3348,49 @@ mod tests {
         assert!(detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none());
     }
 
+    #[test]
+    fn mixed_curved_graph_recovers_split_sphere_arc() {
+        let faces = split_hemisphere_faces(1.0);
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        let recovered =
+            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5], &faces, &context).unwrap();
+        assert_eq!(recovered.profile_curves.len(), 4);
+        assert!(recovered.profile_curves.iter().any(|curve| matches!(
+            curve,
+            RecoveredProfileCurve::CircleArc {
+                center_mm: [0.0, 0.0],
+                radius_mm: 1.0,
+                start_angle_rad,
+                end_angle_rad,
+                ..
+            } if (start_angle_rad.abs() <= 1.0e-12
+                && (*end_angle_rad + std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12)
+                || ((*start_angle_rad + std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+                    && end_angle_rad.abs() <= 1.0e-12)
+        )));
+        assert!(recovered.max_residual_mm <= 1.0e-12);
+
+        let tampered = split_hemisphere_faces(1.01);
+        let edge_faces = edge_face_map(&tampered);
+        let context = TopologyContext {
+            faces: &tampered,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(
+            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none()
+        );
+    }
+
     fn quarter_fillet_profile() -> Vec<RecoveredProfileCurve> {
         vec![
             RecoveredProfileCurve::Line {
@@ -3477,7 +3734,7 @@ mod tests {
             index: &index,
         };
         let recovered =
-            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &faces, &context).unwrap();
+            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &faces, &context).unwrap();
         assert_eq!(recovered.profile_curves.len(), 5);
         assert!(recovered.profile_curves.iter().any(|curve| matches!(
             curve,
@@ -3500,7 +3757,7 @@ mod tests {
             index: &index,
         };
         let recovered =
-            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).unwrap();
+            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).unwrap();
         assert!(recovered.profile_curves.iter().any(|curve| matches!(
             curve,
             RecoveredProfileCurve::CircleArc {
@@ -3532,7 +3789,7 @@ mod tests {
             index: &index,
         };
         assert!(
-            detect_mixed_torus_revolution(99, &[1, 2, 3, 4, 5, 6], &tampered, &context).is_none()
+            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &tampered, &context).is_none()
         );
     }
 
