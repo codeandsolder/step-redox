@@ -124,10 +124,30 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
         if archive_ok and archive_expected:
             archive_ok = sha256_file(archive_path) == archive_expected
         if not archive_ok:
-            tmp = archive_path.with_suffix(archive_path.suffix + ".part")
-            urls = [spec["url"], *spec.get("fallback_urls", [])]
-            download_verified(name, urls, tmp, archive_expected, "archive")
-            os.replace(tmp, archive_path)
+            bundled_archive = spec.get("bundled_archive")
+            bundled_path = (
+                Path(__file__).resolve().parent / bundled_archive
+                if bundled_archive
+                else None
+            )
+            if bundled_path is not None and bundled_path.exists():
+                tmp = archive_path.with_suffix(archive_path.suffix + ".part")
+                tmp.unlink(missing_ok=True)
+                shutil.copyfile(bundled_path, tmp)
+                if archive_expected:
+                    got = sha256_file(tmp)
+                    if got != archive_expected:
+                        tmp.unlink(missing_ok=True)
+                        raise RuntimeError(
+                            f"fixture {name}: bundled archive SHA-256 mismatch: "
+                            f"expected {archive_expected}, got {got}"
+                        )
+                os.replace(tmp, archive_path)
+            else:
+                tmp = archive_path.with_suffix(archive_path.suffix + ".part")
+                urls = [spec["url"], *spec.get("fallback_urls", [])]
+                download_verified(name, urls, tmp, archive_expected, "archive")
+                os.replace(tmp, archive_path)
 
         if archive_kind != "zip":
             raise RuntimeError(f"fixture {name}: unsupported archive {archive_kind!r}")
