@@ -5,7 +5,7 @@ use crate::cad_ir::{
 use crate::patterns::InstancePattern;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
-use crate::solid_revolutions::RecoveredSolidRevolution;
+use crate::solid_revolutions::{REVOLUTION_SOURCE_SUPPORT_TOL_MM, RecoveredSolidRevolution};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -317,7 +317,7 @@ fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()
 
     if !revolution.max_residual_mm.is_finite()
         || revolution.max_residual_mm < 0.0
-        || revolution.max_residual_mm > 1.0e-7 + 1.0e-15
+        || revolution.max_residual_mm > REVOLUTION_SOURCE_SUPPORT_TOL_MM + 1.0e-15
     {
         bail!("solid revolution has invalid proof residual");
     }
@@ -957,7 +957,7 @@ mod tests {
             axis_origin_mm: [10.0, 20.0, 30.0],
             axis_direction: [0.0, 1.0, 0.0],
             radial_direction: [1.0, 0.0, 0.0],
-            max_residual_mm: 3.0e-12,
+            max_residual_mm: 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         };
 
         let fragment = recover_solid_revolution_fragment(&revolution)?;
@@ -987,8 +987,12 @@ mod tests {
         assert_eq!(*angle_rad, std::f64::consts::TAU);
         assert_eq!(
             fragment.model.provenance[&fragment.root].max_residual_mm,
-            Some(3.0e-12)
+            Some(0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM)
         );
+
+        let mut excessive_residual = revolution.clone();
+        excessive_residual.max_residual_mm = 2.0 * REVOLUTION_SOURCE_SUPPORT_TOL_MM;
+        assert!(recover_solid_revolution_fragment(&excessive_residual).is_err());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {

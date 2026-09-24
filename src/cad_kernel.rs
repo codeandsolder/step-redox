@@ -604,6 +604,32 @@ pub mod monstertruck {
         }
 
         #[test]
+        fn evaluates_apex_cone_profile_revolution() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile = Profile2d::polygon(vec![[0.0, -1.0], [2.0, 1.0], [0.0, 1.0]])?;
+            let root = model.add_node(CadNode::Revolve {
+                profile,
+                axis: Axis3 {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    direction: [0.0, 1.0, 0.0],
+                },
+                angle_rad: std::f64::consts::TAU,
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+
+            // Re-recognition of whichever STEP surface grammar Monstertruck chooses
+            // is a separate detector concern. This test proves exact construction and
+            // exchange serialization without pinning the writer to one representation.
+            Ok(())
+        }
+
+        #[test]
         fn evaluates_transformed_profile_revolution_without_post_transform_breakage() -> Result<()>
         {
             let mut model = CadModel::new();
