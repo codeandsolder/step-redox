@@ -5,7 +5,10 @@ use crate::cad_ir::{
 use crate::patterns::InstancePattern;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
-use crate::solid_revolutions::{REVOLUTION_SOURCE_SUPPORT_TOL_MM, RecoveredSolidRevolution};
+use crate::solid_revolutions::{
+    MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+    RecoveredSolidRevolution,
+};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -315,9 +318,15 @@ fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()
         bail!("solid revolution frame does not define a unit profile normal");
     }
 
+    if !revolution.source_tolerance_mm.is_finite()
+        || revolution.source_tolerance_mm < REVOLUTION_SOURCE_SUPPORT_TOL_MM
+        || revolution.source_tolerance_mm > MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM
+    {
+        bail!("solid revolution has invalid source tolerance");
+    }
     if !revolution.max_residual_mm.is_finite()
         || revolution.max_residual_mm < 0.0
-        || revolution.max_residual_mm > REVOLUTION_SOURCE_SUPPORT_TOL_MM + 1.0e-15
+        || revolution.max_residual_mm > revolution.source_tolerance_mm + 1.0e-15
     {
         bail!("solid revolution has invalid proof residual");
     }
@@ -958,6 +967,7 @@ mod tests {
             axis_direction: [0.0, 1.0, 0.0],
             radial_direction: [1.0, 0.0, 0.0],
             max_residual_mm: 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         };
 
         let fragment = recover_solid_revolution_fragment(&revolution)?;
@@ -993,6 +1003,14 @@ mod tests {
         let mut excessive_residual = revolution.clone();
         excessive_residual.max_residual_mm = 2.0 * REVOLUTION_SOURCE_SUPPORT_TOL_MM;
         assert!(recover_solid_revolution_fragment(&excessive_residual).is_err());
+
+        let mut excessive_tolerance = revolution.clone();
+        excessive_tolerance.source_tolerance_mm = 2.0 * MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM;
+        assert!(recover_solid_revolution_fragment(&excessive_tolerance).is_err());
+
+        let mut too_strict_tolerance = revolution.clone();
+        too_strict_tolerance.source_tolerance_mm = 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM;
+        assert!(recover_solid_revolution_fragment(&too_strict_tolerance).is_err());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {

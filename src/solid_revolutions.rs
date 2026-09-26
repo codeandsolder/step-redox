@@ -1,15 +1,19 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
-use crate::instances::{build_index, entity_id, simple_record};
+use crate::instances::{
+    build_index, entity_id, entity_ref_value, representation_items_and_context, simple_record,
+};
 use crate::profile_curves::RecoveredProfileCurve;
-use ruststep::ast::EntityInstance;
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const GEOM_TOL_MM: f64 = 1.0e-7;
-/// Maximum tolerated disagreement between source trim data and an already-proven
-/// analytic revolution support. Kept distinct from the hard geometry tolerance so
-/// trim-evidence handling can evolve without implicitly relaxing support identity or topology.
+/// Default source-evidence tolerance when STEP provides no trusted uncertainty context.
 pub(crate) const REVOLUTION_SOURCE_SUPPORT_TOL_MM: f64 = GEOM_TOL_MM;
+/// Hard ceiling for source-declared length uncertainty used by revolution recovery.
+/// This is 10 nm / 100x the strict default: enough for known exporter roundoff,
+/// still far below any dimension we want to approximate semantically.
+pub(crate) const MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM: f64 = 1.0e-5;
 const DIR_TOL: f64 = 1.0e-9;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -24,7 +28,14 @@ pub struct RecoveredSolidRevolution {
     pub axis_direction: [f64; 3],
     /// Deterministic local +X radial direction, perpendicular to the axis.
     pub radial_direction: [f64; 3],
+    /// Worst observed disagreement between source trim evidence and the recovered
+    /// analytic/profile geometry.
     pub max_residual_mm: f64,
+    /// Maximum source-evidence residual admitted for this recovery. Exact/legacy
+    /// paths use GEOM_TOL_MM; a straight analytic path may inherit a larger,
+    /// explicitly declared representation-context uncertainty, capped by
+    /// MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM.
+    pub source_tolerance_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -152,6 +163,156 @@ struct TopologyContext<'a> {
     index: &'a HashMap<u64, usize>,
 }
 
+fn source_tolerance_by_representation_item(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> HashMap<u64, f64> {
+    let mut context_cache = HashMap::<u64, Option<f64>>::new();
+    let mut out = HashMap::<u64, f64>::new();
+
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+            continue;
+        }
+        let Some((items, context_id)) = representation_items_and_context(entity) else {
+            continue;
+        };
+        let tolerance = *context_cache.entry(context_id).or_insert_with(|| {
+            representation_context_length_uncertainty_mm(context_id, entities, index)
+        });
+        let Some(tolerance) = tolerance else {
+            continue;
+        };
+
+        for item in items {
+            out.entry(item)
+                .and_modify(|existing| *existing = existing.min(tolerance))
+                .or_insert(tolerance);
+        }
+    }
+
+    out
+}
+
+fn representation_context_length_uncertainty_mm(
+    context_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<f64> {
+    let entity = entities.get(*index.get(&context_id)?)?;
+    let record = entity_record_named(entity, "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT")?;
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let [Parameter::List(uncertainties)] = params.as_slice() else {
+        return None;
+    };
+
+    let [uncertainty] = uncertainties.as_slice() else {
+        return None;
+    };
+    let uncertainty_id = entity_ref_value(uncertainty)?;
+    let value = uncertainty_measure_mm(uncertainty_id, entities, index)?;
+    if !value.is_finite() || value <= 0.0 || value > MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM {
+        return None;
+    }
+    Some(value.max(GEOM_TOL_MM))
+}
+
+fn uncertainty_measure_mm(
+    uncertainty_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<f64> {
+    let entity = entities.get(*index.get(&uncertainty_id)?)?;
+    let record = entity_record_named(entity, "UNCERTAINTY_MEASURE_WITH_UNIT")?;
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let [
+        Parameter::Typed { keyword, parameter },
+        unit,
+        Parameter::String(name),
+        _,
+    ] = params.as_slice()
+    else {
+        return None;
+    };
+    if keyword != "LENGTH_MEASURE" || name != "distance_accuracy_value" {
+        return None;
+    }
+    let value = parameter_number(parameter)?;
+    let unit_id = entity_ref_value(unit)?;
+    let scale_mm = si_length_unit_scale_mm(unit_id, entities, index)?;
+    let result = value * scale_mm;
+    result.is_finite().then_some(result)
+}
+
+fn si_length_unit_scale_mm(
+    unit_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<f64> {
+    let entity = entities.get(*index.get(&unit_id)?)?;
+    entity_record_named(entity, "LENGTH_UNIT")?;
+    let record = entity_record_named(entity, "SI_UNIT")?;
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let [prefix, Parameter::Enumeration(unit_name)] = params.as_slice() else {
+        return None;
+    };
+    if unit_name != "METRE" {
+        return None;
+    }
+
+    let metres = match prefix {
+        Parameter::NotProvided => 1.0,
+        Parameter::Enumeration(prefix) => match prefix.as_str() {
+            "EXA" => 1.0e18,
+            "PETA" => 1.0e15,
+            "TERA" => 1.0e12,
+            "GIGA" => 1.0e9,
+            "MEGA" => 1.0e6,
+            "KILO" => 1.0e3,
+            "HECTO" => 1.0e2,
+            "DECA" => 1.0e1,
+            "DECI" => 1.0e-1,
+            "CENTI" => 1.0e-2,
+            "MILLI" => 1.0e-3,
+            "MICRO" => 1.0e-6,
+            "NANO" => 1.0e-9,
+            "PICO" => 1.0e-12,
+            "FEMTO" => 1.0e-15,
+            "ATTO" => 1.0e-18,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(metres * 1000.0)
+}
+
+fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a Record> {
+    match entity {
+        EntityInstance::Simple { record, .. } => (record.name == name).then_some(record),
+        EntityInstance::Complex { subsuper, .. } => {
+            subsuper.0.iter().find(|record| record.name == name)
+        }
+    }
+}
+
+fn parameter_number(parameter: &Parameter) -> Option<f64> {
+    match parameter {
+        Parameter::Real(value) => Some(*value),
+        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Typed { parameter, .. } => parameter_number(parameter),
+        _ => None,
+    }
+}
+
 pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<SolidSurfaceSignature> {
     let index = build_index(entities);
     let mut out = Vec::new();
@@ -233,6 +394,7 @@ pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<Solid
 
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
     let index = build_index(entities);
+    let source_tolerances = source_tolerance_by_representation_item(entities, &index);
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = simple_record(entity) else {
@@ -242,7 +404,11 @@ pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSol
             continue;
         }
         let solid_id = entity_id(entity);
-        if let Some(candidate) = detect_one_solid(solid_id, entities, &index) {
+        let source_tolerance_mm = source_tolerances
+            .get(&solid_id)
+            .copied()
+            .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+        if let Some(candidate) = detect_one_solid(solid_id, entities, &index, source_tolerance_mm) {
             out.push(candidate);
         }
     }
@@ -254,6 +420,7 @@ fn detect_one_solid(
     solid_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
+    source_tolerance_mm: f64,
 ) -> Option<RecoveredSolidRevolution> {
     let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
     let faces = face_ids
@@ -334,8 +501,8 @@ fn detect_one_solid(
                 cylinder,
                 axis_origin_mm,
                 axis_direction,
-                &faces,
-                &edge_faces,
+                &context,
+                source_tolerance_mm,
             )?,
             SurfaceSupport::Cone(cone) => cone_profile_segment(
                 face_index,
@@ -343,8 +510,8 @@ fn detect_one_solid(
                 cone,
                 axis_origin_mm,
                 axis_direction,
-                &faces,
-                &edge_faces,
+                &context,
+                source_tolerance_mm,
             )?,
             SurfaceSupport::Revolution(revolution) => revolution_line_profile_segment(
                 face_index,
@@ -361,11 +528,12 @@ fn detect_one_solid(
                 axis_origin_mm,
                 axis_direction,
                 &context,
+                source_tolerance_mm,
             )?,
             _ => return None,
         };
         max_residual_mm = max_residual_mm.max(residual);
-        if max_residual_mm > REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+        if max_residual_mm > source_tolerance_mm {
             return None;
         }
         push_unique_segment(&mut segments, segment);
@@ -380,6 +548,7 @@ fn detect_one_solid(
         axis_direction,
         radial_direction,
         max_residual_mm,
+        source_tolerance_mm,
     })
 }
 
@@ -530,6 +699,7 @@ fn detect_full_ring_torus(
         axis_direction,
         radial_direction,
         max_residual_mm,
+        source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     })
 }
 
@@ -688,6 +858,7 @@ fn detect_spherical_cap(
         axis_direction,
         radial_direction,
         max_residual_mm,
+        source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     })
 }
 
@@ -786,6 +957,7 @@ fn detect_hemispherical_end(
         axis_origin_mm,
         axis_direction,
         context,
+        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     )?;
     max_residual_mm = max_residual_mm.max(plane_residual);
     let plane_radii = [plane_segment.a[0], plane_segment.b[0]];
@@ -809,8 +981,8 @@ fn detect_hemispherical_end(
             cylinder,
             axis_origin_mm,
             axis_direction,
-            faces,
-            context.edge_faces,
+            context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )?;
         max_residual_mm = max_residual_mm.max(residual);
         let axial = [segment.a[1], segment.b[1]];
@@ -968,6 +1140,7 @@ fn detect_hemispherical_end(
         axis_direction,
         radial_direction,
         max_residual_mm,
+        source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     })
 }
 
@@ -1018,8 +1191,8 @@ fn detect_mixed_curved_revolution(
                     cylinder,
                     axis_origin_mm,
                     axis_direction,
-                    faces,
-                    context.edge_faces,
+                    context,
+                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
                 )?;
                 max_residual_mm = max_residual_mm.max(residual);
                 push_unique_segment(&mut segments, segment);
@@ -1031,8 +1204,8 @@ fn detect_mixed_curved_revolution(
                     cone,
                     axis_origin_mm,
                     axis_direction,
-                    faces,
-                    context.edge_faces,
+                    context,
+                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
                 )?;
                 max_residual_mm = max_residual_mm.max(residual);
                 push_unique_segment(&mut segments, segment);
@@ -1057,6 +1230,7 @@ fn detect_mixed_curved_revolution(
                     axis_origin_mm,
                     axis_direction,
                     context,
+                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
                 )?;
                 max_residual_mm = max_residual_mm.max(residual);
                 push_unique_segment(&mut segments, segment);
@@ -1160,6 +1334,7 @@ fn detect_mixed_curved_revolution(
         axis_direction,
         radial_direction,
         max_residual_mm,
+        source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     })
 }
 
@@ -1629,8 +1804,8 @@ fn cylinder_profile_segment(
     cylinder: brep::CylinderSupport,
     axis_origin: [f64; 3],
     axis: [f64; 3],
-    faces: &[FaceInfo],
-    edge_faces: &HashMap<u64, Vec<usize>>,
+    context: &TopologyContext<'_>,
+    source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
     if face.loops.len() != 1
         || !parallel(cylinder.axis, axis)
@@ -1692,8 +1867,8 @@ fn cylinder_profile_segment(
                 }
             }
             CurveSupport::BSpline(_) => {
-                let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
-                let SurfaceSupport::Plane(plane) = faces.get(neighbor)?.surface else {
+                let neighbor = unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+                let SurfaceSupport::Plane(plane) = context.faces.get(neighbor)?.surface else {
                     return None;
                 };
                 if !parallel(plane.normal, axis) {
@@ -1718,7 +1893,7 @@ fn cylinder_profile_segment(
         }
     }
 
-    if source_support_residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+    if source_support_residual > source_tolerance_mm {
         return None;
     }
 
@@ -1736,10 +1911,9 @@ fn cylinder_profile_segment(
     }
 
     if boundary_t.len() >= 2
-        && raw_t.iter().any(|&t| {
-            t < min_t - REVOLUTION_SOURCE_SUPPORT_TOL_MM
-                || t > max_t + REVOLUTION_SOURCE_SUPPORT_TOL_MM
-        })
+        && raw_t
+            .iter()
+            .any(|&t| t < min_t - source_tolerance_mm || t > max_t + source_tolerance_mm)
     {
         return None;
     }
@@ -1768,8 +1942,8 @@ fn cone_profile_segment(
     cone: brep::ConeSupport,
     axis_origin: [f64; 3],
     axis: [f64; 3],
-    faces: &[FaceInfo],
-    edge_faces: &HashMap<u64, Vec<usize>>,
+    context: &TopologyContext<'_>,
+    source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
     if face.loops.len() != 1
         || !parallel(cone.axis, axis)
@@ -1814,16 +1988,14 @@ fn cone_profile_segment(
                 return None;
             }
             let source_radius = source_radius_at(sample[1]);
-            if !source_radius.is_finite() || source_radius < -REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+            if !source_radius.is_finite() || source_radius < -source_tolerance_mm {
                 return None;
             }
             source_support_residual =
                 source_support_residual.max((sample[0] - source_radius).abs());
             raw_samples.push(sample);
 
-            if matches!(edge.support, CurveSupport::Line(_))
-                && sample[0] <= REVOLUTION_SOURCE_SUPPORT_TOL_MM
-            {
+            if matches!(edge.support, CurveSupport::Line(_)) && sample[0] <= GEOM_TOL_MM {
                 let entry = apex_vertices.entry(vertex_id).or_insert((0, sample));
                 entry.0 += 1;
                 entry.1[0] = entry.1[0].min(sample[0]);
@@ -1834,14 +2006,26 @@ fn cone_profile_segment(
         match &edge.support {
             CurveSupport::Line(line) => {
                 let direction = normalize(line.direction)?;
-                if norm(sub(edge.end_mm, edge.start_mm)) <= GEOM_TOL_MM {
+                let edge_length = norm(sub(edge.end_mm, edge.start_mm));
+                if edge_length <= GEOM_TOL_MM {
                     return None;
                 }
-                let axial = dot(direction, axis).abs();
-                let radial = norm(sub(direction, mul(axis, dot(direction, axis))));
-                if (radial.atan2(axial) - cone.semi_angle_rad).abs() > DIR_TOL {
+
+                let signed_axial = dot(direction, axis);
+                let radial_vector = sub(direction, mul(axis, signed_axial));
+                let radial = norm(radial_vector);
+                if radial <= DIR_TOL {
                     return None;
                 }
+                let meridian_normal = normalize(cross(axis, radial_vector))?;
+                source_support_residual = source_support_residual
+                    .max(dot(sub(line.origin_mm, axis_origin), meridian_normal).abs());
+
+                let line_angle = radial.atan2(signed_axial.abs());
+                let angle_error = (line_angle - cone.semi_angle_rad).abs();
+                source_support_residual =
+                    source_support_residual.max(edge_length * angle_error.sin().abs());
+
                 for point in [edge.start_mm, edge.end_mm] {
                     source_support_residual = source_support_residual
                         .max(norm(cross(sub(point, line.origin_mm), direction)));
@@ -1855,22 +2039,61 @@ fn cone_profile_segment(
                 {
                     return None;
                 }
-                let t = axial_coordinate(circle.center_mm, axis_origin, axis);
-                let source_radius = source_radius_at(t);
-                if !source_radius.is_finite() || source_radius < -REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+                let circle_t = axial_coordinate(circle.center_mm, axis_origin, axis);
+                if !circle_t.is_finite() {
+                    return None;
+                }
+                let mut boundary_sample = [circle.radius_mm, circle_t];
+
+                if let Some(neighbor) =
+                    unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                {
+                    match context.faces.get(neighbor)?.surface {
+                        SurfaceSupport::Plane(plane) => {
+                            if !parallel(plane.normal, axis) {
+                                return None;
+                            }
+                            let plane_t = axial_coordinate(plane.origin_mm, axis_origin, axis);
+                            if !plane_t.is_finite() {
+                                return None;
+                            }
+                            source_support_residual = source_support_residual
+                                .max((circle_t - plane_t).abs())
+                                .max(plane.max_residual_mm);
+                            boundary_sample[1] = plane_t;
+                        }
+                        SurfaceSupport::Cylinder(cylinder) => {
+                            if !parallel(cylinder.axis, axis)
+                                || axis_distance(cylinder.axis_origin_mm, axis_origin, axis)
+                                    > GEOM_TOL_MM
+                                || !cylinder.radius_mm.is_finite()
+                                || cylinder.radius_mm <= GEOM_TOL_MM
+                            {
+                                return None;
+                            }
+                            source_support_residual = source_support_residual
+                                .max((circle.radius_mm - cylinder.radius_mm).abs());
+                            boundary_sample[0] = cylinder.radius_mm;
+                        }
+                        _ => {}
+                    }
+                }
+
+                let source_radius = source_radius_at(boundary_sample[1]);
+                if !source_radius.is_finite() || source_radius < -source_tolerance_mm {
                     return None;
                 }
                 source_support_residual =
-                    source_support_residual.max((circle.radius_mm - source_radius).abs());
+                    source_support_residual.max((boundary_sample[0] - source_radius).abs());
                 for point in [edge.start_mm, edge.end_mm] {
                     source_support_residual =
                         source_support_residual.max(circle_point_residual(point, *circle));
                 }
-                push_unique_point(&mut boundary_samples, [circle.radius_mm, t]);
+                push_unique_point(&mut boundary_samples, boundary_sample);
             }
             CurveSupport::BSpline(_) => {
-                let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
-                let SurfaceSupport::Plane(plane) = faces.get(neighbor)?.surface else {
+                let neighbor = unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)?;
+                let SurfaceSupport::Plane(plane) = context.faces.get(neighbor)?.surface else {
                     return None;
                 };
                 if !parallel(plane.normal, axis) {
@@ -1878,7 +2101,7 @@ fn cone_profile_segment(
                 }
                 let t = axial_coordinate(plane.origin_mm, axis_origin, axis);
                 let source_radius = source_radius_at(t);
-                if !source_radius.is_finite() || source_radius < -REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+                if !source_radius.is_finite() || source_radius < -source_tolerance_mm {
                     return None;
                 }
                 for point in [edge.start_mm, edge.end_mm] {
@@ -1893,7 +2116,7 @@ fn cone_profile_segment(
         }
     }
 
-    if source_support_residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+    if source_support_residual > source_tolerance_mm {
         return None;
     }
 
@@ -1948,12 +2171,12 @@ fn cone_profile_segment(
 
     for sample in raw_samples {
         let radius = radius_at(sample[1]);
-        if !radius.is_finite() || radius < -REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+        if !radius.is_finite() || radius < -source_tolerance_mm {
             return None;
         }
         source_support_residual = source_support_residual.max((sample[0] - radius.max(0.0)).abs());
     }
-    if source_support_residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM {
+    if source_support_residual > source_tolerance_mm {
         return None;
     }
 
@@ -2142,6 +2365,7 @@ fn plane_profile_segment(
     axis_origin: [f64; 3],
     axis: [f64; 3],
     context: &TopologyContext<'_>,
+    source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
     if face.loops.is_empty() || face.loops.len() > 2 || !parallel(plane.normal, axis) {
         return None;
@@ -2223,8 +2447,7 @@ fn plane_profile_segment(
                     geometry_residual = geometry_residual.max(line_axis_distance);
                     if line_axis_distance <= GEOM_TOL_MM
                         && [edge.start_mm, edge.end_mm].iter().any(|point| {
-                            point_axis_distance(*point, axis_origin, axis)
-                                <= REVOLUTION_SOURCE_SUPPORT_TOL_MM
+                            point_axis_distance(*point, axis_origin, axis) <= GEOM_TOL_MM
                         })
                     {
                         touches_axis = true;
@@ -2257,8 +2480,8 @@ fn plane_profile_segment(
                                 cone,
                                 axis_origin,
                                 axis,
-                                context.faces,
-                                context.edge_faces,
+                                context,
+                                source_tolerance_mm,
                             )?;
                             source_support_residual =
                                 source_support_residual.max(cone_source_residual);
@@ -2292,8 +2515,7 @@ fn plane_profile_segment(
         }
     }
 
-    if geometry_residual > GEOM_TOL_MM || source_support_residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM
-    {
+    if geometry_residual > GEOM_TOL_MM || source_support_residual > source_tolerance_mm {
         return None;
     }
 
@@ -3309,6 +3531,51 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reads_representation_length_uncertainty_with_hard_cap() {
+        fn tolerance_from(text: &str) -> Option<f64> {
+            let exchange = ruststep::parser::parse(text).unwrap();
+            let entities = &exchange.data.first().unwrap().entities;
+            let index = build_index(entities);
+            let solid_id = entities
+                .iter()
+                .find(|entity| {
+                    simple_record(entity).is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+                })
+                .map(entity_id)
+                .unwrap();
+            source_tolerance_by_representation_item(entities, &index)
+                .get(&solid_id)
+                .copied()
+        }
+
+        let source = std::str::from_utf8(include_bytes!(
+            "../validation/fixtures/native_conical_frustum.step"
+        ))
+        .unwrap();
+        assert_eq!(tolerance_from(source), Some(GEOM_TOL_MM));
+
+        let widened = source.replacen("LENGTH_MEASURE(1.E-07)", "LENGTH_MEASURE(5.E-06)", 1);
+        assert!((tolerance_from(&widened).unwrap() - 5.0e-6).abs() <= 1.0e-15);
+
+        let excessive = source.replacen("LENGTH_MEASURE(1.E-07)", "LENGTH_MEASURE(2.E-05)", 1);
+        assert_eq!(tolerance_from(&excessive), None);
+
+        let centimetres = source.replacen(
+            "LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.)",
+            "LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.CENTI.,.METRE.)",
+            1,
+        );
+        assert!((tolerance_from(&centimetres).unwrap() - 1.0e-6).abs() <= 1.0e-15);
+
+        let ambiguous = source.replacen(
+            "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#117))",
+            "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#117,#117))",
+            1,
+        );
+        assert_eq!(tolerance_from(&ambiguous), None);
+    }
+
     fn test_circle_edge(
         edge_id: u64,
         start_mm: [f64; 3],
@@ -3420,6 +3687,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
             &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
         .unwrap();
         assert_eq!(segment.a, [0.0, 0.0]);
@@ -3446,6 +3714,7 @@ mod tests {
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
                 &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
             )
             .is_none()
         );
@@ -3481,8 +3750,18 @@ mod tests {
             )
         };
 
+        let empty_edge_faces = HashMap::new();
+        let empty_entities = Vec::new();
+        let empty_index = HashMap::new();
+
         let noisy = make_cylinder(0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         let faces = vec![noisy.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
         let (segment, residual) = cylinder_profile_segment(
             0,
             &noisy,
@@ -3492,8 +3771,8 @@ mod tests {
             },
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
-            &faces,
-            &HashMap::new(),
+            &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
         .unwrap();
         assert_eq!(segment.a, [1.0, 0.0]);
@@ -3502,6 +3781,12 @@ mod tests {
 
         let too_noisy = make_cylinder(2.0 * REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         let faces = vec![too_noisy.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
         assert!(
             cylinder_profile_segment(
                 0,
@@ -3512,8 +3797,8 @@ mod tests {
                 },
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
-                &faces,
-                &HashMap::new(),
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
             )
             .is_none()
         );
@@ -3549,7 +3834,16 @@ mod tests {
                 apex_line_b,
             ],
         );
+        let empty_edge_faces = HashMap::new();
+        let empty_entities = Vec::new();
+        let empty_index = HashMap::new();
         let faces = vec![apex_face.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
         let (segment, residual) = cone_profile_segment(
             0,
             &apex_face,
@@ -3559,8 +3853,8 @@ mod tests {
             },
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
-            &faces,
-            &HashMap::new(),
+            &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
         .unwrap();
         assert_eq!(segment.a, [0.0, 0.0]);
@@ -3605,6 +3899,12 @@ mod tests {
 
         let noisy = make_frustum(1.0 + 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         let faces = vec![noisy.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
         let (segment, residual) = cone_profile_segment(
             0,
             &noisy,
@@ -3614,8 +3914,8 @@ mod tests {
             },
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
-            &faces,
-            &HashMap::new(),
+            &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
         .unwrap();
         assert_eq!(segment.a, [1.0, 0.0]);
@@ -3624,6 +3924,12 @@ mod tests {
 
         let too_noisy = make_frustum(1.0 + 2.0 * REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         let faces = vec![too_noisy.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
         assert!(
             cone_profile_segment(
                 0,
@@ -3634,11 +3940,157 @@ mod tests {
                 },
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
-                &faces,
-                &HashMap::new(),
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
             )
             .is_none()
         );
+
+        let declared_tolerance_mm = 1.0e-6;
+        let declared_noisy = make_frustum(1.0 + 0.5 * declared_tolerance_mm);
+        let faces = vec![declared_noisy.clone()];
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &empty_edge_faces,
+            entities: &empty_entities,
+            index: &empty_index,
+        };
+        assert!(
+            cone_profile_segment(
+                0,
+                &declared_noisy,
+                match declared_noisy.surface {
+                    SurfaceSupport::Cone(cone) => cone,
+                    _ => unreachable!(),
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            )
+            .is_none()
+        );
+        assert!(
+            cone_profile_segment(
+                0,
+                &declared_noisy,
+                match declared_noisy.surface {
+                    SurfaceSupport::Cone(cone) => cone,
+                    _ => unreachable!(),
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                &context,
+                declared_tolerance_mm,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn cone_profile_uses_neighbor_constraint_plus_repeated_trim_circle() {
+        let bottom_pos = [1.5, 0.0, 0.5000005];
+        let bottom_neg = [-1.5, 0.0, 0.5000005];
+        let top_pos = [2.0000004, 0.0, 1.0000004];
+        let top_neg = [-2.0000004, 0.0, 1.0000004];
+
+        let bottom = test_circle_edge(
+            1100,
+            bottom_pos,
+            bottom_neg,
+            [0.0, 0.0, 0.5000005],
+            [0.0, 0.0, 1.0],
+            1.5,
+        );
+        let top = test_circle_edge(
+            1102,
+            top_neg,
+            top_pos,
+            [0.0, 0.0, 1.0000004],
+            [0.0, 0.0, 1.0],
+            2.0000004,
+        );
+        let cone_face = test_face(
+            SurfaceSupport::Cone(brep::ConeSupport {
+                reference_origin_mm: [0.0, 0.0, 0.0],
+                axis: [0.0, 0.0, 1.0],
+                x_direction: [1.0, 0.0, 0.0],
+                reference_radius_mm: 1.0,
+                semi_angle_rad: std::f64::consts::FRAC_PI_4,
+            }),
+            vec![
+                bottom.clone(),
+                test_line_edge(1101, bottom_neg, top_neg),
+                top.clone(),
+                test_line_edge(1103, top_pos, bottom_pos),
+            ],
+        );
+        let cylinder_face = test_face(
+            SurfaceSupport::Cylinder(brep::CylinderSupport {
+                axis_origin_mm: [0.0, 0.0, 0.0],
+                axis: [0.0, 0.0, 1.0],
+                x_direction: [1.0, 0.0, 0.0],
+                radius_mm: 1.5,
+            }),
+            vec![bottom],
+        );
+        let plane_face = test_face(
+            SurfaceSupport::Plane(brep::PlaneSupport {
+                origin_mm: [0.0, 0.0, 1.0],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            vec![top],
+        );
+        let faces = vec![cone_face.clone(), cylinder_face, plane_face];
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+
+        assert!(
+            cone_profile_segment(
+                0,
+                &cone_face,
+                match cone_face.surface {
+                    SurfaceSupport::Cone(cone) => cone,
+                    _ => unreachable!(),
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            )
+            .is_none()
+        );
+
+        let (segment, residual) = cone_profile_segment(
+            0,
+            &cone_face,
+            match cone_face.surface {
+                SurfaceSupport::Cone(cone) => cone,
+                _ => unreachable!(),
+            },
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            &context,
+            1.0e-5,
+        )
+        .unwrap();
+
+        // The cylinder constrains radius while preserving the repeated trim-circle
+        // axial coordinate; the plane constrains axial position while preserving
+        // the repeated trim-circle radius. The cone support is evidence, not the
+        // sole source of truth when its own parameters disagree within STEP uncertainty.
+        assert_eq!(segment.a, [1.5, 0.5000005]);
+        assert_eq!(segment.b, [2.0000004, 1.0]);
+        assert!(residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+        assert!(residual < 1.0e-5);
     }
 
     fn split_hemisphere_faces(cylinder_radius_mm: f64) -> Vec<FaceInfo> {
@@ -4361,6 +4813,36 @@ mod tests {
             vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
+        assert_eq!(
+            recovered[0].source_tolerance_mm,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM
+        );
+
+        let declared_uncertainty = String::from_utf8_lossy(bytes).replacen(
+            "LENGTH_MEASURE(1.E-07)",
+            "LENGTH_MEASURE(1.E-05)",
+            1,
+        );
+        let recovered_with_declared_uncertainty =
+            crate::detect_solid_revolutions_bytes(declared_uncertainty.as_bytes()).unwrap();
+        assert_eq!(recovered_with_declared_uncertainty.len(), 1);
+        assert_eq!(
+            recovered_with_declared_uncertainty[0].source_tolerance_mm,
+            MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM
+        );
+
+        let oversized_uncertainty = String::from_utf8_lossy(bytes).replacen(
+            "LENGTH_MEASURE(1.E-07)",
+            "LENGTH_MEASURE(1.E-04)",
+            1,
+        );
+        let recovered_with_oversized_uncertainty =
+            crate::detect_solid_revolutions_bytes(oversized_uncertainty.as_bytes()).unwrap();
+        assert_eq!(recovered_with_oversized_uncertainty.len(), 1);
+        assert_eq!(
+            recovered_with_oversized_uncertainty[0].source_tolerance_mm,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM
+        );
 
         let tampered = String::from_utf8_lossy(bytes).replacen(
             "CONICAL_SURFACE('',#32,2.,0.463647609001)",
