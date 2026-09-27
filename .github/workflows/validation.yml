@@ -101,7 +101,7 @@ jobs:
         run: cargo build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize --bin step-revolution-scan --bin step-support-scan
 
       - name: Cache upstream STEP fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/step-redox-validation
           key: step-fixtures-${{ hashFiles('validation/fixtures.json') }}
