@@ -952,7 +952,10 @@ fn push_child_product(
     pd
 }
 
-#[expect(clippy::too_many_arguments, reason = "STEP assembly emission naturally carries the linked entity identifiers as separate arguments")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP assembly emission naturally carries the linked entity identifiers as separate arguments"
+)]
 fn push_assembly_occurrence(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
