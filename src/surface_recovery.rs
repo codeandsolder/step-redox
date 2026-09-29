@@ -606,7 +606,10 @@ fn normalized_expanded_knots(
     Some(expanded)
 }
 
-#[expect(clippy::too_many_arguments, reason = "STEP B-spline entity construction mirrors the schema fields directly")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP B-spline entity construction mirrors the schema fields directly"
+)]
 fn bspline_curve_with_knots(
     id: u64,
     degree: usize,
@@ -637,7 +640,10 @@ fn bspline_curve_with_knots(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "STEP B-spline entity construction mirrors the schema fields directly")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP B-spline entity construction mirrors the schema fields directly"
+)]
 fn rational_bspline_curve(
     id: u64,
     degree: usize,
