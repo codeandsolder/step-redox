@@ -2447,8 +2447,8 @@ mod tests {
     }
 
     #[test]
-    fn shape_key_ignores_edge_wrapper_serialization() {
-        fn key(loop_entities: &str) -> ShapeKey {
+    fn shape_key_ignores_edge_wrapper_serialization() -> anyhow::Result<()> {
+        fn key(loop_entities: &str) -> anyhow::Result<ShapeKey> {
             let text = format!(
                 "ISO-10303-21;
 HEADER;
@@ -2477,23 +2477,24 @@ ENDSEC;
 END-ISO-10303-21;
 "
             );
-            let exchange = ruststep::parser::parse(&text).unwrap();
+            let exchange = ruststep::parser::parse(&text)?;
             let entities = &exchange.data[0].entities;
             let index = build_index(entities);
-            solid_shape_key(17, entities, &index).unwrap().0
+            Ok(solid_shape_key(17, entities, &index)?.0)
         }
 
-        let direct = key("#10=EDGE_LOOP('',(#8));");
+        let direct = key("#10=EDGE_LOOP('',(#8));")?;
         let nested = key("#9=ORIENTED_EDGE('',*,*,#8,.F.);
 #19=ORIENTED_EDGE('',*,*,#9,.F.);
-#10=EDGE_LOOP('',(#19));");
+#10=EDGE_LOOP('',(#19));")?;
         assert_eq!(direct, nested);
         assert_eq!(direct.oriented_edges, 1);
+        Ok(())
     }
 
     #[test]
-    fn shell_face_list_ignores_non_face_members() {
-        fn parse(data: &str) -> (Vec<EntityInstance>, HashMap<u64, usize>) {
+    fn shell_face_list_ignores_non_face_members() -> anyhow::Result<()> {
+        fn parse(data: &str) -> anyhow::Result<(Vec<EntityInstance>, HashMap<u64, usize>)> {
             let text = format!(
                 "ISO-10303-21;
 HEADER;
@@ -2507,10 +2508,10 @@ ENDSEC;
 END-ISO-10303-21;
 "
             );
-            let exchange = ruststep::parser::parse(&text).unwrap();
+            let exchange = ruststep::parser::parse(&text)?;
             let entities = exchange.data[0].entities.clone();
             let index = build_index(&entities);
-            (entities, index)
+            Ok((entities, index))
         }
 
         let common = "
@@ -2535,7 +2536,7 @@ END-ISO-10303-21;
             "{common}
 #16=CLOSED_SHELL('',(#15,#9));
 #17=MANIFOLD_SOLID_BREP('',#16);"
-        ));
+        ))?;
         assert_eq!(
             manifold_solid_face_ids(17, &entities, &index),
             Some(vec![15])
@@ -2546,16 +2547,17 @@ END-ISO-10303-21;
 #16=CLOSED_SHELL('',(#15,#18));
 #17=MANIFOLD_SOLID_BREP('',#16);
 #18=DIRECTION('',(0.,1.,0.));"
-        ));
+        ))?;
         assert_eq!(
             manifold_solid_face_ids(17, &entities, &index),
             Some(vec![15])
         );
         let raw = closure_from(17, &entities, &index);
-        let semantic = semantic_solid_closure(17, &entities, &index).unwrap();
+        let semantic = semantic_solid_closure(17, &entities, &index)?;
         assert!(raw.contains(&18));
         assert!(!semantic.contains(&18));
         assert!(semantic.contains(&15));
+        Ok(())
     }
 
     #[test]
@@ -2568,20 +2570,25 @@ END-ISO-10303-21;
     }
 
     #[test]
-    fn axis_offset_ignores_slide_along_axis() {
+    fn axis_offset_ignores_slide_along_axis() -> anyhow::Result<()> {
         let center = [0.0, 0.0, 0.0];
         let axis = [0.0, 2.0, 0.0];
-        let a = canonical_axis_offset([1.25, -7.0, 3.5], axis, center, 0).unwrap();
-        let b = canonical_axis_offset([1.25, 42.0, 3.5], axis, center, 0).unwrap();
+        let a = canonical_axis_offset([1.25, -7.0, 3.5], axis, center, 0)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
+        let b = canonical_axis_offset([1.25, 42.0, 3.5], axis, center, 0)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
         assert_eq!(a, b);
         assert_eq!(a, [125_000, 0, 350_000]);
+        Ok(())
     }
 
     #[test]
-    fn axis_offset_rotates_with_solid_quarter_turn() {
+    fn axis_offset_rotates_with_solid_quarter_turn() -> anyhow::Result<()> {
         let center = [0.0, 0.0, 0.0];
         let axis = [0.0, 0.0, 1.0];
-        let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1).unwrap();
+        let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
         assert_eq!(a, [-100_000, 200_000, 0]);
+        Ok(())
     }
 }

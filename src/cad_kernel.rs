@@ -840,10 +840,10 @@ pub mod monstertruck {
 
             let fragment = crate::cad_recovery::recover_solid_extrusion_fragment(&recovered[0])?;
             let CadNode::Transform { child, .. } = fragment.model.node(fragment.root)? else {
-                panic!("expected transform root");
+                bail!("expected transform root");
             };
             let CadNode::Extrude { profile, .. } = fragment.model.node(*child)? else {
-                panic!("expected extrusion child");
+                bail!("expected extrusion child");
             };
             assert_eq!(profile.loops.len(), 2);
 
@@ -993,7 +993,7 @@ pub mod monstertruck {
             model.add_root(patterned)?;
 
             let error = match MonstertruckKernel.evaluate(&model, patterned) {
-                Ok(_) => panic!("unimplemented pattern unexpectedly evaluated"),
+                Ok(_) => bail!("unimplemented pattern unexpectedly evaluated"),
                 Err(error) => error,
             };
             assert!(error.to_string().contains("does not yet evaluate"));

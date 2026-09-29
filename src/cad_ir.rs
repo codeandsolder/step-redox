@@ -528,25 +528,27 @@ impl<'a> KclEmitter<'a> {
                     anyhow::anyhow!("KCL emitter currently needs one line polygon")
                 })?;
                 emit_polygon_sketch(&mut self.output, id, &points)?;
-                self.output.push_str(&format!(
-                    "n{} = extrude(p{}, length = {})\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = extrude(p{}, length = {})\n",
                     id.0,
                     id.0,
                     scalar(vector_mm[2])
-                ));
+                )?;
             }
             CadNode::Transform { transform, child } => {
                 let xyz = transform.pure_translation().ok_or_else(|| {
                     anyhow::anyhow!("KCL emitter currently supports translation only")
                 })?;
-                self.output.push_str(&format!(
-                    "n{} = n{} |> translate(xyz = [{}, {}, {}], global = true)\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = n{} |> translate(xyz = [{}, {}, {}], global = true)\n",
                     id.0,
                     child.0,
                     scalar(xyz[0]),
                     scalar(xyz[1]),
                     scalar(xyz[2])
-                ));
+                )?;
             }
             CadNode::Pattern {
                 pattern: PatternSpec::Linear { count, step_mm },
@@ -569,15 +571,16 @@ impl<'a> KclEmitter<'a> {
                     step_mm[1] / distance,
                     step_mm[2] / distance,
                 ];
-                self.output.push_str(&format!(
-                    "n{} = n{} |> patternLinear3d(instances = {count}, distance = {}, axis = [{}, {}, {}])\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = n{} |> patternLinear3d(instances = {count}, distance = {}, axis = [{}, {}, {}])\n",
                     id.0,
                     child.0,
                     scalar(distance),
                     scalar(axis[0]),
                     scalar(axis[1]),
                     scalar(axis[2])
-                ));
+                )?;
             }
             unsupported => bail!("KCL emitter does not support node {id:?}: {unsupported:?}"),
         }
@@ -592,33 +595,37 @@ fn emit_polygon_sketch(output: &mut String, id: NodeId, points: &[[f64; 2]]) -> 
         bail!("polygon needs at least three points");
     }
     let first = points[0];
-    output.push_str(&format!(
-        "s{} = startSketchOn(XY)\np{} = startProfile(s{}, at = [{}, {}])\n",
+    writeln!(
+        output,
+        "s{} = startSketchOn(XY)\np{} = startProfile(s{}, at = [{}, {}])",
         id.0,
         id.0,
         id.0,
         scalar(first[0]),
         scalar(first[1])
-    ));
+    )?;
     for pair in points.windows(2) {
-        output.push_str(&format!(
-            "  |> line(end = [{}, {}])\n",
+        writeln!(
+            output,
+            "  |> line(end = [{}, {}])",
             scalar(pair[1][0] - pair[0][0]),
             scalar(pair[1][1] - pair[0][1])
-        ));
+        )?;
     }
     output.push_str("  |> close()\n");
     Ok(())
 }
 
-fn exact_f64_eq(left: f64, right: f64) -> bool {
+const F64_MAGNITUDE_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+
+const fn exact_f64_eq(left: f64, right: f64) -> bool {
     if !left.is_finite() || !right.is_finite() {
         return false;
     }
-    const MAGNITUDE_MASK: u64 = 0x7fff_ffff_ffff_ffff;
     let left_bits = left.to_bits();
     let right_bits = right.to_bits();
-    left_bits == right_bits || (left_bits & MAGNITUDE_MASK == 0 && right_bits & MAGNITUDE_MASK == 0)
+    left_bits == right_bits
+        || (left_bits & F64_MAGNITUDE_MASK == 0 && right_bits & F64_MAGNITUDE_MASK == 0)
 }
 
 fn exact_point2_eq(left: [f64; 2], right: [f64; 2]) -> bool {

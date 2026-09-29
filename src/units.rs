@@ -142,12 +142,17 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
 mod tests {
     use super::*;
 
-    fn parse_units(data: &str) -> (Vec<EntityInstance>, HashMap<u64, usize>) {
+    fn parse_units(data: &str) -> anyhow::Result<(Vec<EntityInstance>, HashMap<u64, usize>)> {
         let text = format!(
             "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{data}\nENDSEC;\nEND-ISO-10303-21;\n"
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
-        let entities = exchange.data.into_iter().next().unwrap().entities;
+        let exchange = ruststep::parser::parse(&text)?;
+        let entities = exchange
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("parsed exchange contains no DATA section"))?
+            .entities;
         let index = entities
             .iter()
             .enumerate()
@@ -158,11 +163,11 @@ mod tests {
                 (id, idx)
             })
             .collect();
-        (entities, index)
+        Ok((entities, index))
     }
 
     #[test]
-    fn resolves_direct_and_conversion_based_length_units() {
+    fn resolves_direct_and_conversion_based_length_units() -> anyhow::Result<()> {
         let (entities, index) = parse_units(
             "#1=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);\n\
              #2=(NAMED_UNIT(#1)LENGTH_UNIT()SI_UNIT(.MILLI.,.METRE.));\n\
@@ -170,10 +175,11 @@ mod tests {
              #4=(CONVERSION_BASED_UNIT('MILLIMETRE',#3)LENGTH_UNIT()NAMED_UNIT(#1));\n\
              #5=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#2);\n\
              #6=(CONVERSION_BASED_UNIT('INCH',#5)LENGTH_UNIT()NAMED_UNIT(#1));",
-        );
+        )?;
 
         assert_eq!(length_unit_scale_mm(2, &entities, &index), Some(1.0));
         assert_eq!(length_unit_scale_mm(4, &entities, &index), Some(1.0));
         assert_eq!(length_unit_scale_mm(6, &entities, &index), Some(25.4));
+        Ok(())
     }
 }

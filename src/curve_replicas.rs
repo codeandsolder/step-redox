@@ -385,25 +385,38 @@ mod tests {
         }
     }
 
-    fn replica_origin(entities: &[EntityInstance], curve_id: u64) -> [f64; 3] {
+    fn replica_origin(entities: &[EntityInstance], curve_id: u64) -> anyhow::Result<[f64; 3]> {
         let index = build_index(entities);
-        let record = crate::instances::simple_record(&entities[index[&curve_id]]).unwrap();
+        let curve_index = index
+            .get(&curve_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("missing curve replica #{curve_id}"))?;
+        let record = crate::instances::simple_record(&entities[curve_index])
+            .ok_or_else(|| anyhow::anyhow!("curve replica #{curve_id} is not a simple record"))?;
         assert_eq!(record.name, "CURVE_REPLICA");
         let Parameter::List(params) = &record.parameter else {
-            panic!("replica parameters are not a list");
+            anyhow::bail!("replica parameters are not a list");
         };
-        let transform_id = entity_ref_value(&params[2]).unwrap();
-        let transform = crate::instances::simple_record(&entities[index[&transform_id]]).unwrap();
+        let transform_id = entity_ref_value(&params[2])
+            .ok_or_else(|| anyhow::anyhow!("replica has no transformation reference"))?;
+        let transform_index = index
+            .get(&transform_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("missing transform #{transform_id}"))?;
+        let transform = crate::instances::simple_record(&entities[transform_index])
+            .ok_or_else(|| anyhow::anyhow!("transform #{transform_id} is not a simple record"))?;
         assert_eq!(transform.name, "CARTESIAN_TRANSFORMATION_OPERATOR_3D");
         let Parameter::List(tparams) = &transform.parameter else {
-            panic!("transform parameters are not a list");
+            anyhow::bail!("transform parameters are not a list");
         };
-        let origin_id = entity_ref_value(&tparams[5]).unwrap();
-        cartesian_point(origin_id, entities, &index).unwrap()
+        let origin_id = entity_ref_value(&tparams[5])
+            .ok_or_else(|| anyhow::anyhow!("transform has no origin reference"))?;
+        cartesian_point(origin_id, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("missing transform origin point #{origin_id}"))
     }
 
     #[test]
-    fn replica_transform_uses_parent_to_target_translation() {
+    fn replica_transform_uses_parent_to_target_translation() -> anyhow::Result<()> {
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
             point(2, [1.0, 0.0, 0.0]),
@@ -415,11 +428,12 @@ mod tests {
         let stats = instance_translated_bspline_curves(&mut entities);
         assert_eq!(stats.replicas, 1);
         assert_eq!(stats.direct_aliases, 0);
-        assert_eq!(replica_origin(&entities, 20), [3.0, -2.0, 1.0]);
+        assert_eq!(replica_origin(&entities, 20)?, [3.0, -2.0, 1.0]);
+        Ok(())
     }
 
     #[test]
-    fn sub_geometry_tolerance_translation_is_not_discarded() {
+    fn sub_geometry_tolerance_translation_is_not_discarded() -> anyhow::Result<()> {
         let delta = 1.0e-8;
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
@@ -432,7 +446,8 @@ mod tests {
         let stats = instance_translated_bspline_curves(&mut entities);
         assert_eq!(stats.direct_aliases, 0);
         assert_eq!(stats.replicas, 1);
-        let got = replica_origin(&entities, 20);
+        let got = replica_origin(&entities, 20)?;
         assert!((got[0] - delta).abs() <= 1.0e-15, "{got:?}");
+        Ok(())
     }
 }

@@ -1077,7 +1077,7 @@ END-ISO-10303-21;
     }
 
     #[test]
-    fn parses_rotational_analytic_surface_supports() {
+    fn parses_rotational_analytic_surface_supports() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(1.,2.,3.));
              #2=DIRECTION('',(0.,0.,2.));
@@ -1091,7 +1091,7 @@ END-ISO-10303-21;
              #10=LINE('',#1,#9);
              #11=SURFACE_OF_REVOLUTION('',#10,#8);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1100,7 +1100,7 @@ END-ISO-10303-21;
             .collect::<HashMap<_, _>>();
 
         let SurfaceSupport::Cone(cone) = surface_support(5, entities, &index) else {
-            panic!("expected cone support");
+            anyhow::bail!("expected cone support");
         };
         assert_eq!(cone.reference_origin_mm, [1.0, 2.0, 3.0]);
         assert_eq!(cone.axis, [0.0, 0.0, 1.0]);
@@ -1108,33 +1108,34 @@ END-ISO-10303-21;
         assert_eq!(cone.semi_angle_rad, 0.25);
 
         let SurfaceSupport::Sphere(sphere) = surface_support(6, entities, &index) else {
-            panic!("expected sphere support");
+            anyhow::bail!("expected sphere support");
         };
         assert_eq!(sphere.center_mm, [1.0, 2.0, 3.0]);
         assert_eq!(sphere.radius_mm, 4.0);
 
         let SurfaceSupport::Torus(torus) = surface_support(7, entities, &index) else {
-            panic!("expected torus support");
+            anyhow::bail!("expected torus support");
         };
         assert_eq!(torus.center_mm, [1.0, 2.0, 3.0]);
         assert_eq!(torus.major_radius_mm, 5.0);
         assert_eq!(torus.minor_radius_mm, 1.0);
 
         let SurfaceSupport::Revolution(revolution) = surface_support(11, entities, &index) else {
-            panic!("expected surface-of-revolution support");
+            anyhow::bail!("expected surface-of-revolution support");
         };
         assert_eq!(revolution.axis_origin_mm, [1.0, 2.0, 3.0]);
         assert_eq!(revolution.axis, [0.0, 0.0, 1.0]);
         assert_eq!(revolution.swept_curve_id, 10);
+        Ok(())
     }
 
     #[test]
-    fn axis1_placement_defaults_to_positive_z() {
+    fn axis1_placement_defaults_to_positive_z() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(1.,2.,3.));
              #2=AXIS1_PLACEMENT('',#1,$);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1145,10 +1146,11 @@ END-ISO-10303-21;
             axis1_placement(2, entities, &index),
             Some(([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]))
         );
+        Ok(())
     }
 
     #[test]
-    fn spline_extrusion_precedes_planar_fallback() {
+    fn spline_extrusion_precedes_planar_fallback() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,0.));
              #2=CARTESIAN_POINT('',(0.,2.,0.));
@@ -1158,7 +1160,7 @@ END-ISO-10303-21;
              #6=CARTESIAN_POINT('',(2.,2.,0.));
              #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1169,10 +1171,11 @@ END-ISO-10303-21;
             surface_support(10, entities, &index),
             SurfaceSupport::SplineExtrusion(_)
         ));
+        Ok(())
     }
 
     #[test]
-    fn planar_non_extrusion_bspline_falls_back_to_plane() {
+    fn planar_non_extrusion_bspline_falls_back_to_plane() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,3.));
              #2=CARTESIAN_POINT('',(0.,1.,3.));
@@ -1182,7 +1185,7 @@ END-ISO-10303-21;
              #6=CARTESIAN_POINT('',(2.,2.,3.));
              #10=B_SPLINE_SURFACE_WITH_KNOTS('',1,2,((#1,#2,#3),(#4,#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1190,15 +1193,16 @@ END-ISO-10303-21;
             .map(|(index, entity)| (entity_id(entity), index))
             .collect::<HashMap<_, _>>();
         let SurfaceSupport::Plane(plane) = surface_support(10, entities, &index) else {
-            panic!("expected planar fallback");
+            anyhow::bail!("expected planar fallback");
         };
         assert!((plane.origin_mm[2] - 3.0).abs() <= 1.0e-12);
         assert!((plane.normal[2].abs() - 1.0).abs() <= 1.0e-12);
         assert!(plane.max_residual_mm <= 1.0e-12);
+        Ok(())
     }
 
     #[test]
-    fn edge_loop_tolerates_direct_edge_curve_as_forward_use() {
+    fn edge_loop_tolerates_direct_edge_curve_as_forward_use() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,0.));
              #2=CARTESIAN_POINT('',(1.,0.,0.));
@@ -1211,7 +1215,7 @@ END-ISO-10303-21;
              #9=EDGE_LOOP('',(#8));
              #10=FACE_OUTER_BOUND('',#9,.T.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1219,7 +1223,8 @@ END-ISO-10303-21;
             .map(|(index, entity)| (entity_id(entity), index))
             .collect::<HashMap<_, _>>();
 
-        let loop_ = ordered_bound_loop(10, entities, &index).expect("direct EDGE_CURVE loop");
+        let loop_ = ordered_bound_loop(10, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected direct EDGE_CURVE loop"))?;
         assert_eq!(loop_.edges.len(), 1);
         let edge = &loop_.edges[0];
         assert_eq!(edge.oriented_edge_id, 8);
@@ -1227,10 +1232,11 @@ END-ISO-10303-21;
         assert_eq!(edge.start_vertex, 6);
         assert_eq!(edge.end_vertex, 7);
         assert!(edge.parameter_forward);
+        Ok(())
     }
 
     #[test]
-    fn nested_oriented_edges_compose_direction() {
+    fn nested_oriented_edges_compose_direction() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,0.));
              #2=CARTESIAN_POINT('',(1.,0.,0.));
@@ -1243,7 +1249,7 @@ END-ISO-10303-21;
              #9=ORIENTED_EDGE('',*,*,#8,.F.);
              #10=ORIENTED_EDGE('',*,*,#9,.F.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1251,16 +1257,19 @@ END-ISO-10303-21;
             .map(|(index, entity)| (entity_id(entity), index))
             .collect::<HashMap<_, _>>();
 
-        let edge = oriented_edge_use(10, entities, &index).expect("nested oriented edge");
+        let edge = oriented_edge_use(10, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected nested oriented edge"))?;
         assert_eq!(edge.edge_id, 8);
         assert_eq!(edge.start_vertex, 6);
         assert_eq!(edge.end_vertex, 7);
         assert!(edge.parameter_forward);
 
-        let reversed = oriented_edge_use(9, entities, &index).expect("single reversal");
+        let reversed = oriented_edge_use(9, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected single reversal"))?;
         assert_eq!(reversed.start_vertex, 7);
         assert_eq!(reversed.end_vertex, 6);
         assert!(!reversed.parameter_forward);
+        Ok(())
     }
 
     #[test]
