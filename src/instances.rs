@@ -2480,7 +2480,9 @@ END-ISO-10303-21;
             let exchange = ruststep::parser::parse(&text)?;
             let entities = &exchange.data[0].entities;
             let index = build_index(entities);
-            Ok(solid_shape_key(17, entities, &index)?.0)
+            Ok(solid_shape_key(17, entities, &index)
+                .ok_or_else(|| anyhow::anyhow!("fixture solid has no shape key"))?
+                .0)
         }
 
         let direct = key("#10=EDGE_LOOP('',(#8));")?;
@@ -2553,7 +2555,8 @@ END-ISO-10303-21;
             Some(vec![15])
         );
         let raw = closure_from(17, &entities, &index);
-        let semantic = semantic_solid_closure(17, &entities, &index)?;
+        let semantic = semantic_solid_closure(17, &entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("fixture solid has no semantic closure"))?;
         assert!(raw.contains(&18));
         assert!(!semantic.contains(&18));
         assert!(semantic.contains(&15));
