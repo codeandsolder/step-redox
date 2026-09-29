@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 /// A step-redox-owned constructive node ID. It is intentionally unrelated to
 /// STEP entity numbers or geometry-kernel handles.
@@ -196,10 +197,11 @@ impl CadNode {
                 1 + profile.complexity()
             }
             Self::Sweep { profile, path, .. } => 2 + profile.complexity() + path.complexity(),
-            Self::Boolean { children, .. } => 1 + children.len() as u64,
+            Self::Boolean { children, .. } | Self::Assembly { children } => {
+                1 + children.len() as u64
+            }
             Self::Transform { .. } => 2,
             Self::Pattern { pattern, .. } => 2 + pattern.complexity(),
-            Self::Assembly { children } => 1 + children.len() as u64,
             Self::BrepFallback(fallback) => fallback.complexity(),
         }
     }
@@ -225,6 +227,7 @@ impl Profile2d {
         if points_mm.len() < 3 {
             bail!("polygon profile needs at least three points");
         }
+        let points_mm = points_mm.into_boxed_slice();
         let mut curves = Vec::with_capacity(points_mm.len());
         for index in 0..points_mm.len() {
             curves.push(Curve2d::Line {
@@ -260,13 +263,16 @@ impl Profile2d {
             let Curve2d::Line { start_mm, end_mm } = curve else {
                 return None;
             };
-            if previous_end.is_some_and(|end| end != *start_mm) {
+            if previous_end.is_some_and(|end| !exact_point2_eq(end, *start_mm)) {
                 return None;
             }
             points.push(*start_mm);
             previous_end = Some(*end_mm);
         }
-        if previous_end != points.first().copied() {
+        if !previous_end
+            .zip(points.first().copied())
+            .is_some_and(|(end, start)| exact_point2_eq(end, start))
+        {
             return None;
         }
         Some(points)
@@ -406,7 +412,7 @@ impl RigidTransform {
                 if column_index == 3 && row_index < 3 {
                     continue;
                 }
-                if *value != expected[row_index][column_index] {
+                if !exact_f64_eq(*value, expected[row_index][column_index]) {
                     return None;
                 }
             }
@@ -603,6 +609,20 @@ fn emit_polygon_sketch(output: &mut String, id: NodeId, points: &[[f64; 2]]) -> 
     }
     output.push_str("  |> close()\n");
     Ok(())
+}
+
+fn exact_f64_eq(left: f64, right: f64) -> bool {
+    if !left.is_finite() || !right.is_finite() {
+        return false;
+    }
+    const MAGNITUDE_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+    let left_bits = left.to_bits();
+    let right_bits = right.to_bits();
+    left_bits == right_bits || (left_bits & MAGNITUDE_MASK == 0 && right_bits & MAGNITUDE_MASK == 0)
+}
+
+fn exact_point2_eq(left: [f64; 2], right: [f64; 2]) -> bool {
+    exact_f64_eq(left[0], right[0]) && exact_f64_eq(left[1], right[1])
 }
 
 fn scalar(value: f64) -> String {

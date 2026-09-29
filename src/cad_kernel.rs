@@ -16,8 +16,18 @@ pub struct KernelSummary {
 pub trait CadKernel {
     type Evaluated;
 
+    /// Evaluate one canonical CAD root in the backend.
+    ///
+    /// # Errors
+    /// Returns an error when the model cannot be represented or evaluated by this kernel.
     fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated>;
+
     fn summarize(&self, evaluated: &Self::Evaluated) -> KernelSummary;
+
+    /// Serialize an evaluated shape as a STEP exchange.
+    ///
+    /// # Errors
+    /// Returns an error when the evaluated topology cannot be serialized as STEP.
     fn to_step(&self, evaluated: &Self::Evaluated) -> Result<String>;
 }
 

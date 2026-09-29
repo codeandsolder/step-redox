@@ -286,12 +286,19 @@ pub fn recover_radial_slot_revolution_fragment(
     let max_radius_mm = maximum_revolution_radius(base)?;
     let cutter_margin_mm = (10.0 * base.source_tolerance_mm).max(1.0e-5);
     let cutter_depth_mm = max_radius_mm + cutter_margin_mm;
-    let axial_min = slotted
-        .slot_root_axial_mm
-        .min(slotted.slot_open_end_axial_mm);
-    let axial_max = slotted
-        .slot_root_axial_mm
-        .max(slotted.slot_open_end_axial_mm);
+    // The detector proves that the open end coincides with exactly one global
+    // axial extreme of the host. Extend the cutter only through that already-open
+    // end so Boolean kernels never have to resolve a coincident cutter/host cap.
+    // This extension lies outside the source solid and therefore does not change
+    // the occupied geometry.
+    let extended_open_end_axial_mm = if slotted.slot_open_end_axial_mm > slotted.slot_root_axial_mm
+    {
+        slotted.slot_open_end_axial_mm + cutter_margin_mm
+    } else {
+        slotted.slot_open_end_axial_mm - cutter_margin_mm
+    };
+    let axial_min = slotted.slot_root_axial_mm.min(extended_open_end_axial_mm);
+    let axial_max = slotted.slot_root_axial_mm.max(extended_open_end_axial_mm);
     let half_width = slotted.slot_half_width_mm;
     let cutter_profile = Profile2d::polygon(vec![
         [-half_width, axial_min],
