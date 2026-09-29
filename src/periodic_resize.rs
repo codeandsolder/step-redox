@@ -3092,14 +3092,8 @@ mod tests {
         ];
 
         let graph = GraphEditor::new(&mut entities);
-        assert_eq!(
-            chain_curve_key(&graph, 20).ok_or_else(|| anyhow::anyhow!("expected test value"))?,
-            chain_curve_key(&graph, 21).ok_or_else(|| anyhow::anyhow!("expected test value"))?
-        );
-        assert_ne!(
-            chain_curve_key(&graph, 20).ok_or_else(|| anyhow::anyhow!("expected test value"))?,
-            chain_curve_key(&graph, 22).ok_or_else(|| anyhow::anyhow!("expected test value"))?
-        );
+        assert_eq!(chain_curve_key(&graph, 20)?, chain_curve_key(&graph, 21)?);
+        assert_ne!(chain_curve_key(&graph, 20)?, chain_curve_key(&graph, 22)?);
         Ok(())
     }
 
