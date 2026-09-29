@@ -12,7 +12,7 @@ const GEOMETRY_TOLERANCE_MM: f64 = 1.0e-5;
 const TRANSFORM_TOLERANCE_MM: f64 = 1.0e-12;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct CurveReplicaStats {
+pub struct CurveReplicaStats {
     pub families: usize,
     pub replicas: usize,
     pub direct_aliases: usize,
@@ -30,12 +30,10 @@ struct CurveInfo {
     key: String,
 }
 
-/// Factor 3-D B_SPLINE_CURVE_WITH_KNOTS entities that differ only by one
+/// Factor 3-D `B_SPLINE_CURVE_WITH_KNOTS` entities that differ only by one
 /// translation.  Degree/knots/multiplicities/flags stay exact, so the curve
 /// parameterization is unchanged.  Pole geometry is compared at 1e-5 mm.
-pub(crate) fn instance_translated_bspline_curves(
-    entities: &mut Vec<EntityInstance>,
-) -> CurveReplicaStats {
+pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) -> CurveReplicaStats {
     let mut stats = CurveReplicaStats::default();
     if entities.is_empty() {
         return stats;
@@ -315,7 +313,7 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 fn norm(v: [f64; 3]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+    v[2].mul_add(v[2], v[1].mul_add(v[1], v[0] * v[0])).sqrt()
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {

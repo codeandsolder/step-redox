@@ -162,7 +162,7 @@ fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
 }
 
 fn norm(v: [f64; 3]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+    v[2].mul_add(v[2], v[1].mul_add(v[1], v[0] * v[0])).sqrt()
 }
 
 fn normalized(v: [f64; 3]) -> Option<[f64; 3]> {
@@ -172,9 +172,9 @@ fn normalized(v: [f64; 3]) -> Option<[f64; 3]> {
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 

@@ -11,7 +11,7 @@ use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct SphericalCapStats {
+pub struct SphericalCapStats {
     pub arrays: usize,
     pub instances: usize,
     pub entities_removed: usize,
@@ -29,9 +29,7 @@ struct CapFeature {
     bound_orientation: String,
 }
 
-pub(crate) fn instance_planar_spherical_caps(
-    entities: &mut Vec<EntityInstance>,
-) -> SphericalCapStats {
+pub fn instance_planar_spherical_caps(entities: &mut Vec<EntityInstance>) -> SphericalCapStats {
     let mut stats = SphericalCapStats::default();
     if entities.is_empty() {
         return stats;

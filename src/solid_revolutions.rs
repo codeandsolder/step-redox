@@ -39,6 +39,27 @@ pub struct RecoveredSolidRevolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveredRadialSlotRevolution {
+    /// The axisymmetric host body reconstructed before the slot is applied.
+    pub base: RecoveredSolidRevolution,
+    /// Source planes that prove the slot: the two side walls followed by the
+    /// axis-containing back plane.
+    pub slot_face_ids: [u64; 3],
+    /// Unit radial direction from the revolution axis toward the slot opening.
+    pub slot_outward_direction: [f64; 3],
+    /// Unit in-plane direction across the slot width.
+    pub slot_side_direction: [f64; 3],
+    /// Half the distance between the two symmetric slot side planes.
+    pub slot_half_width_mm: f64,
+    /// Axial coordinate where the slot terminates inside the turned body.
+    pub slot_root_axial_mm: f64,
+    /// Axial coordinate of the source end through which the slot is open.
+    pub slot_open_end_axial_mm: f64,
+    /// Worst residual in the slot-plane symmetry/axis proof.
+    pub slot_max_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SolidSurfaceSignature {
     pub solid_id: u64,
     pub face_count: usize,
@@ -163,6 +184,13 @@ struct TopologyContext<'a> {
     index: &'a HashMap<u64, usize>,
 }
 
+#[derive(Clone, Copy)]
+struct ProfileSegmentContext<'ctx, 'data> {
+    topology: &'ctx TopologyContext<'data>,
+    source_tolerance_mm: f64,
+    angular_trim_faces: Option<&'ctx HashSet<usize>>,
+}
+
 fn source_tolerance_by_representation_item(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -246,53 +274,9 @@ fn uncertainty_measure_mm(
     }
     let value = parameter_number(parameter)?;
     let unit_id = entity_ref_value(unit)?;
-    let scale_mm = si_length_unit_scale_mm(unit_id, entities, index)?;
+    let scale_mm = crate::units::length_unit_scale_mm(unit_id, entities, index)?;
     let result = value * scale_mm;
     result.is_finite().then_some(result)
-}
-
-fn si_length_unit_scale_mm(
-    unit_id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<f64> {
-    let entity = entities.get(*index.get(&unit_id)?)?;
-    entity_record_named(entity, "LENGTH_UNIT")?;
-    let record = entity_record_named(entity, "SI_UNIT")?;
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let [prefix, Parameter::Enumeration(unit_name)] = params.as_slice() else {
-        return None;
-    };
-    if unit_name != "METRE" {
-        return None;
-    }
-
-    let metres = match prefix {
-        Parameter::NotProvided => 1.0,
-        Parameter::Enumeration(prefix) => match prefix.as_str() {
-            "EXA" => 1.0e18,
-            "PETA" => 1.0e15,
-            "TERA" => 1.0e12,
-            "GIGA" => 1.0e9,
-            "MEGA" => 1.0e6,
-            "KILO" => 1.0e3,
-            "HECTO" => 1.0e2,
-            "DECA" => 1.0e1,
-            "DECI" => 1.0e-1,
-            "CENTI" => 1.0e-2,
-            "MILLI" => 1.0e-3,
-            "MICRO" => 1.0e-6,
-            "NANO" => 1.0e-9,
-            "PICO" => 1.0e-12,
-            "FEMTO" => 1.0e-15,
-            "ATTO" => 1.0e-18,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    Some(metres * 1000.0)
 }
 
 fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a Record> {
@@ -413,6 +397,34 @@ pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSol
         }
     }
     out.sort_by_key(|candidate| candidate.solid_id);
+    out
+}
+
+pub fn detect_radial_slot_revolutions(
+    entities: &[EntityInstance],
+) -> Vec<RecoveredRadialSlotRevolution> {
+    let index = build_index(entities);
+    let source_tolerances = source_tolerance_by_representation_item(entities, &index);
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        let source_tolerance_mm = source_tolerances
+            .get(&solid_id)
+            .copied()
+            .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+        if let Some(candidate) =
+            detect_one_radial_slot(solid_id, entities, &index, source_tolerance_mm)
+        {
+            out.push(candidate);
+        }
+    }
+    out.sort_by_key(|candidate| candidate.base.solid_id);
     out
 }
 
@@ -549,6 +561,348 @@ fn detect_one_solid(
         radial_direction,
         max_residual_mm,
         source_tolerance_mm,
+    })
+}
+
+fn detect_one_radial_slot(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    source_tolerance_mm: f64,
+) -> Option<RecoveredRadialSlotRevolution> {
+    let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
+    let faces = face_ids
+        .iter()
+        .copied()
+        .map(|id| {
+            Some(FaceInfo {
+                surface: brep::surface_support(
+                    brep::face_surface(id, entities, index)?,
+                    entities,
+                    index,
+                ),
+                loops: brep::face_loops(id, entities, index)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        if face.loops.is_empty() {
+            return None;
+        }
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            edge_faces.entry(edge.edge_id).or_default().push(face_index);
+        }
+    }
+    if edge_faces.values().any(|attached| attached.len() != 2)
+        || !shell_faces_connected(faces.len(), &edge_faces)
+    {
+        return None;
+    }
+    let context = TopologyContext {
+        faces: &faces,
+        edge_faces: &edge_faces,
+        entities,
+        index,
+    };
+
+    let (axis_reference_origin_mm, axis_reference_direction) =
+        faces.iter().find_map(|face| match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => Some((cylinder.axis_origin_mm, cylinder.axis)),
+            SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
+            _ => None,
+        })?;
+    let axis_direction = canonical_axis(axis_reference_direction);
+    let axis_origin_mm =
+        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+
+    let mut radial_plane_indices = Vec::<usize>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => {
+                if !parallel(cylinder.axis, axis_direction)
+                    || axis_distance(cylinder.axis_origin_mm, axis_origin_mm, axis_direction)
+                        > GEOM_TOL_MM
+                {
+                    return None;
+                }
+            }
+            SurfaceSupport::Cone(cone) => {
+                if !parallel(cone.axis, axis_direction)
+                    || axis_distance(cone.reference_origin_mm, axis_origin_mm, axis_direction)
+                        > GEOM_TOL_MM
+                {
+                    return None;
+                }
+            }
+            SurfaceSupport::Plane(plane) => {
+                let normal = normalize(plane.normal)?;
+                let alignment = dot(normal, axis_direction).abs();
+                if 1.0 - alignment <= DIR_TOL {
+                    continue;
+                }
+                if alignment <= DIR_TOL {
+                    radial_plane_indices.push(face_index);
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    let [plane_a, plane_b, plane_c] = radial_plane_indices.as_slice() else {
+        return None;
+    };
+    let radial_plane_indices = [*plane_a, *plane_b, *plane_c];
+
+    let plane_axis_distance = |face_index: usize| -> Option<f64> {
+        let SurfaceSupport::Plane(plane) = faces.get(face_index)?.surface else {
+            return None;
+        };
+        let normal = normalize(plane.normal)?;
+        Some(dot(sub(axis_origin_mm, plane.origin_mm), normal).abs())
+    };
+    let on_axis = radial_plane_indices
+        .iter()
+        .copied()
+        .filter(|&face_index| plane_axis_distance(face_index).is_some_and(|d| d <= GEOM_TOL_MM))
+        .collect::<Vec<_>>();
+    let [back_face_index] = on_axis.as_slice() else {
+        return None;
+    };
+    let side_face_indices = radial_plane_indices
+        .iter()
+        .copied()
+        .filter(|face_index| face_index != back_face_index)
+        .collect::<Vec<_>>();
+    let [side_a, side_b] = side_face_indices.as_slice() else {
+        return None;
+    };
+
+    let SurfaceSupport::Plane(back_plane) = faces[*back_face_index].surface else {
+        return None;
+    };
+    let SurfaceSupport::Plane(side_plane_a) = faces[*side_a].surface else {
+        return None;
+    };
+    let SurfaceSupport::Plane(side_plane_b) = faces[*side_b].surface else {
+        return None;
+    };
+    let back_normal = canonical_axis(back_plane.normal);
+    let side_direction = canonical_axis(side_plane_a.normal);
+    if !parallel(side_plane_a.normal, side_plane_b.normal)
+        || dot(back_normal, side_direction).abs() > DIR_TOL
+        || dot(back_normal, axis_direction).abs() > DIR_TOL
+        || dot(side_direction, axis_direction).abs() > DIR_TOL
+    {
+        return None;
+    }
+
+    let side_offset_a = dot(sub(side_plane_a.origin_mm, axis_origin_mm), side_direction);
+    let side_offset_b = dot(sub(side_plane_b.origin_mm, axis_origin_mm), side_direction);
+    if !side_offset_a.is_finite()
+        || !side_offset_b.is_finite()
+        || side_offset_a * side_offset_b >= 0.0
+    {
+        return None;
+    }
+    let slot_half_width_mm = 0.5 * (side_offset_a.abs() + side_offset_b.abs());
+    let mut slot_max_residual_mm = plane_axis_distance(*back_face_index)?
+        .max((side_offset_a.abs() - side_offset_b.abs()).abs())
+        .max((side_offset_a + side_offset_b).abs());
+    if !slot_half_width_mm.is_finite()
+        || slot_half_width_mm <= GEOM_TOL_MM
+        || slot_max_residual_mm > source_tolerance_mm
+    {
+        return None;
+    }
+
+    let projected_range = |direction: [f64; 3]| -> Option<(f64, f64)> {
+        let mut min_value = f64::INFINITY;
+        let mut max_value = f64::NEG_INFINITY;
+        for &face_index in &[*side_a, *side_b] {
+            for edge in faces[face_index]
+                .loops
+                .iter()
+                .flat_map(|loop_| &loop_.edges)
+            {
+                for point in [edge.start_mm, edge.end_mm] {
+                    let radial = sub(
+                        sub(point, axis_origin_mm),
+                        mul(
+                            axis_direction,
+                            axial_coordinate(point, axis_origin_mm, axis_direction),
+                        ),
+                    );
+                    let value = dot(radial, direction);
+                    min_value = min_value.min(value);
+                    max_value = max_value.max(value);
+                }
+            }
+        }
+        (min_value.is_finite() && max_value.is_finite()).then_some((min_value, max_value))
+    };
+    let candidate_outward = back_normal;
+    let (candidate_min, candidate_max) = projected_range(candidate_outward)?;
+    let slot_outward_direction =
+        if candidate_min >= -source_tolerance_mm && candidate_max > GEOM_TOL_MM {
+            candidate_outward
+        } else if candidate_max <= source_tolerance_mm && candidate_min < -GEOM_TOL_MM {
+            mul(candidate_outward, -1.0)
+        } else {
+            return None;
+        };
+
+    let excluded_profile_faces = radial_plane_indices.into_iter().collect::<HashSet<_>>();
+    let angular_trim_faces = [*side_a, *side_b].into_iter().collect::<HashSet<_>>();
+
+    let mut slot_min_t = f64::INFINITY;
+    let mut slot_max_t = f64::NEG_INFINITY;
+    for &face_index in &[*side_a, *side_b] {
+        for edge in faces[face_index]
+            .loops
+            .iter()
+            .flat_map(|loop_| &loop_.edges)
+        {
+            for point in [edge.start_mm, edge.end_mm] {
+                let t = axial_coordinate(point, axis_origin_mm, axis_direction);
+                slot_min_t = slot_min_t.min(t);
+                slot_max_t = slot_max_t.max(t);
+            }
+        }
+    }
+    let mut solid_min_t = f64::INFINITY;
+    let mut solid_max_t = f64::NEG_INFINITY;
+    for face in &faces {
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            for point in [edge.start_mm, edge.end_mm] {
+                let t = axial_coordinate(point, axis_origin_mm, axis_direction);
+                solid_min_t = solid_min_t.min(t);
+                solid_max_t = solid_max_t.max(t);
+            }
+        }
+    }
+    if !slot_min_t.is_finite()
+        || !slot_max_t.is_finite()
+        || !solid_min_t.is_finite()
+        || !solid_max_t.is_finite()
+        || slot_max_t - slot_min_t <= GEOM_TOL_MM
+    {
+        return None;
+    }
+    let matches_min = (slot_min_t - solid_min_t).abs() <= source_tolerance_mm;
+    let matches_max = (slot_max_t - solid_max_t).abs() <= source_tolerance_mm;
+    let (slot_root_axial_mm, slot_open_end_axial_mm) = match (matches_min, matches_max) {
+        (true, false) => (slot_max_t, slot_min_t),
+        (false, true) => (slot_min_t, slot_max_t),
+        _ => return None,
+    };
+
+    let shares_edge = |first: usize, second: usize| {
+        edge_faces
+            .values()
+            .any(|attached| attached.contains(&first) && attached.contains(&second))
+    };
+    let root_plane_is_proven = faces.iter().enumerate().any(|(face_index, face)| {
+        let SurfaceSupport::Plane(plane) = face.surface else {
+            return false;
+        };
+        parallel(plane.normal, axis_direction)
+            && (axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction)
+                - slot_root_axial_mm)
+                .abs()
+                <= source_tolerance_mm
+            && shares_edge(face_index, *side_a)
+            && shares_edge(face_index, *side_b)
+    });
+    if !root_plane_is_proven {
+        return None;
+    }
+
+    let mut max_residual_mm = 0.0_f64;
+    let mut segments = Vec::<Segment2>::new();
+    let mut base_face_ids = Vec::<u64>::new();
+    let segment_context = ProfileSegmentContext {
+        topology: &context,
+        source_tolerance_mm,
+        angular_trim_faces: Some(&angular_trim_faces),
+    };
+    for (face_index, face) in faces.iter().enumerate() {
+        if excluded_profile_faces.contains(&face_index) {
+            continue;
+        }
+        let (segment, residual) = match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => cylinder_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                cylinder,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            )?,
+            SurfaceSupport::Cone(cone) => cone_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                cone,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            )?,
+            SurfaceSupport::Plane(plane) => plane_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                plane,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            )?,
+            _ => return None,
+        };
+        max_residual_mm = max_residual_mm.max(residual);
+        if max_residual_mm > source_tolerance_mm {
+            return None;
+        }
+        push_unique_segment(&mut segments, segment);
+        base_face_ids.push(face_ids[face_index]);
+    }
+    let profile_points_mm = closed_profile_from_segments(segments)?;
+    let profile_curves = line_profile_curves(&profile_points_mm);
+    let base = RecoveredSolidRevolution {
+        solid_id,
+        face_ids: base_face_ids,
+        profile_curves,
+        axis_origin_mm,
+        axis_direction,
+        radial_direction: radial_basis(axis_direction)?,
+        max_residual_mm,
+        source_tolerance_mm,
+    };
+
+    slot_max_residual_mm = slot_max_residual_mm.max(
+        (slot_min_t - solid_min_t)
+            .abs()
+            .min((slot_max_t - solid_max_t).abs()),
+    );
+    if slot_max_residual_mm > source_tolerance_mm {
+        return None;
+    }
+    let mut side_face_ids = [face_ids[*side_a], face_ids[*side_b]];
+    side_face_ids.sort_unstable();
+
+    Some(RecoveredRadialSlotRevolution {
+        base,
+        slot_face_ids: [
+            side_face_ids[0],
+            side_face_ids[1],
+            face_ids[*back_face_index],
+        ],
+        slot_outward_direction,
+        slot_side_direction: side_direction,
+        slot_half_width_mm,
+        slot_root_axial_mm,
+        slot_open_end_axial_mm,
+        slot_max_residual_mm,
     })
 }
 
@@ -1807,6 +2161,33 @@ fn cylinder_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    cylinder_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        cylinder,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn cylinder_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    cylinder: brep::CylinderSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.len() != 1
         || !parallel(cylinder.axis, axis)
         || axis_distance(cylinder.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
@@ -1831,6 +2212,13 @@ fn cylinder_profile_segment(
             source_support_residual =
                 source_support_residual.max((radius - cylinder.radius_mm).abs());
             raw_t.push(t);
+        }
+
+        if angular_trim_faces.is_some_and(|trim_faces| {
+            unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+        }) {
+            continue;
         }
 
         match &edge.support {
@@ -1945,6 +2333,33 @@ fn cone_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    cone_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        cone,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn cone_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    cone: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.len() != 1
         || !parallel(cone.axis, axis)
         || axis_distance(cone.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
@@ -1976,6 +2391,10 @@ fn cone_profile_segment(
     let mut source_support_residual = axis_distance(cone.reference_origin_mm, axis_origin, axis);
 
     for edge in &face.loops[0].edges {
+        let angular_trim = angular_trim_faces.is_some_and(|trim_faces| {
+            unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+        });
         for (vertex_id, point) in [
             (edge.start_vertex, edge.start_mm),
             (edge.end_vertex, edge.end_mm),
@@ -1995,12 +2414,19 @@ fn cone_profile_segment(
                 source_support_residual.max((sample[0] - source_radius).abs());
             raw_samples.push(sample);
 
-            if matches!(edge.support, CurveSupport::Line(_)) && sample[0] <= GEOM_TOL_MM {
+            if !angular_trim
+                && matches!(edge.support, CurveSupport::Line(_))
+                && sample[0] <= GEOM_TOL_MM
+            {
                 let entry = apex_vertices.entry(vertex_id).or_insert((0, sample));
                 entry.0 += 1;
                 entry.1[0] = entry.1[0].min(sample[0]);
                 entry.1[1] = sample[1];
             }
+        }
+
+        if angular_trim {
+            continue;
         }
 
         match &edge.support {
@@ -2367,6 +2793,33 @@ fn plane_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    plane_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        plane,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn plane_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    plane: brep::PlaneSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.is_empty() || face.loops.len() > 2 || !parallel(plane.normal, axis) {
         return None;
     }
@@ -2399,6 +2852,13 @@ fn plane_profile_segment(
                 source_support_residual = source_support_residual.max(axial_residual);
                 raw_min_r = raw_min_r.min(radius);
                 raw_max_r = raw_max_r.max(radius);
+            }
+
+            if angular_trim_faces.is_some_and(|trim_faces| {
+                unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                    .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+            }) {
+                continue;
             }
 
             match &edge.support {
@@ -2474,15 +2934,19 @@ fn plane_profile_segment(
                             cylinder.radius_mm
                         }
                         SurfaceSupport::Cone(cone) => {
-                            let (segment, cone_source_residual) = cone_profile_segment(
-                                neighbor,
-                                neighbor_face,
-                                cone,
-                                axis_origin,
-                                axis,
-                                context,
-                                source_tolerance_mm,
-                            )?;
+                            let (segment, cone_source_residual) =
+                                cone_profile_segment_with_angular_trims(
+                                    neighbor,
+                                    neighbor_face,
+                                    cone,
+                                    axis_origin,
+                                    axis,
+                                    ProfileSegmentContext {
+                                        topology: context,
+                                        source_tolerance_mm,
+                                        angular_trim_faces,
+                                    },
+                                )?;
                             source_support_residual =
                                 source_support_residual.max(cone_source_residual);
                             segment_radius_at_axial(segment, t)?

@@ -69,6 +69,7 @@ struct CanonicalProfile {
     inner_loops: Vec<Vec<RecoveredProfileCurve>>,
 }
 
+#[must_use]
 pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSolidExtrusion> {
     let index = build_index(entities);
     let mut out = Vec::new();
@@ -509,7 +510,7 @@ fn circle_inside_convex_polygon(
             let Some(direction) = normalize2(edge) else {
                 return false;
             };
-            orientation * cross2(direction, sub2(center, a)) - radius > GEOM_TOL_MM
+            orientation.mul_add(cross2(direction, sub2(center, a)), -radius) > GEOM_TOL_MM
         })
 }
 
@@ -1434,7 +1435,7 @@ fn merge_profile_curves(
             Some(RecoveredProfileCurve::CircleArc {
                 source_edge_ids: merged_source_ids(first_ids, second_ids),
                 center_mm: *first_center,
-                radius_mm: (*first_radius + *second_radius) * 0.5,
+                radius_mm: f64::midpoint(*first_radius, *second_radius),
                 start_angle_rad: *start_angle_rad,
                 end_angle_rad: *start_angle_rad + sweep,
             })
@@ -1489,7 +1490,7 @@ fn circle_angle_3d(point: [f64; 3], circle: CircleSupport) -> Option<f64> {
 fn point_angle_2d(point: [f64; 2], center: [f64; 2]) -> Option<f64> {
     let dx = point[0] - center[0];
     let dy = point[1] - center[1];
-    let radius = (dx * dx + dy * dy).sqrt();
+    let radius = dx.hypot(dy);
     if !radius.is_finite() || radius <= DIR_TOL {
         return None;
     }
@@ -1502,7 +1503,7 @@ fn signed_area_curves(curves: &[RecoveredProfileCurve]) -> f64 {
         .map(|curve| match curve {
             RecoveredProfileCurve::Line {
                 start_mm, end_mm, ..
-            } => 0.5 * (start_mm[0] * end_mm[1] - end_mm[0] * start_mm[1]),
+            } => 0.5 * f64::mul_add(end_mm[0], -start_mm[1], start_mm[0] * end_mm[1]),
             RecoveredProfileCurve::CircleArc {
                 center_mm,
                 radius_mm,
@@ -1513,9 +1514,15 @@ fn signed_area_curves(curves: &[RecoveredProfileCurve]) -> f64 {
                 let theta0 = *start_angle_rad;
                 let theta1 = *end_angle_rad;
                 let r = *radius_mm;
-                0.5 * (r * center_mm[0] * (theta1.sin() - theta0.sin())
-                    - r * center_mm[1] * (theta1.cos() - theta0.cos())
-                    + r * r * (theta1 - theta0))
+                0.5 * f64::mul_add(
+                    r * r,
+                    theta1 - theta0,
+                    f64::mul_add(
+                        r * center_mm[1],
+                        -(theta1.cos() - theta0.cos()),
+                        r * center_mm[0] * (theta1.sin() - theta0.sin()),
+                    ),
+                )
             }
             RecoveredProfileCurve::Bezier { .. } | RecoveredProfileCurve::BSpline { .. } => 0.0,
         })
@@ -1574,7 +1581,7 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
 fn sub2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -1582,15 +1589,15 @@ fn sub2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 }
 
 fn dot2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0] * b[0] + a[1] * b[1]
+    a[1].mul_add(b[1], a[0] * b[0])
 }
 
 fn cross2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0] * b[1] - a[1] * b[0]
+    a[1].mul_add(-b[0], a[0] * b[1])
 }
 
 fn normalize2(vector: [f64; 2]) -> Option<[f64; 2]> {
-    let length = (vector[0] * vector[0] + vector[1] * vector[1]).sqrt();
+    let length = vector[0].hypot(vector[1]);
     if !length.is_finite() || length <= DIR_TOL {
         return None;
     }
@@ -1598,7 +1605,7 @@ fn normalize2(vector: [f64; 2]) -> Option<[f64; 2]> {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1615,9 +1622,9 @@ fn mul(vector: [f64; 3], scalar: f64) -> [f64; 3] {
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -1632,6 +1639,10 @@ mod tests {
         start_mm: [f64; 3],
         end_mm: [f64; 3],
     ) -> OrientedEdgeUse {
+        let delta = sub(end_mm, start_mm);
+        let length = norm(delta);
+        assert!(length > 1.0e-12, "test edge must have nonzero length");
+        let direction = mul(delta, 1.0 / length);
         OrientedEdgeUse {
             oriented_edge_id: edge_id + 100,
             edge_id,
@@ -1644,7 +1655,7 @@ mod tests {
             end_mm,
             support: CurveSupport::Line(brep::LineSupport {
                 origin_mm: start_mm,
-                direction: normalize(sub(end_mm, start_mm)).unwrap(),
+                direction,
             }),
         }
     }
@@ -1667,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn coalesces_two_semicircles_into_full_circle() {
+    fn coalesces_two_semicircles_into_full_circle() -> anyhow::Result<()> {
         let curves = vec![
             RecoveredProfileCurve::CircleArc {
                 source_edge_ids: vec![10],
@@ -1693,11 +1704,12 @@ mod tests {
             ..
         } = &simplified[0]
         else {
-            panic!("expected circle");
+            anyhow::bail!("expected circle");
         };
         assert_eq!(source_edge_ids, &vec![10, 11]);
         assert!((*start_angle_rad).abs() < 1.0e-12);
         assert!((*end_angle_rad - TAU).abs() < 1.0e-12);
+        Ok(())
     }
 
     fn profile_line(id: u64, start_mm: [f64; 2], end_mm: [f64; 2]) -> RecoveredProfileCurve {

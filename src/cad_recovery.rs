@@ -1,13 +1,13 @@
 use crate::cad_ir::{
-    Axis3, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d, ProfileLoop,
-    ProofStatus, Provenance, RigidTransform,
+    Axis3, BooleanOp, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d,
+    ProfileLoop, ProofStatus, Provenance, RigidTransform,
 };
 use crate::patterns::InstancePattern;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
 use crate::solid_revolutions::{
     MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    RecoveredSolidRevolution,
+    RecoveredRadialSlotRevolution, RecoveredSolidRevolution,
 };
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -19,7 +19,7 @@ pub struct CadFragment {
     pub root: NodeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CadFragmentSource {
     InstancePattern {
@@ -36,12 +36,68 @@ pub enum CadFragmentSource {
         solid_id: u64,
         face_ids: Vec<u64>,
     },
+    RadialSlotRevolution {
+        solid_id: u64,
+        base_face_ids: Vec<u64>,
+        slot_face_ids: [u64; 3],
+    },
+    BrepFallback {
+        solid_id: u64,
+    },
+}
+
+/// Admit any source solid into CAD IR without pretending it has been
+/// constructively recovered yet.
+///
+/// The fallback is exact by provenance: it names the original B-rep root and
+/// carries only complexity estimates. Later recovery passes can replace this
+/// leaf with an Extrude/Revolve/Boolean/etc. without changing the rule that
+/// every parseable source body is representable from day one.
+///
+/// # Errors
+/// Returns an error if the source solid id is invalid or the fallback CAD fragment cannot be validated.
+pub fn recover_brep_fallback_fragment(
+    solid_id: u64,
+    estimated_faces: usize,
+    estimated_edges: usize,
+    estimated_control_points: usize,
+) -> Result<CadFragment> {
+    if solid_id == 0 {
+        bail!("B-rep fallback solid id must be nonzero");
+    }
+
+    let mut model = CadModel::new();
+    let root = model.add_node(CadNode::BrepFallback(BrepFallback {
+        source_entity_ids: vec![solid_id],
+        estimated_faces,
+        estimated_edges,
+        estimated_control_points,
+    }));
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids: vec![solid_id],
+            proof: ProofStatus::Exact,
+            max_residual_mm: Some(0.0),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::BrepFallback { solid_id },
+        model,
+        root,
+    })
 }
 
 /// Recover a constructive CAD fragment from a geometrically-proven solid extrusion.
 ///
 /// The sketch is expressed in a canonical local XY frame and extruded along local +Z.
 /// A rigid transform then places that constructive body back into source coordinates.
+///
+/// # Errors
+/// Returns an error if the recovered extrusion proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_solid_extrusion_fragment(
     extrusion: &RecoveredSolidExtrusion,
 ) -> Result<CadFragment> {
@@ -104,6 +160,9 @@ pub fn recover_solid_extrusion_fragment(
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the recovered extrusions.
 pub fn recover_solid_extrusion_fragments(
     extrusions: &[RecoveredSolidExtrusion],
 ) -> Result<Vec<CadFragment>> {
@@ -118,21 +177,16 @@ pub fn recover_solid_extrusion_fragments(
 /// The detector expresses the meridian sketch directly in local [radius, axial]
 /// coordinates. Local +Y is the revolution axis; the rigid transform maps local
 /// +X to the detector's deterministic radial direction and local +Y to the world axis.
+///
+/// # Errors
+/// Returns an error if the recovered revolution proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_solid_revolution_fragment(
     revolution: &RecoveredSolidRevolution,
 ) -> Result<CadFragment> {
     validate_solid_revolution(revolution)?;
 
     let mut model = CadModel::new();
-    let profile = Profile2d {
-        loops: vec![ProfileLoop {
-            curves: revolution
-                .profile_curves
-                .iter()
-                .map(recovered_profile_curve_to_ir)
-                .collect(),
-        }],
-    };
+    let profile = recovered_revolution_profile(revolution);
     let body = model.add_node(CadNode::Revolve {
         profile,
         axis: Axis3 {
@@ -179,6 +233,9 @@ pub fn recover_solid_revolution_fragment(
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the recovered revolutions.
 pub fn recover_solid_revolution_fragments(
     revolutions: &[RecoveredSolidRevolution],
 ) -> Result<Vec<CadFragment>> {
@@ -186,6 +243,197 @@ pub fn recover_solid_revolution_fragments(
         .iter()
         .map(recover_solid_revolution_fragment)
         .collect()
+}
+
+/// Recover a proven radially-slotted turned solid as a boolean difference.
+///
+/// The detector proves an axisymmetric host plus three planes describing one
+/// constant-width slot.  The canonical IR therefore keeps the host as a full
+/// revolution and subtracts a rectangular prism extending from the axis plane
+/// past the host's maximum radius.
+///
+/// # Errors
+/// Returns an error if the recovered host or slot proof is internally
+/// inconsistent, if the cutter profile cannot be constructed, or if the CAD
+/// model cannot be validated.
+pub fn recover_radial_slot_revolution_fragment(
+    slotted: &RecoveredRadialSlotRevolution,
+) -> Result<CadFragment> {
+    validate_radial_slot_revolution(slotted)?;
+
+    let base = &slotted.base;
+    let mut model = CadModel::new();
+    let host_profile = recovered_revolution_profile(base);
+    let host_body = model.add_node(CadNode::Revolve {
+        profile: host_profile,
+        axis: Axis3 {
+            origin_mm: [0.0, 0.0, 0.0],
+            direction: [0.0, 1.0, 0.0],
+        },
+        angle_rad: std::f64::consts::TAU,
+    });
+    let host_z = cross(base.radial_direction, base.axis_direction);
+    let host = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            base.axis_origin_mm,
+            base.radial_direction,
+            base.axis_direction,
+            host_z,
+        ),
+        child: host_body,
+    });
+
+    let max_radius_mm = maximum_revolution_radius(base)?;
+    let cutter_margin_mm = (10.0 * base.source_tolerance_mm).max(1.0e-5);
+    let cutter_depth_mm = max_radius_mm + cutter_margin_mm;
+    let axial_min = slotted
+        .slot_root_axial_mm
+        .min(slotted.slot_open_end_axial_mm);
+    let axial_max = slotted
+        .slot_root_axial_mm
+        .max(slotted.slot_open_end_axial_mm);
+    let half_width = slotted.slot_half_width_mm;
+    let cutter_profile = Profile2d::polygon(vec![
+        [-half_width, axial_min],
+        [half_width, axial_min],
+        [half_width, axial_max],
+        [-half_width, axial_max],
+    ])?;
+    let cutter_body = model.add_node(CadNode::Extrude {
+        profile: cutter_profile,
+        vector_mm: [0.0, 0.0, cutter_depth_mm],
+    });
+    let cutter_x = normalize3(cross(base.axis_direction, slotted.slot_outward_direction))?;
+    let cutter = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            base.axis_origin_mm,
+            cutter_x,
+            base.axis_direction,
+            slotted.slot_outward_direction,
+        ),
+        child: cutter_body,
+    });
+
+    let root = model.add_node(CadNode::Boolean {
+        op: BooleanOp::Difference,
+        children: vec![host, cutter],
+    });
+
+    let mut source_entity_ids = Vec::with_capacity(base.face_ids.len() + 4);
+    source_entity_ids.push(base.solid_id);
+    source_entity_ids.extend(base.face_ids.iter().copied());
+    source_entity_ids.extend(slotted.slot_face_ids);
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    let proof = Provenance {
+        source_entity_ids,
+        proof: ProofStatus::WithinTolerance,
+        max_residual_mm: Some(base.max_residual_mm.max(slotted.slot_max_residual_mm)),
+    };
+    model.set_provenance(root, proof)?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::RadialSlotRevolution {
+            solid_id: base.solid_id,
+            base_face_ids: base.face_ids.clone(),
+            slot_face_ids: slotted.slot_face_ids,
+        },
+        model,
+        root,
+    })
+}
+
+/// Recover several proven radial-slot revolutions into canonical CAD fragments.
+///
+/// # Errors
+/// Returns the first recovery error from [`recover_radial_slot_revolution_fragment`].
+pub fn recover_radial_slot_revolution_fragments(
+    revolutions: &[RecoveredRadialSlotRevolution],
+) -> Result<Vec<CadFragment>> {
+    revolutions
+        .iter()
+        .map(recover_radial_slot_revolution_fragment)
+        .collect()
+}
+
+fn recovered_revolution_profile(revolution: &RecoveredSolidRevolution) -> Profile2d {
+    Profile2d {
+        loops: vec![ProfileLoop {
+            curves: revolution
+                .profile_curves
+                .iter()
+                .map(recovered_profile_curve_to_ir)
+                .collect(),
+        }],
+    }
+}
+
+fn maximum_revolution_radius(revolution: &RecoveredSolidRevolution) -> Result<f64> {
+    let mut maximum = 0.0_f64;
+    for curve in &revolution.profile_curves {
+        let candidate = match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => start_mm[0].max(end_mm[0]),
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                ..
+            } => center_mm[0].abs() + radius_mm,
+            RecoveredProfileCurve::Bezier { .. } | RecoveredProfileCurve::BSpline { .. } => {
+                bail!("radial-slot revolution has unsupported spline meridian")
+            }
+        };
+        maximum = maximum.max(candidate);
+    }
+    if !maximum.is_finite() || maximum <= 0.0 {
+        bail!("radial-slot revolution has no positive radial extent");
+    }
+    Ok(maximum)
+}
+
+fn validate_radial_slot_revolution(slotted: &RecoveredRadialSlotRevolution) -> Result<()> {
+    validate_solid_revolution(&slotted.base)?;
+    if slotted.slot_face_ids.contains(&0) {
+        bail!("radial-slot source face ids must be nonzero");
+    }
+    let mut unique_faces = slotted.slot_face_ids;
+    unique_faces.sort_unstable();
+    if unique_faces.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("radial-slot source face ids must be distinct");
+    }
+    if !slotted.slot_half_width_mm.is_finite() || slotted.slot_half_width_mm <= 0.0 {
+        bail!("radial-slot half width must be finite and positive");
+    }
+    if !slotted.slot_root_axial_mm.is_finite()
+        || !slotted.slot_open_end_axial_mm.is_finite()
+        || (slotted.slot_root_axial_mm - slotted.slot_open_end_axial_mm).abs()
+            <= slotted.base.source_tolerance_mm
+    {
+        bail!("radial-slot axial span must be finite and nonzero");
+    }
+    for direction in [slotted.slot_outward_direction, slotted.slot_side_direction] {
+        if direction.iter().any(|component| !component.is_finite())
+            || (norm(direction) - 1.0).abs() > 1.0e-10
+        {
+            bail!("radial-slot direction must be a finite unit vector");
+        }
+    }
+    if dot(slotted.slot_outward_direction, slotted.base.axis_direction).abs() > 1.0e-10
+        || dot(slotted.slot_side_direction, slotted.base.axis_direction).abs() > 1.0e-10
+        || dot(slotted.slot_outward_direction, slotted.slot_side_direction).abs() > 1.0e-10
+    {
+        bail!("radial-slot frame must be orthogonal to the revolution axis");
+    }
+    if !slotted.slot_max_residual_mm.is_finite()
+        || slotted.slot_max_residual_mm < 0.0
+        || slotted.slot_max_residual_mm > slotted.base.source_tolerance_mm + 1.0e-15
+    {
+        bail!("radial-slot proof residual exceeds the source tolerance");
+    }
+    Ok(())
 }
 
 fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
@@ -287,7 +535,7 @@ fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()
         let Some(start) = next.start_point() else {
             bail!("solid revolution profile curve has no start point");
         };
-        if ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt() > 1.0e-7 {
+        if (end[0] - start[0]).hypot(end[1] - start[1]) > 1.0e-7 {
             bail!("solid revolution profile curves are not topologically continuous");
         }
     }
@@ -470,8 +718,9 @@ fn validate_profile_curve_geometry(curve: &RecoveredProfileCurve) -> Result<()> 
 }
 
 fn circle_arc_min_radius(center_radius: f64, radius: f64, start_angle: f64, end_angle: f64) -> f64 {
-    let mut minimum =
-        (center_radius + radius * start_angle.cos()).min(center_radius + radius * end_angle.cos());
+    let mut minimum = radius
+        .mul_add(start_angle.cos(), center_radius)
+        .min(radius.mul_add(end_angle.cos(), center_radius));
     if angle_on_sweep(std::f64::consts::PI, start_angle, end_angle) {
         minimum = minimum.min(center_radius - radius);
     }
@@ -487,7 +736,7 @@ fn angle_on_sweep(angle: f64, start: f64, end: f64) -> bool {
     }
 }
 
-fn local_frame_transform(
+const fn local_frame_transform(
     origin: [f64; 3],
     x_axis: [f64; 3],
     y_axis: [f64; 3],
@@ -505,10 +754,13 @@ fn local_frame_transform(
 
 /// Recover a constructive CAD fragment from an already-proven STEP instance pattern.
 ///
-/// The child is the first actual MAPPED_ITEM occurrence, preserved as an exact B-rep
-/// fallback leaf. This is deliberate: using only the REPRESENTATION_MAP would lose
+/// The child is the first actual `MAPPED_ITEM` occurrence, preserved as an exact B-rep
+/// fallback leaf. This is deliberate: using only the `REPRESENTATION_MAP` would lose
 /// the STEP mapping-origin transform when that origin is not global zero. The pattern
 /// node then describes only the repeated translation lattice.
+///
+/// # Errors
+/// Returns an error if the instance-pattern proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_instance_pattern_fragment(pattern: &InstancePattern) -> Result<CadFragment> {
     validate_instance_pattern(pattern)?;
 
@@ -567,6 +819,9 @@ pub fn recover_instance_pattern_fragment(pattern: &InstancePattern) -> Result<Ca
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the instance patterns.
 pub fn recover_instance_pattern_fragments(
     patterns: &[InstancePattern],
 ) -> Result<Vec<CadFragment>> {
@@ -779,19 +1034,32 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
+fn normalize3(vector: [f64; 3]) -> Result<[f64; 3]> {
+    let length = norm(vector);
+    if !length.is_finite() || length <= 1.0e-12 {
+        bail!("cannot normalize zero or non-finite CAD frame vector");
+    }
+    Ok([vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
 fn norm(vector: [f64; 3]) -> f64 {
-    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
+    vector[2]
+        .mul_add(
+            vector[2],
+            vector[1].mul_add(vector[1], vector[0] * vector[0]),
+        )
+        .sqrt()
 }
 
 #[cfg(test)]
@@ -817,6 +1085,32 @@ mod tests {
             tolerance_mm: 1.0e-7,
             max_residual_mm: residual,
         }
+    }
+
+    #[test]
+    fn arbitrary_solid_can_enter_cad_ir_as_exact_brep_fallback() -> Result<()> {
+        let fragment = recover_brep_fallback_fragment(74952, 132, 395, 8)?;
+        assert_eq!(
+            fragment.source,
+            CadFragmentSource::BrepFallback { solid_id: 74952 }
+        );
+        let CadNode::BrepFallback(fallback) = fragment.model.node(fragment.root)? else {
+            bail!("expected B-rep fallback root");
+        };
+        assert_eq!(fallback.source_entity_ids, vec![74952]);
+        assert_eq!(fallback.estimated_faces, 132);
+        assert_eq!(fallback.estimated_edges, 395);
+        assert_eq!(fallback.estimated_control_points, 8);
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].proof,
+            ProofStatus::Exact
+        );
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].max_residual_mm,
+            Some(0.0)
+        );
+        assert!(recover_brep_fallback_fragment(0, 0, 0, 0).is_err());
+        Ok(())
     }
 
     #[test]
@@ -861,7 +1155,7 @@ mod tests {
 
         let fragment = recover_solid_extrusion_fragment(&extrusion)?;
         let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         assert_eq!(
             transform.matrix,
@@ -873,7 +1167,7 @@ mod tests {
             ]
         );
         let CadNode::Extrude { profile, vector_mm } = fragment.model.node(*child)? else {
-            panic!("expected local extrusion child");
+            bail!("expected local extrusion child");
         };
         assert_eq!(*vector_mm, [0.0, 0.0, 5.0]);
         assert_eq!(
@@ -915,10 +1209,10 @@ mod tests {
         let holed_fragment = recover_solid_extrusion_fragment(&holed)?;
         let CadNode::Transform { child, .. } = holed_fragment.model.node(holed_fragment.root)?
         else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         let CadNode::Extrude { profile, .. } = holed_fragment.model.node(*child)? else {
-            panic!("expected local extrusion child");
+            bail!("expected local extrusion child");
         };
         assert_eq!(profile.loops.len(), 2);
         for source_id in 200..=203 {
@@ -972,7 +1266,7 @@ mod tests {
 
         let fragment = recover_solid_revolution_fragment(&revolution)?;
         let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         assert_eq!(
             transform.matrix,
@@ -989,7 +1283,7 @@ mod tests {
             angle_rad,
         } = fragment.model.node(*child)?
         else {
-            panic!("expected local revolution child");
+            bail!("expected local revolution child");
         };
         assert_eq!(profile.single_polygon_points(), revolution.polygon_points());
         assert_eq!(axis.origin_mm, [0.0, 0.0, 0.0]);
@@ -1011,6 +1305,71 @@ mod tests {
         let mut too_strict_tolerance = revolution.clone();
         too_strict_tolerance.source_tolerance_mm = 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM;
         assert!(recover_solid_revolution_fragment(&too_strict_tolerance).is_err());
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn radial_slot_revolution_becomes_revolve_minus_extrude() -> Result<()> {
+        let slotted = RecoveredRadialSlotRevolution {
+            base: RecoveredSolidRevolution {
+                solid_id: 10,
+                face_ids: vec![20, 21, 22],
+                profile_curves: vec![
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![100],
+                        start_mm: [0.0, -2.0],
+                        end_mm: [2.0, -2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![101],
+                        start_mm: [2.0, -2.0],
+                        end_mm: [2.0, 2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![102],
+                        start_mm: [2.0, 2.0],
+                        end_mm: [0.0, 2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![103],
+                        start_mm: [0.0, 2.0],
+                        end_mm: [0.0, -2.0],
+                    },
+                ],
+                axis_origin_mm: [0.0, 0.0, 0.0],
+                axis_direction: [0.0, 1.0, 0.0],
+                radial_direction: [1.0, 0.0, 0.0],
+                max_residual_mm: 0.0,
+                source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            },
+            slot_face_ids: [30, 31, 32],
+            slot_outward_direction: [1.0, 0.0, 0.0],
+            slot_side_direction: [0.0, 0.0, 1.0],
+            slot_half_width_mm: 0.25,
+            slot_root_axial_mm: 1.0,
+            slot_open_end_axial_mm: 2.0,
+            slot_max_residual_mm: 0.0,
+        };
+
+        let fragment = recover_radial_slot_revolution_fragment(&slotted)?;
+        let CadNode::Boolean { op, children } = fragment.model.node(fragment.root)? else {
+            bail!("expected radial-slot boolean root");
+        };
+        assert_eq!(*op, BooleanOp::Difference);
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].source_entity_ids,
+            vec![10, 20, 21, 22, 30, 31, 32]
+        );
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
@@ -1100,13 +1459,13 @@ mod tests {
             child,
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected linear pattern root");
+            bail!("expected linear pattern root");
         };
         assert_eq!(*count, 4);
         assert_eq!(*step_mm, [2.54, 0.0, 0.0]);
 
         let CadNode::BrepFallback(fallback) = fragment.model.node(*child)? else {
-            panic!("expected B-rep fallback child");
+            bail!("expected B-rep fallback child");
         };
         assert_eq!(fallback.source_entity_ids, vec![300]);
         assert_eq!(
@@ -1132,15 +1491,14 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected linear pattern root");
+            bail!("expected linear pattern root");
         };
         assert_eq!(*step_mm, [2.0, 0.0, 0.0]);
-        assert!(
-            fragment.model.provenance[&fragment.root]
-                .max_residual_mm
-                .unwrap()
-                <= pattern.tolerance_mm
-        );
+        let Some(max_residual_mm) = fragment.model.provenance[&fragment.root].max_residual_mm
+        else {
+            bail!("pattern provenance should carry a residual");
+        };
+        assert!(max_residual_mm <= pattern.tolerance_mm);
         Ok(())
     }
 
@@ -1156,7 +1514,7 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected sparse grid pattern root");
+            bail!("expected sparse grid pattern root");
         };
         assert_eq!(*counts, [5, 1, 1]);
         assert_eq!(
@@ -1199,7 +1557,7 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected grid pattern root");
+            bail!("expected grid pattern root");
         };
         assert_eq!(*counts, [2, 2, 1]);
         assert!(occupancy.is_none());

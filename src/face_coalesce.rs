@@ -13,7 +13,7 @@ const SURFACE_TYPES: &[&str] = &[
 ];
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct FaceCoalesceStats {
+pub struct FaceCoalesceStats {
     pub groups: usize,
     pub faces_merged: usize,
     pub faces_removed: usize,
@@ -41,14 +41,13 @@ struct MergePlan {
     style_delete: HashSet<u64>,
 }
 
-pub(crate) fn coalesce_same_support_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
+pub fn coalesce_same_support_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
     let original = entities.clone();
-    match coalesce_inner(entities) {
-        Some(stats) => stats,
-        None => {
-            *entities = original;
-            FaceCoalesceStats::default()
-        }
+    if let Some(stats) = coalesce_inner(entities) {
+        stats
+    } else {
+        *entities = original;
+        FaceCoalesceStats::default()
     }
 }
 
@@ -167,7 +166,7 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
                 }
             };
             match &style_signature {
-                None => style_signature = Some(current.clone()),
+                None => style_signature = Some(current),
                 Some(expected) if expected == &current => {}
                 Some(_) => {
                     style_ok = false;
@@ -679,31 +678,31 @@ fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn entity_ref(id: u64) -> Parameter {
+const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -810,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn traces_one_exact_topological_loop() {
+    fn traces_one_exact_topological_loop() -> anyhow::Result<()> {
         let entities = vec![
             edge(10, 1, 2),
             edge(11, 2, 3),
@@ -820,13 +819,14 @@ mod tests {
             oe(22, 12),
         ];
         let index = build_index(&entities);
-        let loop_oes =
-            trace_single_loop(&[(20, 10), (21, 11), (22, 12)], &entities, &index).unwrap();
+        let loop_oes = trace_single_loop(&[(20, 10), (21, 11), (22, 12)], &entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(loop_oes.len(), 3);
         assert_eq!(
             loop_oes.iter().copied().collect::<HashSet<_>>(),
             HashSet::from([20, 21, 22])
         );
+        Ok(())
     }
 
     #[test]

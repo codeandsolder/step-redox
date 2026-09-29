@@ -6,7 +6,7 @@ const NORMAL_Q: f64 = 1.0e-10;
 const OPPOSITE_DOT: f64 = -1.0 + 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct PartitionRecoveryStats {
+pub struct PartitionRecoveryStats {
     pub components: usize,
     pub solids_merged: usize,
     pub interfaces_removed: usize,
@@ -102,16 +102,13 @@ impl UnionFind {
     }
 }
 
-pub(crate) fn recover_partitioned_bodies(
-    entities: &mut Vec<EntityInstance>,
-) -> PartitionRecoveryStats {
+pub fn recover_partitioned_bodies(entities: &mut Vec<EntityInstance>) -> PartitionRecoveryStats {
     let original = entities.clone();
-    match recover_inner(entities) {
-        Some(stats) => stats,
-        None => {
-            *entities = original;
-            PartitionRecoveryStats::default()
-        }
+    if let Some(stats) = recover_inner(entities) {
+        stats
+    } else {
+        *entities = original;
+        PartitionRecoveryStats::default()
     }
 }
 
@@ -1017,31 +1014,31 @@ fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn entity_ref(id: u64) -> Parameter {
+const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -1055,7 +1052,7 @@ fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
     items.iter().map(entity_ref_value).collect()
 }
 
-fn numeric_value(param: &Parameter) -> Option<f64> {
+const fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Integer(v) => Some(*v as f64),
         Parameter::Real(v) => Some(*v),
@@ -1106,7 +1103,7 @@ fn quantize(v: f64, q: f64) -> Option<i64> {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
@@ -1177,11 +1174,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_axis_ignores_sign() {
+    fn canonical_axis_ignores_sign() -> anyhow::Result<()> {
         assert_eq!(
-            direction_key(canonical_axis([1.0, 0.0, 0.0]).unwrap()),
-            direction_key(canonical_axis([-1.0, 0.0, 0.0]).unwrap())
+            direction_key(
+                canonical_axis([1.0, 0.0, 0.0])
+                    .ok_or_else(|| anyhow::anyhow!("expected test value"))?
+            ),
+            direction_key(
+                canonical_axis([-1.0, 0.0, 0.0])
+                    .ok_or_else(|| anyhow::anyhow!("expected test value"))?
+            )
         );
+        Ok(())
     }
 
     #[test]

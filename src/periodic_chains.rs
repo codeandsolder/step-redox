@@ -87,6 +87,7 @@ struct Partition {
     score: [i64; 8],
 }
 
+#[must_use]
 pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainPattern> {
     let index = build_index(entities);
     let solids = entities
@@ -265,8 +266,7 @@ fn choose_partition(
         partition.score = partition_score(geoms, &partition, axis, observation_score);
         if best
             .as_ref()
-            .map(|existing| partition.score > existing.score)
-            .unwrap_or(true)
+            .is_none_or(|existing| partition.score > existing.score)
         {
             best = Some(partition);
         }
@@ -285,7 +285,7 @@ fn classify_faces(
         return None;
     }
 
-    let half = pitch * 0.5 + GEOM_TOL_MM;
+    let half = pitch.mul_add(0.5, GEOM_TOL_MM);
     let mut site_of = HashMap::<u64, usize>::new();
     let mut sites = vec![Vec::<u64>::new(); sites_count];
     let mut stretch = HashSet::<u64>::new();
@@ -313,7 +313,7 @@ fn classify_faces(
 
     let mids = centers
         .windows(2)
-        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .map(|pair| f64::midpoint(pair[0], pair[1]))
         .collect::<Vec<_>>();
     let mut gap_candidates = vec![Vec::<u64>::new(); mids.len()];
 
@@ -407,7 +407,10 @@ fn partition_score(
     let site_sym = symmetric_abs_difference(&site_counts) as i64;
     let gap_sym = symmetric_abs_difference(&gap_counts) as i64;
 
-    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    let midpoint = f64::midpoint(
+        partition.centers[0],
+        partition.centers[partition.centers.len() - 1],
+    );
     let mut negative = 0usize;
     let mut positive = 0usize;
     let mut middle = 0usize;
@@ -451,7 +454,10 @@ fn build_pattern(
     let interior_site_face_count = mode_value(&site_face_counts).unwrap_or(0);
     let interior_gap_face_count = mode_value(&gap_face_counts).unwrap_or(0);
 
-    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    let midpoint = f64::midpoint(
+        partition.centers[0],
+        partition.centers[partition.centers.len() - 1],
+    );
     let mut fixed_negative = Vec::new();
     let mut fixed_middle = Vec::new();
     let mut fixed_positive = Vec::new();
@@ -686,9 +692,9 @@ fn face_geometry(
         }
     }
     let center = [
-        (lo[0] + hi[0]) * 0.5,
-        (lo[1] + hi[1]) * 0.5,
-        (lo[2] + hi[2]) * 0.5,
+        f64::midpoint(lo[0], hi[0]),
+        f64::midpoint(lo[1], hi[1]),
+        f64::midpoint(lo[2], hi[2]),
     ];
     let span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let mut local_points = coords
@@ -809,7 +815,7 @@ fn symmetric_abs_difference(values: &[usize]) -> usize {
         .sum()
 }
 
-fn other_axes(axis: usize) -> [usize; 2] {
+const fn other_axes(axis: usize) -> [usize; 2] {
     match axis {
         0 => [1, 2],
         1 => [0, 2],
@@ -916,7 +922,7 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
     }
 }
 
-fn numeric_value(param: &Parameter) -> Option<f64> {
+const fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Integer(value) => Some(*value as f64),
         Parameter::Real(value) => Some(*value),
@@ -924,7 +930,7 @@ fn numeric_value(param: &Parameter) -> Option<f64> {
     }
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -939,14 +945,14 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }

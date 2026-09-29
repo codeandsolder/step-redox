@@ -42,6 +42,7 @@ struct CylinderFace {
     radius_mm: f64,
 }
 
+#[must_use]
 pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSheetEvidence> {
     let index = build_index(entities);
     let mut out = Vec::new();
@@ -341,7 +342,7 @@ fn norm(vector: [f64; 3]) -> f64 {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -350,9 +351,9 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -368,34 +369,34 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn list_params(record: &Record) -> Option<&[Parameter]> {
+const fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params.as_slice()),
         _ => None,
     }
 }
 
-fn entity_ref_value(parameter: &Parameter) -> Option<u64> {
+const fn entity_ref_value(parameter: &Parameter) -> Option<u64> {
     match parameter {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
     }
 }
 
-fn numeric_value(parameter: &Parameter) -> Option<f64> {
+const fn numeric_value(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
         Parameter::Integer(value) => Some(*value as f64),

@@ -28,6 +28,7 @@ const RISK_TYPES: &[&str] = &[
     "SHAPE_REPRESENTATION_RELATIONSHIP",
 ];
 
+#[must_use]
 pub fn audit_entities(entities: &[EntityInstance]) -> CompatibilityAudit {
     let mut counts = BTreeMap::new();
     for entity in entities {

@@ -15,7 +15,8 @@ pub struct CadModel {
 }
 
 impl CadModel {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             nodes: Vec::new(),
             roots: Vec::new(),
@@ -29,24 +30,36 @@ impl CadModel {
         id
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` does not refer to a node in this model.
     pub fn add_root(&mut self, id: NodeId) -> Result<()> {
         self.require_node(id)?;
         self.roots.push(id);
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` does not refer to a node in this model.
     pub fn set_provenance(&mut self, id: NodeId, provenance: Provenance) -> Result<()> {
         self.require_node(id)?;
         self.provenance.insert(id, provenance);
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` is outside the model node table.
     pub fn node(&self, id: NodeId) -> Result<&CadNode> {
         self.nodes
             .get(id.0)
             .ok_or_else(|| anyhow::anyhow!("invalid CAD node id {}", id.0))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the model contains invalid child/root references, an invalid proof record, an underspecified boolean, or a cycle.
     pub fn validate(&self) -> Result<()> {
         for &root in &self.roots {
             self.require_node(root)?;
@@ -55,6 +68,11 @@ impl CadModel {
             let id = NodeId(index);
             for child in node.children() {
                 self.require_node(child)?;
+            }
+            if let CadNode::Boolean { children, .. } = node
+                && children.len() < 2
+            {
+                bail!("boolean node {} needs at least two children", id.0);
             }
             if let Some(provenance) = self.provenance.get(&id)
                 && provenance.proof == ProofStatus::WithinTolerance
@@ -96,6 +114,9 @@ impl CadModel {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `root` is invalid or the model fails structural validation.
     pub fn complexity_score(&self, root: NodeId) -> Result<u64> {
         self.require_node(root)?;
         self.validate()?;
@@ -159,6 +180,7 @@ pub enum CadNode {
 }
 
 impl CadNode {
+    #[must_use]
     pub fn children(&self) -> Vec<NodeId> {
         match self {
             Self::Boolean { children, .. } | Self::Assembly { children } => children.clone(),
@@ -196,6 +218,9 @@ pub struct Profile2d {
 }
 
 impl Profile2d {
+    ///
+    /// # Errors
+    /// Returns an error if the supplied points cannot form a valid polygon profile.
     pub fn polygon(points_mm: Vec<[f64; 2]>) -> Result<Self> {
         if points_mm.len() < 3 {
             bail!("polygon profile needs at least three points");
@@ -219,6 +244,7 @@ impl Profile2d {
             .sum()
     }
 
+    #[must_use]
     pub fn single_polygon_points(&self) -> Option<Vec<[f64; 2]>> {
         if self.loops.len() != 1 {
             return None;
@@ -352,7 +378,8 @@ pub struct RigidTransform {
 }
 
 impl RigidTransform {
-    pub fn identity() -> Self {
+    #[must_use]
+    pub const fn identity() -> Self {
         Self {
             matrix: [
                 [1.0, 0.0, 0.0, 0.0],
@@ -363,7 +390,8 @@ impl RigidTransform {
         }
     }
 
-    pub fn translation_mm(xyz: [f64; 3]) -> Self {
+    #[must_use]
+    pub const fn translation_mm(xyz: [f64; 3]) -> Self {
         let mut result = Self::identity();
         result.matrix[0][3] = xyz[0];
         result.matrix[1][3] = xyz[1];
@@ -427,7 +455,7 @@ pub struct BrepFallback {
 }
 
 impl BrepFallback {
-    fn complexity(&self) -> u64 {
+    const fn complexity(&self) -> u64 {
         100 + self.estimated_faces as u64 * 8
             + self.estimated_edges as u64 * 3
             + self.estimated_control_points as u64
@@ -450,6 +478,9 @@ pub enum ProofStatus {
 
 /// Emit only the KCL subset for which step-redox has an exact lowering.
 /// Unsupported nodes fail explicitly rather than being approximated.
+///
+/// # Errors
+/// Returns an error if the CAD model is invalid or contains geometry that the exact KCL lowering does not support.
 pub fn emit_kcl(model: &CadModel) -> Result<String> {
     model.validate()?;
     let mut emitter = KclEmitter::new(model);
@@ -518,9 +549,12 @@ impl<'a> KclEmitter<'a> {
                 if *count == 0 {
                     bail!("linear pattern count must be at least one");
                 }
-                let distance =
-                    (step_mm[0] * step_mm[0] + step_mm[1] * step_mm[1] + step_mm[2] * step_mm[2])
-                        .sqrt();
+                let distance = f64::mul_add(
+                    step_mm[2],
+                    step_mm[2],
+                    f64::mul_add(step_mm[1], step_mm[1], step_mm[0] * step_mm[0]),
+                )
+                .sqrt();
                 if !distance.is_finite() || distance == 0.0 {
                     bail!("linear pattern step must be finite and nonzero");
                 }
@@ -530,10 +564,9 @@ impl<'a> KclEmitter<'a> {
                     step_mm[2] / distance,
                 ];
                 self.output.push_str(&format!(
-                    "n{} = n{} |> patternLinear3d(instances = {}, distance = {}, axis = [{}, {}, {}])\n\n",
+                    "n{} = n{} |> patternLinear3d(instances = {count}, distance = {}, axis = [{}, {}, {}])\n\n",
                     id.0,
                     child.0,
-                    count,
                     scalar(distance),
                     scalar(axis[0]),
                     scalar(axis[1]),
@@ -648,6 +681,24 @@ mod tests {
         model.add_root(fallback)?;
         assert!(model.complexity_score(fallback)? > 2_000);
         Ok(())
+    }
+
+    #[test]
+    fn model_rejects_unary_boolean() {
+        let model = CadModel {
+            nodes: vec![
+                CadNode::Primitive(Primitive::Box {
+                    size_mm: [1.0, 1.0, 1.0],
+                }),
+                CadNode::Boolean {
+                    op: BooleanOp::Difference,
+                    children: vec![NodeId(0)],
+                },
+            ],
+            roots: vec![NodeId(1)],
+            provenance: BTreeMap::new(),
+        };
+        assert!(model.validate().is_err());
     }
 
     #[test]
