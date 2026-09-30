@@ -832,7 +832,7 @@ fn detect_one_radial_slot(
         if excluded_profile_faces.contains(&face_index) {
             continue;
         }
-        let (segment, residual) = match face.surface {
+        let segment_result = match face.surface {
             SurfaceSupport::Cylinder(cylinder) => cylinder_profile_segment_with_angular_trims(
                 face_index,
                 face,
@@ -840,7 +840,7 @@ fn detect_one_radial_slot(
                 axis_origin_mm,
                 axis_direction,
                 segment_context,
-            )?,
+            ),
             SurfaceSupport::Cone(cone) => cone_profile_segment_with_angular_trims(
                 face_index,
                 face,
@@ -848,7 +848,7 @@ fn detect_one_radial_slot(
                 axis_origin_mm,
                 axis_direction,
                 segment_context,
-            )?,
+            ),
             SurfaceSupport::Plane(plane) => plane_profile_segment_with_angular_trims(
                 face_index,
                 face,
@@ -856,8 +856,17 @@ fn detect_one_radial_slot(
                 axis_origin_mm,
                 axis_direction,
                 segment_context,
-            )?,
+            ),
             _ => return None,
+        };
+        let Some((segment, residual)) = segment_result else {
+            #[cfg(test)]
+            eprintln!(
+                "radial-slot base profile rejected face #{} ({}) at index {face_index}",
+                face_ids[face_index],
+                surface_kind(&face.surface)
+            );
+            return None;
         };
         max_residual_mm = max_residual_mm.max(residual);
         if max_residual_mm > source_tolerance_mm {
