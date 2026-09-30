@@ -5,7 +5,7 @@ const TWO_POW_32: f64 = 4_294_967_296.0;
 ///
 /// STEP permits integer-valued numeric parameters wider than the exact integer
 /// range of IEEE-754 binary64. Geometry recovery must not silently round them.
-pub(super) fn exact_i64_to_f64(value: i64) -> Option<f64> {
+pub fn exact_i64_to_f64(value: i64) -> Option<f64> {
     let magnitude = value.unsigned_abs();
     if magnitude > MAX_EXACT_F64_INTEGER {
         return None;
@@ -22,7 +22,7 @@ pub(super) fn exact_i64_to_f64(value: i64) -> Option<f64> {
 }
 
 /// Convert a `usize` to `f64` only when the integer is exactly representable.
-pub(super) fn exact_usize_to_f64(value: usize) -> Option<f64> {
+pub fn exact_usize_to_f64(value: usize) -> Option<f64> {
     let value = u64::try_from(value).ok()?;
     if value > MAX_EXACT_F64_INTEGER {
         return None;
