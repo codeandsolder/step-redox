@@ -864,10 +864,10 @@ fn direction_components(
     ])
 }
 
-const fn numeric(parameter: &Parameter) -> Option<f64> {
+fn numeric(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         _ => None,
     }
 }

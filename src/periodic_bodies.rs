@@ -560,9 +560,9 @@ fn quantize_dir(v: [f64; 3]) -> Option<[i64; 3]> {
     Some(out)
 }
 
-const fn numeric_value(param: &Parameter) -> Option<f64> {
+fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Real(value) => Some(*value),
         _ => None,
     }

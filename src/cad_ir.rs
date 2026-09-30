@@ -628,7 +628,7 @@ const fn exact_f64_eq(left: f64, right: f64) -> bool {
         || (left_bits & F64_MAGNITUDE_MASK == 0 && right_bits & F64_MAGNITUDE_MASK == 0)
 }
 
-fn exact_point2_eq(left: [f64; 2], right: [f64; 2]) -> bool {
+const fn exact_point2_eq(left: [f64; 2], right: [f64; 2]) -> bool {
     exact_f64_eq(left[0], right[0]) && exact_f64_eq(left[1], right[1])
 }
 

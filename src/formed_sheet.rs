@@ -396,10 +396,10 @@ const fn entity_ref_value(parameter: &Parameter) -> Option<u64> {
     }
 }
 
-const fn numeric_value(parameter: &Parameter) -> Option<f64> {
+fn numeric_value(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         _ => None,
     }
 }

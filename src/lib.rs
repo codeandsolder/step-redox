@@ -16,6 +16,7 @@ pub mod formed_sheet;
 mod geometric_intern;
 mod instances;
 mod line_recovery;
+mod numeric;
 pub mod parameters;
 mod partition_recovery;
 pub mod patterns;

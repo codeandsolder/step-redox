@@ -1325,6 +1325,30 @@ mod tests {
     }
 
     #[test]
+    fn production_radial_slot_fixture_recovers_and_evaluates() -> Result<()> {
+        let bytes = include_bytes!("../validation/fixtures/production_radial_slot.step");
+        let recovered = crate::detect_radial_slot_revolutions_bytes(bytes)?;
+        assert_eq!(recovered.len(), 1);
+
+        let fragment = recover_radial_slot_revolution_fragment(&recovered[0])?;
+        let CadNode::Boolean { op, children } = fragment.model.node(fragment.root)? else {
+            bail!("expected production radial-slot boolean root");
+        };
+        assert_eq!(*op, BooleanOp::Difference);
+        assert_eq!(children.len(), 2);
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn radial_slot_revolution_becomes_revolve_minus_extrude() -> Result<()> {
         let slotted = RecoveredRadialSlotRevolution {
             base: RecoveredSolidRevolution {

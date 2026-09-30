@@ -116,7 +116,7 @@ fn si_length_unit_scale_mm(record: &Record) -> Option<f64> {
 fn parameter_number(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Typed { parameter, .. } => parameter_number(parameter),
         _ => None,
     }

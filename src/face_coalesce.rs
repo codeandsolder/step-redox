@@ -43,12 +43,10 @@ struct MergePlan {
 
 pub fn coalesce_same_support_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
     let original = entities.clone();
-    if let Some(stats) = coalesce_inner(entities) {
-        stats
-    } else {
+    coalesce_inner(entities).unwrap_or_else(|| {
         *entities = original;
         FaceCoalesceStats::default()
-    }
+    })
 }
 
 fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStats> {
@@ -255,7 +253,6 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
     let mut shell_maps: HashMap<u64, HashMap<u64, u64>> = HashMap::new();
     let mut style_delete = HashSet::new();
     let mut candidate = HashSet::new();
-    let mut delete_faces = HashSet::new();
     let mut stats = FaceCoalesceStats::default();
 
     // Candidate GC is restricted to old descendants of every face we rewrite
@@ -315,9 +312,6 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
         let map = shell_maps.entry(plan.shell).or_default();
         for &face in &plan.faces {
             map.insert(face, plan.canonical);
-            if face != plan.canonical {
-                delete_faces.insert(face);
-            }
         }
         style_delete.extend(plan.style_delete.iter().copied());
 

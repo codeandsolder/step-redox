@@ -291,7 +291,7 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
 fn parameter_number(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Typed { parameter, .. } => parameter_number(parameter),
         _ => None,
     }

@@ -523,9 +523,9 @@ fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
     items.iter().map(integer_value).collect()
 }
 
-const fn numeric_value(param: &Parameter) -> Option<f64> {
+fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Real(value) => Some(*value),
         _ => None,
     }
