@@ -2,6 +2,7 @@ use crate::cad_ir::{
     Axis3, BooleanOp, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d,
     ProfileLoop, ProofStatus, Provenance, RigidTransform,
 };
+use crate::numeric::exact_usize_to_f64;
 use crate::patterns::InstancePattern;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
@@ -9,7 +10,7 @@ use crate::solid_revolutions::{
     MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     RecoveredRadialSlotRevolution, RecoveredSolidRevolution,
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -875,8 +876,19 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
         bail!("instance pattern contains a zero-sized lattice dimension");
     }
 
-    let declared_cells = pattern.grid_shape.iter().copied().product::<usize>();
-    let expected_fill = pattern.item_ids.len() as f64 / declared_cells as f64;
+    let declared_cells = pattern
+        .grid_shape
+        .iter()
+        .copied()
+        .try_fold(1usize, |product, size| product.checked_mul(size))
+        .ok_or_else(|| anyhow!("instance pattern grid size overflows usize"))?;
+    let Some(item_count) = exact_usize_to_f64(pattern.item_ids.len()) else {
+        bail!("instance pattern item count exceeds exact binary64 integer range");
+    };
+    let Some(declared_cells) = exact_usize_to_f64(declared_cells) else {
+        bail!("instance pattern grid size exceeds exact binary64 integer range");
+    };
+    let expected_fill = item_count / declared_cells;
     if !pattern.fill_ratio.is_finite() || (pattern.fill_ratio - expected_fill).abs() > 1.0e-12 {
         bail!("instance pattern fill ratio disagrees with occupancy/grid shape");
     }
@@ -901,9 +913,11 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
         bail!("instance pattern has duplicate occupied lattice sites");
     }
 
-    let nu = pattern.grid_shape[0] as i64;
+    let nu = i64::try_from(pattern.grid_shape[0])
+        .map_err(|_| anyhow!("instance pattern U grid size exceeds i64 range"))?;
     let nv = if dimensions == 2 {
-        pattern.grid_shape[1] as i64
+        i64::try_from(pattern.grid_shape[1])
+            .map_err(|_| anyhow!("instance pattern V grid size exceeds i64 range"))?
     } else {
         1
     };
@@ -922,13 +936,16 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
 fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     let remaining_budget_mm = (pattern.tolerance_mm - pattern.max_residual_mm).max(0.0);
     let dimensions = usize::from(pattern.dimension);
-    let per_axis_budget_mm = remaining_budget_mm / dimensions as f64;
+    let Some(dimensions_f64) = exact_usize_to_f64(dimensions) else {
+        bail!("instance pattern dimension exceeds exact binary64 integer range");
+    };
+    let per_axis_budget_mm = remaining_budget_mm / dimensions_f64;
     let mut canonical_basis = Vec::with_capacity(dimensions);
     let mut canonicalization_residual_mm = 0.0;
     for axis in 0..dimensions {
         let span = pattern.grid_shape[axis];
         let (basis, added_residual) =
-            canonicalize_step(pattern.basis[axis], span, per_axis_budget_mm);
+            canonicalize_step(pattern.basis[axis], span, per_axis_budget_mm)?;
         canonical_basis.push(basis);
         canonicalization_residual_mm += added_residual;
     }
@@ -936,11 +953,9 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     let spec = match pattern.dimension {
         1 => {
             let full_contiguous = pattern.grid_shape[0] == pattern.item_ids.len()
-                && pattern
-                    .occupancy
-                    .iter()
-                    .enumerate()
-                    .all(|(index, site)| *site == [index as i64, 0]);
+                && pattern.occupancy.iter().enumerate().all(|(index, site)| {
+                    i64::try_from(index).is_ok_and(|index| *site == [index, 0])
+                });
             if full_contiguous {
                 PatternSpec::Linear {
                     count: pattern.item_ids.len(),
@@ -954,8 +969,8 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
                         pattern
                             .occupancy
                             .iter()
-                            .map(|site| [site[0] as usize, 0, 0])
-                            .collect(),
+                            .map(occupancy_site_to_grid_index)
+                            .collect::<Result<Vec<_>>>()?,
                     ),
                 }
             }
@@ -974,8 +989,8 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
                     pattern
                         .occupancy
                         .iter()
-                        .map(|site| [site[0] as usize, site[1] as usize, 0])
-                        .collect(),
+                        .map(occupancy_site_to_grid_index)
+                        .collect::<Result<Vec<_>>>()?,
                 )
             };
             PatternSpec::Grid {
@@ -989,17 +1004,31 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     Ok((spec, canonicalization_residual_mm))
 }
 
-fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> ([f64; 3], f64) {
-    let repeats = span.saturating_sub(1) as f64;
+fn occupancy_site_to_grid_index(site: &[i64; 2]) -> Result<[usize; 3]> {
+    let u = usize::try_from(site[0])
+        .map_err(|_| anyhow!("instance pattern U occupancy is negative or too large"))?;
+    let v = usize::try_from(site[1])
+        .map_err(|_| anyhow!("instance pattern V occupancy is negative or too large"))?;
+    Ok([u, v, 0])
+}
+
+fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> Result<([f64; 3], f64)> {
+    let Some(repeats) = exact_usize_to_f64(span.saturating_sub(1)) else {
+        bail!("instance pattern span exceeds exact binary64 integer range");
+    };
     if repeats == 0.0 || budget_mm <= 0.0 {
-        return (step, 0.0);
+        return Ok((step, 0.0));
     }
 
     let max_abs = step.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    let start_exponent = if max_abs > 0.0 {
-        max_abs.log10().ceil() as i32
-    } else {
-        0
+    if max_abs > 0.0 && max_abs < 1.0e-15 {
+        return Ok((step, 0.0));
+    }
+    let start_exponent = (-15..=308)
+        .find(|exponent| 10_f64.powi(*exponent) >= max_abs)
+        .unwrap_or(308);
+    if !max_abs.is_finite() {
+        bail!("instance pattern basis contains non-finite magnitude");
     };
 
     for exponent in (-15..=start_exponent).rev() {
@@ -1013,11 +1042,11 @@ fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> ([f64; 3], 
         }
         let added_residual_mm = norm(sub(candidate, step)) * repeats;
         if added_residual_mm <= budget_mm + 1.0e-15 {
-            return (candidate, added_residual_mm);
+            return Ok((candidate, added_residual_mm));
         }
     }
 
-    (step, 0.0)
+    Ok((step, 0.0))
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1030,8 +1059,14 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
     }
     let mut expected = Vec::with_capacity(occupancy.len());
     for u in 0..nu {
+        let Ok(u) = i64::try_from(u) else {
+            return false;
+        };
         for v in 0..nv {
-            expected.push([u as i64, v as i64]);
+            let Ok(v) = i64::try_from(v) else {
+                return false;
+            };
+            expected.push([u, v]);
         }
     }
     let mut actual = occupancy.to_vec();
