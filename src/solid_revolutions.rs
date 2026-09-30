@@ -2914,12 +2914,18 @@ fn plane_profile_segment_with_angular_trims(
                     )
                     .abs();
                     geometry_residual = geometry_residual.max(line_axis_distance);
-                    if line_axis_distance <= GEOM_TOL_MM
-                        && [edge.start_mm, edge.end_mm].iter().any(|point| {
-                            point_axis_distance(*point, axis_origin, axis) <= GEOM_TOL_MM
-                        })
-                    {
-                        touches_axis = true;
+                    if line_axis_distance <= GEOM_TOL_MM {
+                        // The finite edge may cross the revolution axis between
+                        // two off-axis vertices.  Testing only the endpoints
+                        // misses exactly that valid radial-boundary topology.
+                        let line_t = axial_coordinate(line.origin_mm, axis_origin, axis);
+                        let axis_point = add(axis_origin, mul(axis, line_t));
+                        let axis_parameter = dot(sub(axis_point, line.origin_mm), direction);
+                        let start_parameter = dot(sub(edge.start_mm, line.origin_mm), direction);
+                        let end_parameter = dot(sub(edge.end_mm, line.origin_mm), direction);
+                        if between(axis_parameter, start_parameter, end_parameter) {
+                            touches_axis = true;
+                        }
                     }
                 }
                 CurveSupport::BSpline(_) => {
@@ -4201,6 +4207,83 @@ mod tests {
                 0,
                 &too_noisy,
                 match too_noisy.surface {
+                    SurfaceSupport::Plane(plane) => plane,
+                    _ => unreachable!(),
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plane_profile_detects_axis_crossing_inside_radial_edge() -> anyhow::Result<()> {
+        let make_face = |line_start: [f64; 3], line_end: [f64; 3]| {
+            test_face(
+                SurfaceSupport::Plane(brep::PlaneSupport {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    max_residual_mm: 0.0,
+                }),
+                vec![
+                    test_circle_edge(
+                        820,
+                        [1.0, 0.0, 0.0],
+                        [-1.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                        1.0,
+                    ),
+                    test_line_edge(821, line_start, line_end),
+                ],
+            )
+        };
+
+        let crossing = make_face([0.0, -0.25, 0.0], [0.0, 0.25, 0.0]);
+        let faces = vec![crossing.clone()];
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        let (segment, _) = plane_profile_segment(
+            0,
+            &crossing,
+            match crossing.surface {
+                SurfaceSupport::Plane(plane) => plane,
+                _ => unreachable!(),
+            },
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+        )
+        .ok_or_else(|| anyhow::anyhow!("axis-crossing radial edge should prove a disk"))?;
+        assert_eq!(segment.a, [0.0, 0.0]);
+        assert_eq!(segment.b, [1.0, 0.0]);
+
+        let one_sided = make_face([0.0, 0.25, 0.0], [0.0, 0.5, 0.0]);
+        let faces = vec![one_sided.clone()];
+        let edge_faces = edge_face_map(&faces);
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(
+            plane_profile_segment(
+                0,
+                &one_sided,
+                match one_sided.surface {
                     SurfaceSupport::Plane(plane) => plane,
                     _ => unreachable!(),
                 },
