@@ -754,7 +754,7 @@ fn detect_one_radial_slot(
             return None;
         };
 
-    let excluded_profile_faces = radial_plane_indices.into_iter().collect::<HashSet<_>>();
+    let mut excluded_profile_faces = radial_plane_indices.into_iter().collect::<HashSet<_>>();
     let angular_trim_faces = [*side_a, *side_b].into_iter().collect::<HashSet<_>>();
 
     let mut slot_min_t = f64::INFINITY;
@@ -804,21 +804,29 @@ fn detect_one_radial_slot(
             .values()
             .any(|attached| attached.contains(&first) && attached.contains(&second))
     };
-    let root_plane_is_proven = faces.iter().enumerate().any(|(face_index, face)| {
-        let SurfaceSupport::Plane(plane) = face.surface else {
-            return false;
-        };
-        parallel(plane.normal, axis_direction)
-            && (axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction)
-                - slot_root_axial_mm)
-                .abs()
-                <= source_tolerance_mm
-            && shares_edge(face_index, *side_a)
-            && shares_edge(face_index, *side_b)
-    });
-    if !root_plane_is_proven {
+    let root_plane_faces = faces
+        .iter()
+        .enumerate()
+        .filter_map(|(face_index, face)| {
+            let SurfaceSupport::Plane(plane) = face.surface else {
+                return None;
+            };
+            (parallel(plane.normal, axis_direction)
+                && (axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction)
+                    - slot_root_axial_mm)
+                    .abs()
+                    <= source_tolerance_mm
+                && shares_edge(face_index, *side_a)
+                && shares_edge(face_index, *side_b))
+            .then_some(face_index)
+        })
+        .collect::<Vec<_>>();
+    let [root_plane_face] = root_plane_faces.as_slice() else {
         return None;
-    }
+    };
+    // This axis-normal plane is the closed end of the slot cut, not a
+    // boundary of the axisymmetric host that existed before the cut.
+    excluded_profile_faces.insert(*root_plane_face);
 
     let mut max_residual_mm = 0.0_f64;
     let mut segments = Vec::<Segment2>::new();
