@@ -599,8 +599,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "monstertruck-assembly"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1041107e797756c1176344c81461d7bb7298ee00c3e9ee5adf093d14f627d56"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "monstertruck-core",
  "rayon",
@@ -609,8 +608,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-core"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f34f2f284b16af3672085cdcaf5d6521feecc104bacf1a37f1fac6c8c1a5884"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "cgmath",
  "matext4cgmath",
@@ -622,8 +620,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-derive"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05c2cdecf25f2d799557e29b5b8c9b6db4d766d150e29aad6d4bba5204f2ea58"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -634,8 +631,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-geometry"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cee8ce45200826a20c752ae24c82f5048dcddd2f168230c1799c214b804d6f40"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -648,8 +644,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-io"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9db95ba8ed9ba913084f04e865b8e522813f9885f40497b8717ede6c6f1542e"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "chrono",
  "derive_more",
@@ -670,8 +665,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-mesh"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "875dbf22ba985790b87e652bfaa1ed24852d3746b1ac022ac7b6c28ba35121c6"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "array-macro",
  "bytemuck",
@@ -687,8 +681,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-meshing"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea03901ea0b3cfaf380c1cc8c2efee85500cdfe260c38bb8278c2a66a18de939"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "array-macro",
  "derive_more",
@@ -707,8 +700,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-modeling"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "518f0c01eb240558e830d6734ab88dc0bf559923811553302aa1f3c16051c211"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "derive_more",
  "itertools 0.14.0",
@@ -727,8 +719,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-solid"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29e8fab1d370bfe553a171c0b0948810eefc66ecb2e3dca87e26c985bda27e50"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "ahash",
  "derive_more",
@@ -748,8 +739,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-topology"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "def1bdeca2fd361435fec506495aaade7caba299accfbb4da1997a1bc300faf5"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -764,8 +754,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-traits"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77b8f72eb09b5f613f6ccc314c53bc4c43de1a0d1d5a29eae61f8b9b8b04eed1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=d1a232efa3d084c1ebc77ebab5ad0d230b0406ec#d1a232efa3d084c1ebc77ebab5ad0d230b0406ec"
 dependencies = [
  "getrandom 0.4.3",
  "monstertruck-core",
