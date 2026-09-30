@@ -55,6 +55,22 @@ jobs:
       - name: Check declared Rust 1.88 MSRV
         run: cargo +1.88.0 check --locked --lib --bins --features cad-kernel-monstertruck
 
+
+  shared-sccache:
+    name: Rust build/test (shared sccache)
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
+    with:
+      command: |
+        cargo +1.98.1 test --lib --release --locked
+        cargo +1.98.1 test --lib --release --locked --features cad-kernel-monstertruck
+        cargo +1.98.1 build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize --bin step-revolution-scan --bin step-support-scan
+      rust-toolchain: "1.98.1"
+      rustflags: "-C target-cpu=x86-64-v2"
+
   validate:
     runs-on: ubuntu-latest
     env:
