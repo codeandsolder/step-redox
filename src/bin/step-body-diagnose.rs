@@ -4,6 +4,8 @@
 )]
 #[path = "../instances.rs"]
 mod instances;
+#[path = "../numeric.rs"]
+mod numeric;
 
 use anyhow::{Context, Result, bail};
 use encoding_rs::GBK;

@@ -1,5 +1,7 @@
 #[path = "../instances.rs"]
 mod instances;
+#[path = "../numeric.rs"]
+mod numeric;
 
 use anyhow::{Context, Result};
 use ruststep::ast::{EntityInstance, Parameter};

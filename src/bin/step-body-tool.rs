@@ -4,6 +4,8 @@
 )]
 #[path = "../instances.rs"]
 mod instances;
+#[path = "../numeric.rs"]
+mod numeric;
 #[path = "../units.rs"]
 mod units;
 
