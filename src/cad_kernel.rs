@@ -410,7 +410,11 @@ pub mod monstertruck {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
     }
 
-    const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-6;
+    // Monstertruck's marching SSI tolerance is a numerical intersection budget,
+    // not source-geometry uncertainty. Keep it at STEP-redox's native geometry
+    // acceptance target so curved booleans are robust without relaxing output
+    // accuracy beyond the 1e-5 mm contract.
+    const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-5;
 
     fn evaluate_boolean(model: &CadModel, op: BooleanOp, children: &[NodeId]) -> Result<Solid> {
         let Some((&first, rest)) = children.split_first() else {
