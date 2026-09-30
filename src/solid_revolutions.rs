@@ -2364,6 +2364,26 @@ fn cone_profile_segment_with_angular_trims(
     axis: [f64; 3],
     segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
+    cone_profile_segment_with_angular_trims_inner(
+        face_index,
+        face,
+        cone,
+        axis_origin,
+        axis,
+        segment_context,
+        true,
+    )
+}
+
+fn cone_profile_segment_with_angular_trims_inner(
+    face_index: usize,
+    face: &FaceInfo,
+    cone: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+    allow_sibling_fallback: bool,
+) -> Option<(Segment2, f64)> {
     let ProfileSegmentContext {
         topology: context,
         source_tolerance_mm,
@@ -2562,13 +2582,54 @@ fn cone_profile_segment_with_angular_trims(
     match boundary_samples.len() {
         0 => return None,
         1 => {
-            let [apex] = apexes.as_slice() else {
-                return None;
-            };
-            if (apex[1] - boundary_samples[0][1]).abs() <= GEOM_TOL_MM {
+            if let [apex] = apexes.as_slice() {
+                if (apex[1] - boundary_samples[0][1]).abs() <= GEOM_TOL_MM {
+                    return None;
+                }
+                push_unique_point(&mut boundary_samples, *apex);
+            } else {
+                if !allow_sibling_fallback {
+                    return None;
+                }
+                for (sibling_index, sibling_face) in context.faces.iter().enumerate() {
+                    if sibling_index == face_index {
+                        continue;
+                    }
+                    let SurfaceSupport::Cone(sibling_cone) = sibling_face.surface else {
+                        continue;
+                    };
+                    if !same_cone_meridian_support(cone, sibling_cone, axis_origin, axis) {
+                        continue;
+                    }
+                    let Some((sibling_segment, sibling_residual)) =
+                        cone_profile_segment_with_angular_trims_inner(
+                            sibling_index,
+                            sibling_face,
+                            sibling_cone,
+                            axis_origin,
+                            axis,
+                            segment_context,
+                            false,
+                        )
+                    else {
+                        continue;
+                    };
+                    let coverage_residual = raw_samples
+                        .iter()
+                        .copied()
+                        .map(|sample| profile_point_segment_distance(sample, sibling_segment))
+                        .fold(0.0_f64, f64::max);
+                    if coverage_residual <= source_tolerance_mm {
+                        return Some((
+                            sibling_segment,
+                            source_support_residual
+                                .max(sibling_residual)
+                                .max(coverage_residual),
+                        ));
+                    }
+                }
                 return None;
             }
-            push_unique_point(&mut boundary_samples, *apex);
         }
         _ => {
             if !apexes.is_empty() {
@@ -2622,6 +2683,59 @@ fn cone_profile_segment_with_angular_trims(
         },
         profile_residual.max(source_support_residual),
     ))
+}
+
+fn same_cone_meridian_support(
+    first: brep::ConeSupport,
+    second: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+) -> bool {
+    if axis_distance(first.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || axis_distance(second.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+    {
+        return false;
+    }
+    let Some(first_axis) = normalize(first.axis) else {
+        return false;
+    };
+    let Some(second_axis) = normalize(second.axis) else {
+        return false;
+    };
+    let first_alignment = dot(first_axis, axis);
+    let second_alignment = dot(second_axis, axis);
+    if 1.0 - first_alignment.abs() > DIR_TOL || 1.0 - second_alignment.abs() > DIR_TOL {
+        return false;
+    }
+
+    let first_t = axial_coordinate(first.reference_origin_mm, axis_origin, axis);
+    let second_t = axial_coordinate(second.reference_origin_mm, axis_origin, axis);
+    let first_slope = first_alignment.signum() * first.semi_angle_rad.tan();
+    let second_slope = second_alignment.signum() * second.semi_angle_rad.tan();
+    let first_intercept = first.reference_radius_mm - first_slope * first_t;
+    let second_intercept = second.reference_radius_mm - second_slope * second_t;
+    first_slope.is_finite()
+        && second_slope.is_finite()
+        && first_intercept.is_finite()
+        && second_intercept.is_finite()
+        && (first_slope - second_slope).abs() <= DIR_TOL
+        && (first_intercept - second_intercept).abs() <= GEOM_TOL_MM
+}
+
+fn profile_point_segment_distance(point: [f64; 2], segment: Segment2) -> f64 {
+    let delta = sub2(segment.b, segment.a);
+    let denominator = delta[0].mul_add(delta[0], delta[1] * delta[1]);
+    if !denominator.is_finite() || denominator <= GEOM_TOL_MM.powi(2) {
+        return distance2(point, segment.a);
+    }
+    let relative = sub2(point, segment.a);
+    let fraction = relative[0].mul_add(delta[0], relative[1] * delta[1]) / denominator;
+    let fraction = fraction.clamp(0.0, 1.0);
+    let projected = [
+        delta[0].mul_add(fraction, segment.a[0]),
+        delta[1].mul_add(fraction, segment.a[1]),
+    ];
+    distance2(point, projected)
 }
 
 fn revolution_line_profile_segment(
