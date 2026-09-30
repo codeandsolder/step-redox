@@ -425,7 +425,23 @@ pub mod monstertruck {
                     monstertruck_solid::and(&result, &rhs, BOOLEAN_TOLERANCE_MM)?
                 }
                 BooleanOp::Difference => {
-                    monstertruck_solid::difference(&result, &rhs, BOOLEAN_TOLERANCE_MM)?
+                    match monstertruck_solid::difference(&result, &rhs, BOOLEAN_TOLERANCE_MM) {
+                        Ok(solid) => solid,
+                        Err(error) => {
+                            #[cfg(test)]
+                            for tolerance in [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 5.0e-2] {
+                                match monstertruck_solid::difference(&result, &rhs, tolerance) {
+                                    Ok(_) => eprintln!(
+                                        "Monstertruck difference succeeds at tolerance {tolerance:.1e}"
+                                    ),
+                                    Err(retry_error) => eprintln!(
+                                        "Monstertruck difference still fails at tolerance {tolerance:.1e}: {retry_error}"
+                                    ),
+                                }
+                            }
+                            return Err(error.into());
+                        }
+                    }
                 }
             };
         }
