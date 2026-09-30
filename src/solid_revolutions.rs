@@ -870,20 +870,34 @@ fn detect_one_radial_slot(
         };
         max_residual_mm = max_residual_mm.max(residual);
         if max_residual_mm > source_tolerance_mm {
+            #[cfg(test)]
+            eprintln!(
+                "radial-slot base profile residual {:.12e} exceeds source tolerance {:.12e} after face #{}",
+                max_residual_mm, source_tolerance_mm, face_ids[face_index]
+            );
             return None;
         }
         push_unique_segment(&mut segments, segment);
         base_face_ids.push(face_ids[face_index]);
     }
-    let profile_points_mm = closed_profile_from_segments(segments)?;
+    let Some(profile_points_mm) = closed_profile_from_segments(segments.clone()) else {
+        #[cfg(test)]
+        eprintln!("radial-slot base profile failed closure: {segments:?}");
+        return None;
+    };
     let profile_curves = line_profile_curves(&profile_points_mm);
+    let Some(radial_direction) = radial_basis(axis_direction) else {
+        #[cfg(test)]
+        eprintln!("radial-slot base profile failed radial basis for axis {axis_direction:?}");
+        return None;
+    };
     let base = RecoveredSolidRevolution {
         solid_id,
         face_ids: base_face_ids,
         profile_curves,
         axis_origin_mm,
         axis_direction,
-        radial_direction: radial_basis(axis_direction)?,
+        radial_direction,
         max_residual_mm,
         source_tolerance_mm,
     };
@@ -894,6 +908,11 @@ fn detect_one_radial_slot(
             .min((slot_max_t - solid_max_t).abs()),
     );
     if slot_max_residual_mm > source_tolerance_mm {
+        #[cfg(test)]
+        eprintln!(
+            "radial-slot slot residual {:.12e} exceeds source tolerance {:.12e}",
+            slot_max_residual_mm, source_tolerance_mm
+        );
         return None;
     }
     let mut side_face_ids = [face_ids[*side_a], face_ids[*side_b]];
