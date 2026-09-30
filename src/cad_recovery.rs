@@ -880,7 +880,7 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
         .grid_shape
         .iter()
         .copied()
-        .try_fold(1usize, |product, size| product.checked_mul(size))
+        .try_fold(1usize, usize::checked_mul)
         .ok_or_else(|| anyhow!("instance pattern grid size overflows usize"))?;
     let Some(item_count) = exact_usize_to_f64(pattern.item_ids.len()) else {
         bail!("instance pattern item count exceeds exact binary64 integer range");
@@ -1029,7 +1029,7 @@ fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> Result<([f6
         .unwrap_or(308);
     if !max_abs.is_finite() {
         bail!("instance pattern basis contains non-finite magnitude");
-    };
+    }
 
     for exponent in (-15..=start_exponent).rev() {
         let quantum = 10_f64.powi(exponent);
@@ -1108,14 +1108,22 @@ fn norm(vector: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
 
-    fn linear_pattern(occupancy: Vec<[i64; 2]>, span: usize, residual: f64) -> InstancePattern {
-        let fill_ratio = occupancy.len() as f64 / span as f64;
-        InstancePattern {
+    fn linear_pattern(
+        occupancy: Vec<[i64; 2]>,
+        span: usize,
+        residual: f64,
+    ) -> Result<InstancePattern> {
+        let item_count = exact_usize_to_f64(occupancy.len())
+            .ok_or_else(|| anyhow!("test item count exceeds exact binary64 integer range"))?;
+        let span_f64 = exact_usize_to_f64(span)
+            .ok_or_else(|| anyhow!("test span exceeds exact binary64 integer range"))?;
+        let item_ids = (0..occupancy.len())
+            .map(|index| u64::try_from(index).map(|index| 300 + index))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(InstancePattern {
             parent_representation: 100,
             representation_map: 200,
-            item_ids: (0..occupancy.len())
-                .map(|index| 300 + index as u64)
-                .collect(),
+            item_ids,
             style_signature: vec![vec![700]],
             dimension: 1,
             origin: [12.0, 3.0, -1.0],
@@ -1123,10 +1131,10 @@ mod tests {
             pitch: vec![2.54],
             occupancy,
             grid_shape: vec![span],
-            fill_ratio,
+            fill_ratio: item_count / span_f64,
             tolerance_mm: 1.0e-7,
             max_residual_mm: residual,
-        }
+        })
     }
 
     #[test]
@@ -1517,7 +1525,7 @@ mod tests {
 
     #[test]
     fn full_linear_pattern_becomes_constructive_pattern_over_first_occurrence() -> Result<()> {
-        let pattern = linear_pattern(vec![[0, 0], [1, 0], [2, 0], [3, 0]], 4, 0.0);
+        let pattern = linear_pattern(vec![[0, 0], [1, 0], [2, 0], [3, 0]], 4, 0.0)?;
         let fragment = recover_instance_pattern_fragment(&pattern)?;
 
         let CadNode::Pattern {
@@ -1543,13 +1551,13 @@ mod tests {
 
     #[test]
     fn canonicalizes_floating_lattice_noise_within_far_end_budget() -> Result<()> {
-        let mut pattern = linear_pattern((0..24).map(|index| [index, 0]).collect(), 24, 2.4e-13);
+        let mut pattern = linear_pattern((0..24).map(|index| [index, 0]).collect(), 24, 2.4e-13)?;
         pattern.basis = vec![[
-            1.9999999999999893,
-            4.440892098500626e-16,
-            -4.440892098500626e-16,
+            1.999_999_999_999_989_3,
+            4.440_892_098_500_626e-16,
+            -4.440_892_098_500_626e-16,
         ]];
-        pattern.pitch = vec![1.9999999999999893];
+        pattern.pitch = vec![1.999_999_999_999_989_3];
 
         let fragment = recover_instance_pattern_fragment(&pattern)?;
         let CadNode::Pattern {
@@ -1570,7 +1578,7 @@ mod tests {
 
     #[test]
     fn sparse_linear_pattern_preserves_holes_as_grid_occupancy() -> Result<()> {
-        let pattern = linear_pattern(vec![[0, 0], [2, 0], [4, 0]], 5, 3.0e-8);
+        let pattern = linear_pattern(vec![[0, 0], [2, 0], [4, 0]], 5, 3.0e-8)?;
         let fragment = recover_instance_pattern_fragment(&pattern)?;
 
         let CadNode::Pattern {
@@ -1631,9 +1639,10 @@ mod tests {
     }
 
     #[test]
-    fn malformed_pattern_fails_closed() {
-        let mut pattern = linear_pattern(vec![[0, 0], [1, 0]], 2, 0.0);
+    fn malformed_pattern_fails_closed() -> Result<()> {
+        let mut pattern = linear_pattern(vec![[0, 0], [1, 0]], 2, 0.0)?;
         pattern.occupancy[0] = [1, 0];
         assert!(recover_instance_pattern_fragment(&pattern).is_err());
+        Ok(())
     }
 }
