@@ -160,7 +160,7 @@ pub mod monstertruck {
             }
 
             let shell =
-                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 4);
+                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 2);
             return Ok(Solid::try_new(vec![shell])?);
         }
 
