@@ -95,8 +95,13 @@ impl Options {
         if profile == OutputProfile::Compact {
             options.experimental_instance_translated_bspline_curves = true;
             options.experimental_instance_z90 = true;
-            options.experimental_instance_planar_positive_features = true;
-            options.experimental_instance_spherical_caps = true;
+            // Positive-feature and spherical-cap factoring currently closes
+            // extracted features with interface caps. That preserves occupied
+            // volume but changes a fused B-rep into touching solids, so keep
+            // both transformations explicit-only until boundary semantics are
+            // preserved by construction.
+            options.experimental_instance_planar_positive_features = false;
+            options.experimental_instance_spherical_caps = false;
         }
         options
     }
@@ -2165,6 +2170,19 @@ mod tests {
             "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{data}\nENDSEC;\nEND-ISO-10303-21;\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn production_profiles_keep_unvalidated_boundary_rewrites_opt_in() {
+        for profile in [OutputProfile::Compat, OutputProfile::Compact] {
+            let options = Options::for_profile(profile);
+            assert!(!options.experimental_instance_planar_positive_features);
+            assert!(!options.experimental_instance_spherical_caps);
+        }
+
+        let compact = Options::for_profile(OutputProfile::Compact);
+        assert!(compact.experimental_instance_translated_bspline_curves);
+        assert!(compact.experimental_instance_z90);
     }
 
     #[test]
