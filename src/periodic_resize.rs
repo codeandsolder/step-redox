@@ -1062,14 +1062,13 @@ pub fn expand_periodic_chain_positive(
         chain_interface_edges(&source_edge_faces, &overlay_left_site, &unit_site);
     let source_overlay_right =
         chain_interface_edges(&source_edge_faces, &unit_site, &overlay_tail_site);
-    if source_overlay_left.len() != overlay_edges_per_boundary
-        || source_overlay_right.len() != overlay_edges_per_boundary
+    let overlay_left_len = source_overlay_left.len();
+    let overlay_right_len = source_overlay_right.len();
+    if overlay_left_len != overlay_edges_per_boundary
+        || overlay_right_len != overlay_edges_per_boundary
     {
         bail!(
-            "periodic-chain adjacent-site overlay seam differs from proof: expected={} left={} right={}",
-            overlay_edges_per_boundary,
-            source_overlay_left.len(),
-            source_overlay_right.len()
+            "periodic-chain adjacent-site overlay seam differs from proof: expected={overlay_edges_per_boundary} left={overlay_left_len} right={overlay_right_len}"
         );
     }
     chain_require_supported_seam_edges(
@@ -1659,14 +1658,13 @@ pub fn shrink_periodic_chain_positive(
         chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_site);
     let source_tail_overlay =
         chain_interface_edges(&source_edge_faces, &last_removed_site, &tail_site);
-    if source_kept_overlay.len() != overlay_edges_per_boundary
-        || source_tail_overlay.len() != overlay_edges_per_boundary
+    let kept_overlay_len = source_kept_overlay.len();
+    let tail_overlay_len = source_tail_overlay.len();
+    if kept_overlay_len != overlay_edges_per_boundary
+        || tail_overlay_len != overlay_edges_per_boundary
     {
         bail!(
-            "periodic-chain shrink overlay seam differs from proof: expected={} kept={} tail={}",
-            overlay_edges_per_boundary,
-            source_kept_overlay.len(),
-            source_tail_overlay.len()
+            "periodic-chain shrink overlay seam differs from proof: expected={overlay_edges_per_boundary} kept={kept_overlay_len} tail={tail_overlay_len}"
         );
     }
     chain_require_supported_seam_edges(
@@ -2624,26 +2622,14 @@ impl<'a> GraphEditor<'a> {
         Ok(delete.len())
     }
 
-    fn clone_descendants(
-        &mut self,
-        seeds: &HashSet<u64>,
-        delta: [f64; 3],
-    ) -> Result<HashMap<u64, u64>> {
-        let mut ids = entity_descendant_closure(self.entities, seeds)?
-            .into_iter()
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        let mut mapping = HashMap::with_capacity(ids.len());
-        for &old in &ids {
-            let new = self.next_id;
-            self.next_id += 1;
-            mapping.insert(old, new);
-        }
-
-        let old_index = self.index.clone();
+    fn relative_replica_transform_origins(
+        &self,
+        ids: &[u64],
+        old_index: &HashMap<u64, usize>,
+    ) -> Result<HashSet<u64>> {
         let cloned_ids = ids.iter().copied().collect::<HashSet<_>>();
-        let mut relative_transform_origins = HashSet::<u64>::new();
-        for &old in &ids {
+        let mut origins = HashSet::<u64>::new();
+        for &old in ids {
             let idx = *old_index
                 .get(&old)
                 .ok_or_else(|| anyhow!("clone graph missing entity #{old}"))?;
@@ -2689,39 +2675,71 @@ impl<'a> GraphEditor<'a> {
             if !cloned_ids.contains(&origin) {
                 bail!("replica transformation #{transform} cloned without origin #{origin}");
             }
-            relative_transform_origins.insert(origin);
+            origins.insert(origin);
+        }
+        self.validate_relative_replica_origins(&origins, &cloned_ids, old_index)?;
+        Ok(origins)
+    }
+
+    fn validate_relative_replica_origins(
+        &self,
+        origins: &HashSet<u64>,
+        cloned_ids: &HashSet<u64>,
+        old_index: &HashMap<u64, usize>,
+    ) -> Result<()> {
+        if origins.is_empty() {
+            return Ok(());
+        }
+        let refs = entity_ref_map(self.entities);
+        let mut inbound = HashMap::<u64, Vec<u64>>::new();
+        for (&parent, children) in &refs {
+            for &child in children {
+                inbound.entry(child).or_default().push(parent);
+            }
+        }
+        for &origin in origins {
+            for &parent in inbound.get(&origin).into_iter().flatten() {
+                if !cloned_ids.contains(&parent) {
+                    continue;
+                }
+                let parent_index = *old_index.get(&parent).ok_or_else(|| {
+                    anyhow!("missing parent #{parent} of replica origin #{origin}")
+                })?;
+                let Some(parent_record) = simple_record(&self.entities[parent_index]) else {
+                    bail!(
+                        "replica transform origin #{origin} is shared with complex cloned parent #{parent}"
+                    );
+                };
+                if parent_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                    bail!(
+                        "replica transform origin #{origin} is also used by cloned {} #{parent}",
+                        parent_record.name
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn clone_descendants(
+        &mut self,
+        seeds: &HashSet<u64>,
+        delta: [f64; 3],
+    ) -> Result<HashMap<u64, u64>> {
+        let mut ids = entity_descendant_closure(self.entities, seeds)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut mapping = HashMap::with_capacity(ids.len());
+        for &old in &ids {
+            let new = self.next_id;
+            self.next_id += 1;
+            mapping.insert(old, new);
         }
 
-        if !relative_transform_origins.is_empty() {
-            let refs = entity_ref_map(self.entities);
-            let mut inbound = HashMap::<u64, Vec<u64>>::new();
-            for (&parent, children) in &refs {
-                for &child in children {
-                    inbound.entry(child).or_default().push(parent);
-                }
-            }
-            for &origin in &relative_transform_origins {
-                for &parent in inbound.get(&origin).into_iter().flatten() {
-                    if !cloned_ids.contains(&parent) {
-                        continue;
-                    }
-                    let parent_index = *old_index.get(&parent).ok_or_else(|| {
-                        anyhow!("missing parent #{parent} of replica origin #{origin}")
-                    })?;
-                    let Some(parent_record) = simple_record(&self.entities[parent_index]) else {
-                        bail!(
-                            "replica transform origin #{origin} is shared with complex cloned parent #{parent}"
-                        );
-                    };
-                    if parent_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
-                        bail!(
-                            "replica transform origin #{origin} is also used by cloned {} #{parent}",
-                            parent_record.name
-                        );
-                    }
-                }
-            }
-        }
+        let old_index = self.index.clone();
+        let relative_transform_origins =
+            self.relative_replica_transform_origins(&ids, &old_index)?;
 
         let mut clones = Vec::with_capacity(ids.len());
         for &old in &ids {
@@ -3501,15 +3519,20 @@ mod tests {
         let index = build_index(&entities);
         assert!(!index.contains_key(&10));
         for parent in [30, 31] {
-            let record = simple_record(&entities[index[&parent]]).expect("presentation parent");
-            let params = list_params(record).expect("presentation params");
+            let parent_index = *index
+                .get(&parent)
+                .ok_or_else(|| anyhow!("missing presentation parent #{parent}"))?;
+            let record = simple_record(&entities[parent_index])
+                .ok_or_else(|| anyhow!("presentation parent #{parent} is complex"))?;
+            let params = list_params(record)
+                .ok_or_else(|| anyhow!("presentation parent #{parent} params invalid"))?;
             let members = match record.name.as_str() {
                 "PRESENTATION_LAYER_ASSIGNMENT" => &params[2],
                 "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" => &params[1],
-                _ => unreachable!(),
+                other => bail!("unexpected presentation parent type {other}"),
             };
             let Parameter::List(members) = members else {
-                panic!("presentation member aggregate");
+                bail!("presentation member aggregate is not a list");
             };
             assert_eq!(members, &[entity_ref(cloned_style)]);
         }
