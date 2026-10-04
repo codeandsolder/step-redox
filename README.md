@@ -11,9 +11,9 @@ The project now has three output policies:
 
 Experimental rewrites that do not preserve the imported top-level solid set or
 fused-solid boundary decomposition remain explicit-only even when they can
-produce large byte savings. In particular, bare Z90 mapped-solid instancing,
-planar positive-feature factoring, and spherical-cap factoring are not enabled
-by `compat` or `compact`.
+produce large byte savings. In particular, same-support face coalescing, bare
+Z90 mapped-solid instancing, planar positive-feature factoring, and spherical-cap
+factoring are not enabled by `compat` or `compact`.
 
 The current semantic layer also recovers regular instance patterns, coupled count
 parameters, and periodic body grammars. On a validated 2.00 mm dual-row header,
