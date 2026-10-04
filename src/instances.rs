@@ -1774,10 +1774,13 @@ fn plane_support_signature(
     let q_rel = [rx, ry, rel[2]];
     let (anx, any) = rotate_xy(axis[0], axis[1], quarter);
     let q_axis_f = [anx, any, axis[2]];
+    // Shape-key positions use the same 1e-5 mm equivalence floor as
+    // normalized vertices and axis-line offsets. A tighter plane-only key
+    // spuriously splits translated copies on exporter floating-point noise.
     let offset = q_rel[2].mul_add(
         q_axis_f[2],
         q_rel[1].mul_add(q_axis_f[1], q_rel[0] * q_axis_f[0]),
-    ) * 1.0e9;
+    ) * 1.0e5;
     Some(format!(
         "PLANE(OFFSET{};DIR({},{},{}))",
         offset.round() as i64,
@@ -2650,6 +2653,54 @@ END-ISO-10303-21;
 #10=EDGE_LOOP('',(#19));")?;
         assert_eq!(direct, nested);
         assert_eq!(direct.oriented_edges, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn shape_key_uses_position_tolerance_for_plane_locus() -> anyhow::Result<()> {
+        fn key(plane_z: f64) -> anyhow::Result<ShapeKey> {
+            let text = format!(
+                "ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('x'),'1');
+FILE_NAME('a','b',(''),(''),'x','y','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=VECTOR('',#3,1.);
+#5=LINE('',#1,#4);
+#6=VERTEX_POINT('',#1);
+#7=VERTEX_POINT('',#2);
+#8=EDGE_CURVE('',#6,#7,#5,.T.);
+#10=EDGE_LOOP('',(#8));
+#11=FACE_OUTER_BOUND('',#10,.T.);
+#12=DIRECTION('',(0.,0.,1.));
+#18=CARTESIAN_POINT('',(0.,0.,{plane_z:.12}));
+#13=AXIS2_PLACEMENT_3D('',#18,#12,#3);
+#14=PLANE('',#13);
+#15=ADVANCED_FACE('',(#11),#14,.T.);
+#16=CLOSED_SHELL('',(#15));
+#17=MANIFOLD_SOLID_BREP('',#16);
+ENDSEC;
+END-ISO-10303-21;
+"
+            );
+            let exchange = ruststep::parser::parse(&text)?;
+            let entities = &exchange.data[0].entities;
+            let index = build_index(entities);
+            Ok(solid_shape_key(17, entities, &index)
+                .ok_or_else(|| anyhow::anyhow!("fixture solid has no shape key"))?
+                .0)
+        }
+
+        let exact = key(0.0)?;
+        let sub_tolerance_noise = key(1.0e-7)?;
+        let distinct_locus = key(2.0e-5)?;
+        assert_eq!(exact, sub_tolerance_noise);
+        assert_ne!(exact, distinct_locus);
         Ok(())
     }
 
