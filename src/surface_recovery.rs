@@ -1013,6 +1013,18 @@ mod tests {
             EntityInstance::Simple { record, .. }
                 if record.name == "B_SPLINE_CURVE_WITH_KNOTS"
         )));
+
+        // V-extrusion recovery creates the profile after the normal first
+        // Bezier pass. The generated non-rational profile is immediately
+        // eligible for exact Bezier canonicalization because its only surface
+        // consumer is the recovered extrusion and that surface is used only
+        // topologically by ADVANCED_FACE.
+        let bezier = crate::bezier_recovery::recover_exact_bezier_curves(&mut entities);
+        assert_eq!(bezier.curves_recovered, 1);
+        assert!(entities.iter().any(|entity| matches!(
+            entity,
+            EntityInstance::Simple { record, .. } if record.name == "BEZIER_CURVE"
+        )));
         Ok(())
     }
 
