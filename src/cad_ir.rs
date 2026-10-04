@@ -75,11 +75,28 @@ impl CadModel {
             {
                 bail!("boolean node {} needs at least two children", id.0);
             }
-            if let Some(provenance) = self.provenance.get(&id)
-                && provenance.proof == ProofStatus::WithinTolerance
-                && provenance.max_residual_mm.is_none()
-            {
-                bail!("node {} is WithinTolerance without max_residual_mm", id.0);
+            if let CadNode::PeriodicChain(chain) = node {
+                chain.validate()?;
+            }
+            if let Some(provenance) = self.provenance.get(&id) {
+                if let Some(residual) = provenance.max_residual_mm
+                    && (!residual.is_finite() || residual < 0.0)
+                {
+                    bail!("node {} has an invalid provenance residual", id.0);
+                }
+                if provenance.proof == ProofStatus::WithinTolerance
+                    && provenance.max_residual_mm.is_none()
+                {
+                    bail!("node {} is WithinTolerance without max_residual_mm", id.0);
+                }
+                if provenance.proof == ProofStatus::StructurallyProven
+                    && provenance.max_residual_mm.is_some()
+                {
+                    bail!(
+                        "node {} has structural proof paired with a geometric residual",
+                        id.0
+                    );
+                }
             }
         }
 
@@ -177,6 +194,7 @@ pub enum CadNode {
     Assembly {
         children: Vec<NodeId>,
     },
+    PeriodicChain(FusedPeriodicChain),
     BrepFallback(BrepFallback),
 }
 
@@ -202,6 +220,7 @@ impl CadNode {
             }
             Self::Transform { .. } => 2,
             Self::Pattern { pattern, .. } => 2 + pattern.complexity(),
+            Self::PeriodicChain(chain) => chain.complexity(),
             Self::BrepFallback(fallback) => fallback.complexity(),
         }
     }
@@ -453,6 +472,127 @@ impl PatternSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexedCount {
+    pub index: usize,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FusedPeriodicChain {
+    pub source_solid_id: u64,
+    pub axis: [f64; 3],
+    pub pitch_mm: f64,
+    pub sites: usize,
+    pub first_site_center_mm: f64,
+    pub interior_site_face_count: usize,
+    pub site_face_count_overrides: Vec<IndexedCount>,
+    pub interior_gap_face_count: usize,
+    pub gap_face_count_overrides: Vec<IndexedCount>,
+    pub stretch_face_count: usize,
+    pub fixed_negative_face_count: usize,
+    pub fixed_positive_face_count: usize,
+    pub adjacent_site_edges_per_boundary: usize,
+    pub repeat_coverage_ratio: f64,
+}
+
+impl FusedPeriodicChain {
+    fn validate(&self) -> Result<()> {
+        if self.source_solid_id == 0 {
+            bail!("periodic-chain source solid id must be nonzero");
+        }
+        if self.sites < 2 {
+            bail!("periodic chain needs at least two sites");
+        }
+        if !self.pitch_mm.is_finite() || self.pitch_mm <= 0.0 {
+            bail!("periodic-chain pitch must be finite and positive");
+        }
+        if !self.first_site_center_mm.is_finite() {
+            bail!("periodic-chain first site center must be finite");
+        }
+        if self.axis.iter().any(|value| !value.is_finite()) {
+            bail!("periodic-chain axis must be finite");
+        }
+        let axis_norm = self.axis[2]
+            .mul_add(
+                self.axis[2],
+                self.axis[1].mul_add(self.axis[1], self.axis[0] * self.axis[0]),
+            )
+            .sqrt();
+        if (axis_norm - 1.0).abs() > 1.0e-9 {
+            bail!("periodic-chain axis must be unit length");
+        }
+        if self.interior_site_face_count == 0 {
+            bail!("periodic-chain prototype site must be nonempty");
+        }
+        if self
+            .site_face_count_overrides
+            .iter()
+            .any(|entry| entry.count == 0)
+        {
+            bail!("periodic-chain sites must be nonempty");
+        }
+        validate_count_overrides(
+            &self.site_face_count_overrides,
+            self.sites,
+            self.interior_site_face_count,
+            "site",
+        )?;
+        validate_count_overrides(
+            &self.gap_face_count_overrides,
+            self.sites - 1,
+            self.interior_gap_face_count,
+            "gap",
+        )?;
+        if !self.repeat_coverage_ratio.is_finite()
+            || !(0.0..=1.0).contains(&self.repeat_coverage_ratio)
+        {
+            bail!("periodic-chain repeat coverage must lie in [0, 1]");
+        }
+        Ok(())
+    }
+
+    fn complexity(&self) -> u64 {
+        let overrides = self
+            .site_face_count_overrides
+            .len()
+            .saturating_add(self.gap_face_count_overrides.len());
+        20_u64.saturating_add(
+            u64::try_from(overrides)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2),
+        )
+    }
+}
+
+fn validate_count_overrides(
+    overrides: &[IndexedCount],
+    slots: usize,
+    baseline: usize,
+    kind: &str,
+) -> Result<()> {
+    let mut previous = None;
+    for entry in overrides {
+        if entry.index >= slots {
+            bail!(
+                "periodic-chain {kind} override index {} is outside {slots} slots",
+                entry.index
+            );
+        }
+        if entry.count == baseline {
+            bail!(
+                "periodic-chain {kind} override {} redundantly stores the baseline count",
+                entry.index
+            );
+        }
+        if previous.is_some_and(|prior| entry.index <= prior) {
+            bail!("periodic-chain {kind} overrides must be sorted and unique");
+        }
+        previous = Some(entry.index);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrepFallback {
     pub source_entity_ids: Vec<u64>,
     pub estimated_faces: usize,
@@ -479,6 +619,7 @@ pub struct Provenance {
 pub enum ProofStatus {
     Exact,
     WithinTolerance,
+    StructurallyProven,
     HeuristicCandidate,
 }
 

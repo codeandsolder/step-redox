@@ -129,7 +129,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write canonical CAD fragments recovered from detected instance patterns as JSON"
+        help = "Write canonical CAD fragments recovered from proven semantic structures as JSON"
     )]
     cad_fragments_json: Option<PathBuf>,
 
@@ -204,6 +204,12 @@ fn main() -> Result<()> {
     options.experimental_instance_spherical_caps |= cli.experimental_instance_spherical_caps;
     options.minify_placeholder_names |= cli.minify_placeholder_names;
     let cleaned = step_redox::clean_bytes(&input, &options)?;
+    let periodic_chains = if cli.cad_fragments_json.is_some() || cli.periodic_chains_json.is_some()
+    {
+        Some(step_redox::detect_periodic_chains_bytes(&cleaned.bytes)?)
+    } else {
+        None
+    };
     std::fs::write(&cli.output, &cleaned.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;
     if let Some(path) = &cli.patterns_json {
@@ -218,6 +224,11 @@ fn main() -> Result<()> {
         fragments.extend(step_redox::cad_recovery::recover_solid_extrusion_fragments(
             &extrusions,
         )?);
+        if let Some(chains) = &periodic_chains {
+            fragments.extend(step_redox::cad_recovery::recover_periodic_chain_fragments(
+                chains,
+            )?);
+        }
         let data = serde_json::to_vec_pretty(&fragments)?;
         std::fs::write(path, data)
             .with_context(|| format!("write CAD fragment report {}", path.display()))?;
@@ -245,8 +256,10 @@ fn main() -> Result<()> {
             .with_context(|| format!("write count parameter report {}", path.display()))?;
     }
     if let Some(path) = &cli.periodic_chains_json {
-        let chains = step_redox::detect_periodic_chains_bytes(&cleaned.bytes)?;
-        let data = serde_json::to_vec_pretty(&chains)?;
+        let chains = periodic_chains
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("periodic-chain analysis was not initialized"))?;
+        let data = serde_json::to_vec_pretty(chains)?;
         std::fs::write(path, data)
             .with_context(|| format!("write periodic chain report {}", path.display()))?;
     }
