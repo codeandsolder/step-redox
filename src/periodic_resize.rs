@@ -3,7 +3,7 @@ use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::instances::collect_styles_by_target;
+use crate::instances::{StyleRef, collect_styles_by_target};
 use crate::periodic_bodies::PeriodicBodyPattern;
 use crate::periodic_chains::PeriodicChainPattern;
 
@@ -791,6 +791,8 @@ pub struct PeriodicChainResizeStats {
     pub new_stretch_edges: usize,
     pub added_entities: usize,
     pub pruned_entities: usize,
+    pub cloned_style_items: usize,
+    pub removed_style_items: usize,
     pub entity_delta: isize,
 }
 
@@ -829,12 +831,25 @@ pub fn expand_periodic_chain_positive(
     if !chain.read_only_proven || !chain.complete_partition {
         bail!("periodic chain is not fully proven");
     }
-    if chain.nonmanifold_edges != 0 || chain.cross_site_edges != 0 {
+    if chain.nonmanifold_edges != 0 || chain.nonlocal_cross_site_edges != 0 {
         bail!(
-            "periodic chain topology is not editable: nonmanifold={} cross_site={}",
+            "periodic chain topology is not editable: nonmanifold={} nonlocal_cross_site={}",
             chain.nonmanifold_edges,
-            chain.cross_site_edges
+            chain.nonlocal_cross_site_edges
         );
+    }
+    if chain.adjacent_site_edge_counts.len() + 1 != old_sites
+        || chain
+            .adjacent_site_edge_counts
+            .first()
+            .is_some_and(|first| {
+                chain
+                    .adjacent_site_edge_counts
+                    .iter()
+                    .any(|count| count != first)
+            })
+    {
+        bail!("periodic chain has inconsistent adjacent-site overlay seams");
     }
     if !chain.fixed_middle_face_ids.is_empty() {
         bail!("periodic chain contains fixed middle geometry");
@@ -916,9 +931,10 @@ pub fn expand_periodic_chain_positive(
         bail!("periodic chain positive tail overlaps kept/insertion geometry");
     }
 
-    // Presentation-safe initial scope: preserve inherited/solid styles, but do
-    // not silently drop direct presentation attached anywhere inside cloned
-    // geometry (faces, edges, support curves/surfaces, vertices, ...).
+    // Direct presentation on cloned topology is preserved by cloning each
+    // STYLED_ITEM and registering it in the same presentation containers.
+    // Keep the supported scope deliberately narrow: direct styles on moved
+    // descendants must target ADVANCED_FACE entities.
     let styles_by_target = collect_styles_by_target(entities);
     let clone_roots = unit_faces
         .iter()
@@ -926,19 +942,13 @@ pub fn expand_periodic_chain_positive(
         .copied()
         .collect::<HashSet<_>>();
     let clone_descendants = entity_descendant_closure(entities, &clone_roots)?;
-    let styled_clone_targets = clone_descendants
-        .iter()
-        .filter(|id| styles_by_target.contains_key(id))
-        .copied()
-        .collect::<Vec<_>>();
-    if !styled_clone_targets.is_empty() {
-        bail!(
-            "periodic chain has {} directly styled entities in cloned/moved geometry; presentation cloning is not implemented yet",
-            styled_clone_targets.len()
-        );
-    }
+    require_face_only_direct_styles(entities, &clone_descendants, &styles_by_target)?;
+    let style_parents =
+        collect_style_container_parents(entities, &styles_by_target, &clone_descendants)?;
 
     let mut graph = GraphEditor::new(entities);
+    let mut cloned_style_items = 0usize;
+    let mut removed_style_items = 0usize;
     let shell = graph
         .simple_record(chain.solid_id)
         .and_then(|record| {
@@ -978,6 +988,8 @@ pub fn expand_periodic_chain_positive(
     let mut unit_face_sets = Vec::<HashSet<u64>>::new();
     for step in 1..=extra {
         let mapping = graph.clone_descendants(&unit_faces, scale(axis, step as f64 * pitch))?;
+        cloned_style_items +=
+            graph.clone_face_styles(&styles_by_target, &style_parents, &mapping)?;
         let mapped_faces = unit_faces
             .iter()
             .map(|face| {
@@ -992,6 +1004,7 @@ pub fn expand_periodic_chain_positive(
     }
 
     let tail_map = graph.clone_descendants(&tail_faces, delta_total)?;
+    cloned_style_items += graph.clone_face_styles(&styles_by_target, &style_parents, &tail_map)?;
     let target_tail = tail_faces
         .iter()
         .map(|face| {
@@ -1018,6 +1031,14 @@ pub fn expand_periodic_chain_positive(
         .iter()
         .copied()
         .collect::<HashSet<_>>();
+    let overlay_left_site = chain.site_face_ids[unit_site_index - 1]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let overlay_tail_site = chain.site_face_ids[tail_site0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
 
     let source_unit_left = chain_interface_edges(&source_edge_faces, &unit_gap, &left_site);
     let source_unit_right = chain_interface_edges(&source_edge_faces, &unit_site, &first_tail_gap);
@@ -1033,6 +1054,29 @@ pub fn expand_periodic_chain_positive(
         source_unit_left
             .iter()
             .chain(source_unit_right.iter())
+            .copied(),
+    )?;
+
+    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
+    let source_overlay_left =
+        chain_interface_edges(&source_edge_faces, &overlay_left_site, &unit_site);
+    let source_overlay_right =
+        chain_interface_edges(&source_edge_faces, &unit_site, &overlay_tail_site);
+    if source_overlay_left.len() != overlay_edges_per_boundary
+        || source_overlay_right.len() != overlay_edges_per_boundary
+    {
+        bail!(
+            "periodic-chain adjacent-site overlay seam differs from proof: expected={} left={} right={}",
+            overlay_edges_per_boundary,
+            source_overlay_left.len(),
+            source_overlay_right.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        &graph,
+        source_overlay_left
+            .iter()
+            .chain(source_overlay_right.iter())
             .copied(),
     )?;
 
@@ -1097,6 +1141,69 @@ pub fn expand_periodic_chain_positive(
         &final_right,
         &tail_left,
     )?);
+
+    if overlay_edges_per_boundary > 0 {
+        let first_overlay_left = source_overlay_left
+            .iter()
+            .map(|edge| {
+                unit_maps[0]
+                    .get(edge)
+                    .copied()
+                    .ok_or_else(|| anyhow!("first inserted unit missing overlay-left edge #{edge}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            &graph,
+            &source_overlay_right,
+            &first_overlay_left,
+        )?);
+
+        for index in 0..extra.saturating_sub(1) {
+            let left = source_overlay_right
+                .iter()
+                .map(|edge| {
+                    unit_maps[index]
+                        .get(edge)
+                        .copied()
+                        .ok_or_else(|| anyhow!("inserted unit missing overlay-right edge #{edge}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let right = source_overlay_left
+                .iter()
+                .map(|edge| {
+                    unit_maps[index + 1]
+                        .get(edge)
+                        .copied()
+                        .ok_or_else(|| anyhow!("inserted unit missing overlay-left edge #{edge}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            seam_pairs.extend(chain_pair_edges_by_geometry(&graph, &left, &right)?);
+        }
+
+        let final_overlay_right = source_overlay_right
+            .iter()
+            .map(|edge| {
+                unit_maps[extra - 1]
+                    .get(edge)
+                    .copied()
+                    .ok_or_else(|| anyhow!("last inserted unit missing overlay-right edge #{edge}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let tail_overlay_left = source_overlay_right
+            .iter()
+            .map(|edge| {
+                tail_map
+                    .get(edge)
+                    .copied()
+                    .ok_or_else(|| anyhow!("translated tail missing overlay-left edge #{edge}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            &graph,
+            &final_overlay_right,
+            &tail_overlay_left,
+        )?);
+    }
 
     for &(_, duplicate) in &seam_pairs {
         prune_roots.insert(duplicate);
@@ -1195,11 +1302,8 @@ pub fn expand_periodic_chain_positive(
             ss_pairs.push((edge, pair));
         }
     }
-    if ss_rows.len() != 6 {
-        bail!(
-            "periodic-chain stretch grammar expected 6 stretch/stretch edges, got {}",
-            ss_rows.len()
-        );
+    if ss_rows.is_empty() {
+        bail!("periodic-chain stretch grammar has no stretch/stretch edges");
     }
 
     let chain_span = old_sites.saturating_sub(1) as f64 * pitch;
@@ -1278,6 +1382,8 @@ pub fn expand_periodic_chain_positive(
     }
     graph.set_shell_faces(shell, &target_shell_faces)?;
 
+    removed_style_items +=
+        graph.remove_face_styles(&styles_by_target, &style_parents, &tail_faces)?;
     let pruned_entities = graph.prune_unreachable_descendants(&prune_roots)?;
     let added_entities = graph.entities.len().saturating_sub(graph.initial_len);
     let entity_delta = graph.entities.len() as isize - graph.initial_len as isize;
@@ -1295,6 +1401,8 @@ pub fn expand_periodic_chain_positive(
         new_stretch_edges,
         added_entities,
         pruned_entities,
+        cloned_style_items,
+        removed_style_items,
         entity_delta,
     })
 }
@@ -1317,12 +1425,25 @@ pub fn shrink_periodic_chain_positive(
     if !chain.read_only_proven || !chain.complete_partition {
         bail!("periodic chain is not fully proven");
     }
-    if chain.nonmanifold_edges != 0 || chain.cross_site_edges != 0 {
+    if chain.nonmanifold_edges != 0 || chain.nonlocal_cross_site_edges != 0 {
         bail!(
-            "periodic chain topology is not editable: nonmanifold={} cross_site={}",
+            "periodic chain topology is not editable: nonmanifold={} nonlocal_cross_site={}",
             chain.nonmanifold_edges,
-            chain.cross_site_edges
+            chain.nonlocal_cross_site_edges
         );
+    }
+    if chain.adjacent_site_edge_counts.len() + 1 != old_sites
+        || chain
+            .adjacent_site_edge_counts
+            .first()
+            .is_some_and(|first| {
+                chain
+                    .adjacent_site_edge_counts
+                    .iter()
+                    .any(|count| count != first)
+            })
+    {
+        bail!("periodic chain has inconsistent adjacent-site overlay seams");
     }
     if !chain.fixed_middle_face_ids.is_empty() {
         bail!("periodic chain contains fixed middle geometry");
@@ -1416,9 +1537,6 @@ pub fn shrink_periodic_chain_positive(
         bail!("periodic chain shrink partition overlaps or removes no periodic unit");
     }
 
-    // Reject direct presentation anywhere in geometry that is either cloned or
-    // deleted. Handling style roots during topology surgery is deliberately
-    // fail-closed until presentation cloning/removal is implemented.
     let styles_by_target = collect_styles_by_target(entities);
     let touched_roots = remove_faces
         .iter()
@@ -1426,19 +1544,13 @@ pub fn shrink_periodic_chain_positive(
         .copied()
         .collect::<HashSet<_>>();
     let touched_descendants = entity_descendant_closure(entities, &touched_roots)?;
-    let styled_touched_targets = touched_descendants
-        .iter()
-        .filter(|id| styles_by_target.contains_key(id))
-        .copied()
-        .collect::<Vec<_>>();
-    if !styled_touched_targets.is_empty() {
-        bail!(
-            "periodic chain has {} directly styled entities in moved/removed geometry; presentation surgery is not implemented yet",
-            styled_touched_targets.len()
-        );
-    }
+    require_face_only_direct_styles(entities, &touched_descendants, &styles_by_target)?;
+    let style_parents =
+        collect_style_container_parents(entities, &styles_by_target, &touched_descendants)?;
 
     let mut graph = GraphEditor::new(entities);
+    let mut cloned_style_items = 0usize;
+    let mut removed_style_items = 0usize;
     let shell = graph
         .simple_record(chain.solid_id)
         .and_then(|record| {
@@ -1475,6 +1587,7 @@ pub fn shrink_periodic_chain_positive(
         .collect::<Result<HashMap<_, _>>>()?;
 
     let tail_map = graph.clone_descendants(&tail_faces, delta_total)?;
+    cloned_style_items += graph.clone_face_styles(&styles_by_target, &style_parents, &tail_map)?;
     let target_tail = tail_faces
         .iter()
         .map(|face| {
@@ -1489,6 +1602,10 @@ pub fn shrink_periodic_chain_positive(
         .iter()
         .copied()
         .collect::<HashSet<_>>();
+    let first_removed_site = chain.site_face_ids[remove_site_start]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
     let first_removed_gap = chain.gap_face_ids[remove_gap_start]
         .iter()
         .copied()
@@ -1498,6 +1615,10 @@ pub fn shrink_periodic_chain_positive(
         .copied()
         .collect::<HashSet<_>>();
     let first_tail_gap = chain.gap_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let tail_site = chain.site_face_ids[tail_site0]
         .iter()
         .copied()
         .collect::<HashSet<_>>();
@@ -1530,7 +1651,47 @@ pub fn shrink_periodic_chain_positive(
                 .ok_or_else(|| anyhow!("translated tail missing left seam edge #{edge}"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let seam_pairs = chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
+    let mut seam_pairs =
+        chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
+
+    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
+    let source_kept_overlay =
+        chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_site);
+    let source_tail_overlay =
+        chain_interface_edges(&source_edge_faces, &last_removed_site, &tail_site);
+    if source_kept_overlay.len() != overlay_edges_per_boundary
+        || source_tail_overlay.len() != overlay_edges_per_boundary
+    {
+        bail!(
+            "periodic-chain shrink overlay seam differs from proof: expected={} kept={} tail={}",
+            overlay_edges_per_boundary,
+            source_kept_overlay.len(),
+            source_tail_overlay.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        &graph,
+        source_kept_overlay
+            .iter()
+            .chain(source_tail_overlay.iter())
+            .copied(),
+    )?;
+    if overlay_edges_per_boundary > 0 {
+        let mapped_tail_overlay = source_tail_overlay
+            .iter()
+            .map(|edge| {
+                tail_map
+                    .get(edge)
+                    .copied()
+                    .ok_or_else(|| anyhow!("translated tail missing overlay seam edge #{edge}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            &graph,
+            &source_kept_overlay,
+            &mapped_tail_overlay,
+        )?);
+    }
 
     let mut prune_roots = remove_faces.clone();
     prune_roots.extend(tail_faces.iter().copied());
@@ -1616,11 +1777,8 @@ pub fn shrink_periodic_chain_positive(
             ss_pairs.push((edge, pair));
         }
     }
-    if ss_rows.len() != 6 {
-        bail!(
-            "periodic-chain stretch grammar expected 6 stretch/stretch edges, got {}",
-            ss_rows.len()
-        );
+    if ss_rows.is_empty() {
+        bail!("periodic-chain stretch grammar has no stretch/stretch edges");
     }
 
     let chain_span = old_sites.saturating_sub(1) as f64 * pitch;
@@ -1689,6 +1847,13 @@ pub fn shrink_periodic_chain_positive(
     }
     graph.set_shell_faces(shell, &target_shell_faces)?;
 
+    let removed_face_roots = remove_faces
+        .iter()
+        .chain(tail_faces.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    removed_style_items +=
+        graph.remove_face_styles(&styles_by_target, &style_parents, &removed_face_roots)?;
     let pruned_entities = graph.prune_unreachable_descendants(&prune_roots)?;
     let added_entities = graph.entities.len().saturating_sub(graph.initial_len);
     let entity_delta = graph.entities.len() as isize - graph.initial_len as isize;
@@ -1706,6 +1871,8 @@ pub fn shrink_periodic_chain_positive(
         new_stretch_edges,
         added_entities,
         pruned_entities,
+        cloned_style_items,
+        removed_style_items,
         entity_delta,
     })
 }
@@ -2077,6 +2244,86 @@ fn chain_set_oriented_edge(
     Ok(())
 }
 
+fn collect_style_container_parents(
+    entities: &[EntityInstance],
+    styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+    relevant_targets: &HashSet<u64>,
+) -> Result<HashMap<u64, Vec<u64>>> {
+    let refs = entity_ref_map(entities);
+    let mut inbound = HashMap::<u64, Vec<u64>>::new();
+    for (&parent, children) in &refs {
+        for &child in children {
+            inbound.entry(child).or_default().push(parent);
+        }
+    }
+    let index = build_index(entities);
+    let mut out = HashMap::<u64, Vec<u64>>::new();
+    for style in relevant_targets
+        .iter()
+        .flat_map(|target| styles_by_target.get(target).into_iter().flatten())
+    {
+        let mut parents = inbound.get(&style.id).cloned().unwrap_or_default();
+        parents.sort_unstable();
+        parents.dedup();
+        if parents.is_empty() {
+            bail!("STYLED_ITEM #{} has no presentation container", style.id);
+        }
+        for &parent in &parents {
+            let Some(&idx) = index.get(&parent) else {
+                bail!(
+                    "STYLED_ITEM #{} references missing parent #{parent}",
+                    style.id
+                );
+            };
+            let Some(record) = simple_record(&entities[idx]) else {
+                bail!(
+                    "STYLED_ITEM #{} has complex presentation parent #{parent}",
+                    style.id
+                );
+            };
+            if !matches!(
+                record.name.as_str(),
+                "PRESENTATION_LAYER_ASSIGNMENT"
+                    | "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
+            ) {
+                bail!(
+                    "STYLED_ITEM #{} has unsupported presentation parent {} #{parent}",
+                    style.id,
+                    record.name
+                );
+            }
+        }
+        out.insert(style.id, parents);
+    }
+    Ok(out)
+}
+
+fn require_face_only_direct_styles(
+    entities: &[EntityInstance],
+    touched: &HashSet<u64>,
+    styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+) -> Result<()> {
+    let index = build_index(entities);
+    for &target in touched {
+        if !styles_by_target.contains_key(&target) {
+            continue;
+        }
+        let Some(&idx) = index.get(&target) else {
+            bail!("styled target #{target} is missing");
+        };
+        let Some(record) = simple_record(&entities[idx]) else {
+            bail!("styled moved target #{target} is complex");
+        };
+        if record.name != "ADVANCED_FACE" {
+            bail!(
+                "periodic-chain presentation surgery only supports directly styled ADVANCED_FACE targets, got {} #{target}",
+                record.name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn chain_apply_weld(
     graph: &mut GraphEditor<'_>,
     faces: &HashSet<u64>,
@@ -2275,6 +2522,108 @@ impl<'a> GraphEditor<'a> {
         Ok(removed)
     }
 
+    fn presentation_members_mut(&mut self, parent: u64) -> Result<&mut Vec<Parameter>> {
+        let record = self
+            .simple_record_mut(parent)
+            .ok_or_else(|| anyhow!("missing presentation container #{parent}"))?;
+        let index = match record.name.as_str() {
+            "PRESENTATION_LAYER_ASSIGNMENT" => 2,
+            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" => 1,
+            other => bail!("unsupported presentation container {other} #{parent}"),
+        };
+        let Parameter::List(params) = &mut record.parameter else {
+            bail!("presentation container #{parent} params invalid");
+        };
+        let Some(Parameter::List(members)) = params.get_mut(index) else {
+            bail!("presentation container #{parent} member aggregate invalid");
+        };
+        Ok(members)
+    }
+
+    fn clone_face_styles(
+        &mut self,
+        styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+        style_parents: &HashMap<u64, Vec<u64>>,
+        mapping: &HashMap<u64, u64>,
+    ) -> Result<usize> {
+        let mut targets = mapping
+            .iter()
+            .filter_map(|(&old, &new)| styles_by_target.contains_key(&old).then_some((old, new)))
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+
+        let mut cloned = 0usize;
+        for (old_target, new_target) in targets {
+            let mut styles = styles_by_target[&old_target].clone();
+            styles.sort_by_key(|style| style.id);
+            for style in styles {
+                let old_record = self
+                    .simple_record(style.id)
+                    .ok_or_else(|| anyhow!("missing STYLED_ITEM #{}", style.id))?
+                    .clone();
+                if old_record.name != "STYLED_ITEM" {
+                    bail!("#{} is not STYLED_ITEM", style.id);
+                }
+                let Parameter::List(mut params) = old_record.parameter else {
+                    bail!("STYLED_ITEM #{} params invalid", style.id);
+                };
+                if params.len() != 3 {
+                    bail!("STYLED_ITEM #{} arity invalid", style.id);
+                }
+                params[2] = entity_ref(new_target);
+                let new_style = self.push_simple("STYLED_ITEM", params);
+                let parents = style_parents.get(&style.id).ok_or_else(|| {
+                    anyhow!("missing presentation parents for STYLED_ITEM #{}", style.id)
+                })?;
+                for &parent in parents {
+                    self.presentation_members_mut(parent)?
+                        .push(entity_ref(new_style));
+                }
+                cloned += 1;
+            }
+        }
+        Ok(cloned)
+    }
+
+    fn remove_face_styles(
+        &mut self,
+        styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+        style_parents: &HashMap<u64, Vec<u64>>,
+        targets: &HashSet<u64>,
+    ) -> Result<usize> {
+        let mut styles = targets
+            .iter()
+            .flat_map(|target| styles_by_target.get(target).into_iter().flatten())
+            .cloned()
+            .collect::<Vec<_>>();
+        styles.sort_by_key(|style| style.id);
+        styles.dedup_by_key(|style| style.id);
+
+        let mut delete = HashSet::<u64>::new();
+        for style in &styles {
+            let parents = style_parents.get(&style.id).ok_or_else(|| {
+                anyhow!("missing presentation parents for STYLED_ITEM #{}", style.id)
+            })?;
+            for &parent in parents {
+                let members = self.presentation_members_mut(parent)?;
+                let before = members.len();
+                members.retain(|item| entity_ref_value(item) != Some(style.id));
+                if members.len() == before {
+                    bail!(
+                        "presentation container #{parent} did not reference STYLED_ITEM #{}",
+                        style.id
+                    );
+                }
+            }
+            delete.insert(style.id);
+        }
+
+        self.entities
+            .retain(|entity| !delete.contains(&entity_id(entity)));
+        self.index = build_index(self.entities);
+        Ok(delete.len())
+    }
+
     fn clone_descendants(
         &mut self,
         seeds: &HashSet<u64>,
@@ -2292,6 +2641,88 @@ impl<'a> GraphEditor<'a> {
         }
 
         let old_index = self.index.clone();
+        let cloned_ids = ids.iter().copied().collect::<HashSet<_>>();
+        let mut relative_transform_origins = HashSet::<u64>::new();
+        for &old in &ids {
+            let idx = *old_index
+                .get(&old)
+                .ok_or_else(|| anyhow!("clone graph missing entity #{old}"))?;
+            let Some(record) = simple_record(&self.entities[idx]) else {
+                continue;
+            };
+            if !matches!(record.name.as_str(), "CURVE_REPLICA" | "SURFACE_REPLICA") {
+                continue;
+            }
+            let params = list_params(record)
+                .ok_or_else(|| anyhow!("{} #{old} parameters are not a list", record.name))?;
+            let transform = entity_ref_value(
+                params
+                    .get(2)
+                    .ok_or_else(|| anyhow!("{} #{old} missing transformation", record.name))?,
+            )
+            .ok_or_else(|| anyhow!("{} #{old} transformation is not a reference", record.name))?;
+            if !cloned_ids.contains(&transform) {
+                bail!(
+                    "{} #{old} cloned without its transformation #{transform}",
+                    record.name
+                );
+            }
+            let transform_index = *old_index
+                .get(&transform)
+                .ok_or_else(|| anyhow!("missing replica transformation #{transform}"))?;
+            let transform_record = simple_record(&self.entities[transform_index])
+                .ok_or_else(|| anyhow!("replica transformation #{transform} is complex"))?;
+            if transform_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                bail!(
+                    "replica transformation #{transform} uses unsupported {}",
+                    transform_record.name
+                );
+            }
+            let transform_params = list_params(transform_record)
+                .ok_or_else(|| anyhow!("replica transformation #{transform} params invalid"))?;
+            let origin = entity_ref_value(transform_params.get(5).ok_or_else(|| {
+                anyhow!("replica transformation #{transform} missing local origin")
+            })?)
+            .ok_or_else(|| {
+                anyhow!("replica transformation #{transform} local origin is not a ref")
+            })?;
+            if !cloned_ids.contains(&origin) {
+                bail!("replica transformation #{transform} cloned without origin #{origin}");
+            }
+            relative_transform_origins.insert(origin);
+        }
+
+        if !relative_transform_origins.is_empty() {
+            let refs = entity_ref_map(self.entities);
+            let mut inbound = HashMap::<u64, Vec<u64>>::new();
+            for (&parent, children) in &refs {
+                for &child in children {
+                    inbound.entry(child).or_default().push(parent);
+                }
+            }
+            for &origin in &relative_transform_origins {
+                for &parent in inbound.get(&origin).into_iter().flatten() {
+                    if !cloned_ids.contains(&parent) {
+                        continue;
+                    }
+                    let parent_index = *old_index.get(&parent).ok_or_else(|| {
+                        anyhow!("missing parent #{parent} of replica origin #{origin}")
+                    })?;
+                    let Some(parent_record) = simple_record(&self.entities[parent_index]) else {
+                        bail!(
+                            "replica transform origin #{origin} is shared with complex cloned parent #{parent}"
+                        );
+                    };
+                    if parent_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                        bail!(
+                            "replica transform origin #{origin} is also used by cloned {} #{parent}",
+                            parent_record.name
+                        );
+                    }
+                }
+            }
+        }
+
         let mut clones = Vec::with_capacity(ids.len());
         for &old in &ids {
             let idx = *old_index
@@ -2300,7 +2731,9 @@ impl<'a> GraphEditor<'a> {
             let mut entity = self.entities[idx].clone();
             set_entity_id(&mut entity, mapping[&old]);
             remap_entity_refs(&mut entity, &mapping);
-            translate_cartesian_point(&mut entity, delta)?;
+            if !relative_transform_origins.contains(&old) {
+                translate_cartesian_point(&mut entity, delta)?;
+            }
             clones.push(entity);
         }
 
@@ -2983,6 +3416,160 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_style_clone_and_remove_updates_presentation_containers() -> anyhow::Result<()> {
+        let simple = |id, name: &str, params: Vec<Parameter>| EntityInstance::Simple {
+            id,
+            record: Record {
+                name: name.to_string(),
+                parameter: Parameter::List(params),
+            },
+        };
+        let mut entities = vec![
+            simple(
+                1,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(Vec::new()),
+                    entity_ref(99),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                2,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(Vec::new()),
+                    entity_ref(99),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                10,
+                "STYLED_ITEM",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(20)]),
+                    entity_ref(1),
+                ],
+            ),
+            simple(
+                30,
+                "PRESENTATION_LAYER_ASSIGNMENT",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(10)]),
+                ],
+            ),
+            simple(
+                31,
+                "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(10)]),
+                    Parameter::NotProvided,
+                ],
+            ),
+        ];
+
+        let styles = collect_styles_by_target(&entities);
+        let relevant = HashSet::from([1]);
+        let parents = collect_style_container_parents(&entities, &styles, &relevant)?;
+        require_face_only_direct_styles(&entities, &relevant, &styles)?;
+
+        {
+            let mut graph = GraphEditor::new(&mut entities);
+            assert_eq!(
+                graph.clone_face_styles(&styles, &parents, &HashMap::from([(1, 2)]))?,
+                1
+            );
+            assert_eq!(
+                graph.remove_face_styles(&styles, &parents, &HashSet::from([1]))?,
+                1
+            );
+        }
+
+        let styles_after = collect_styles_by_target(&entities);
+        assert!(!styles_after.contains_key(&1));
+        assert_eq!(styles_after.get(&2).map(Vec::len), Some(1));
+        let cloned_style = styles_after[&2][0].id;
+
+        let index = build_index(&entities);
+        assert!(!index.contains_key(&10));
+        for parent in [30, 31] {
+            let record = simple_record(&entities[index[&parent]]).expect("presentation parent");
+            let params = list_params(record).expect("presentation params");
+            let members = match record.name.as_str() {
+                "PRESENTATION_LAYER_ASSIGNMENT" => &params[2],
+                "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" => &params[1],
+                _ => unreachable!(),
+            };
+            let Parameter::List(members) = members else {
+                panic!("presentation member aggregate");
+            };
+            assert_eq!(members, &[entity_ref(cloned_style)]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn clone_descendants_preserves_replica_relative_translation() -> anyhow::Result<()> {
+        let simple = |id, name: &str, params: Vec<Parameter>| EntityInstance::Simple {
+            id,
+            record: Record {
+                name: name.to_string(),
+                parameter: Parameter::List(params),
+            },
+        };
+        let point = |id, xyz: [f64; 3]| {
+            simple(
+                id,
+                "CARTESIAN_POINT",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(xyz.into_iter().map(Parameter::Real).collect()),
+                ],
+            )
+        };
+        let mut entities = vec![
+            point(1, [0.0, 0.0, 0.0]),
+            point(2, [2.54, 0.0, 0.0]),
+            simple(3, "CURVE_SOURCE", vec![entity_ref(1)]),
+            simple(
+                4,
+                "CARTESIAN_TRANSFORMATION_OPERATOR_3D",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::String(String::new()),
+                    Parameter::String(String::new()),
+                    Parameter::NotProvided,
+                    Parameter::NotProvided,
+                    entity_ref(2),
+                    Parameter::NotProvided,
+                    Parameter::NotProvided,
+                ],
+            ),
+            simple(
+                5,
+                "CURVE_REPLICA",
+                vec![
+                    Parameter::String(String::new()),
+                    entity_ref(3),
+                    entity_ref(4),
+                ],
+            ),
+        ];
+
+        let mut graph = GraphEditor::new(&mut entities);
+        let mapping = graph.clone_descendants(&HashSet::from([5]), [10.0, 0.0, 0.0])?;
+        assert_eq!(graph.cartesian_point(mapping[&1])?, [10.0, 0.0, 0.0]);
+        assert_eq!(graph.cartesian_point(mapping[&2])?, [2.54, 0.0, 0.0]);
+        Ok(())
+    }
 
     #[test]
     fn quantized_coordinate_is_stable_under_small_noise() {
