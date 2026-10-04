@@ -1512,7 +1512,7 @@ pub fn resolve_edge_curve_use(
     None
 }
 
-fn oriented_edge_signature(
+pub(crate) fn oriented_edge_signature(
     oriented_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,

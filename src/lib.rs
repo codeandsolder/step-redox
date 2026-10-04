@@ -27,6 +27,7 @@ pub mod periodic_bodies;
 pub mod periodic_chains;
 pub mod periodic_resize;
 mod planar_features;
+pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
 pub mod profile_curves;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
@@ -267,6 +268,252 @@ pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<Compact
         return Ok(stats);
     }
     bail!("solid #{solid_id} not found")
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryFeaturePeelPassReport {
+    pub pass_index: usize,
+    pub diagnostics: planar_features::BoundaryFeatureDiagnostics,
+    pub stats: planar_features::BoundaryFeaturePeelStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BoundaryFeatureDecompositionReport {
+    pub passes: Vec<BoundaryFeaturePeelPassReport>,
+    pub total_families: usize,
+    pub total_instances: usize,
+    pub total_additive_instances: usize,
+    pub total_subtractive_instances: usize,
+    pub total_faces_removed_from_shells: usize,
+    pub total_interface_bounds_healed: usize,
+}
+
+/// Recursively peel regular additive/subtractive boundary-feature families into
+/// a simpler analysis residual.
+///
+/// The returned STEP is deliberately an INTERNAL RESIDUAL, not a geometry-
+/// equivalent replacement for the input. Each peel heals the carrier face(s)
+/// and removes the feature boundary patch; callers reconstruct the original by
+/// replaying the recorded families in reverse order with Union/Difference.
+pub fn peel_patterned_boundary_features_for_analysis_bytes(
+    input: &[u8],
+    min_instances: usize,
+    max_passes: usize,
+) -> Result<(Vec<u8>, BoundaryFeatureDecompositionReport)> {
+    if max_passes == 0 {
+        bail!("boundary feature decomposition requires max_passes > 0");
+    }
+
+    let (input_text, _) = decode_input(input)?;
+    let mut exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+
+    let mut report = BoundaryFeatureDecompositionReport::default();
+    for pass_index in 0..max_passes {
+        let mut pass_diagnostics = planar_features::BoundaryFeatureDiagnostics::default();
+        let mut pass_stats = planar_features::BoundaryFeaturePeelStats::default();
+
+        for section in &mut exchange.data {
+            let (diagnostics, stats) =
+                planar_features::peel_patterned_boundary_features_for_analysis(
+                    &mut section.entities,
+                    min_instances,
+                )?;
+            pass_diagnostics.shell_contexts += diagnostics.shell_contexts;
+            pass_diagnostics.planar_hosts += diagnostics.planar_hosts;
+            pass_diagnostics.raw_candidates += diagnostics.raw_candidates;
+            pass_diagnostics.additive_candidates += diagnostics.additive_candidates;
+            pass_diagnostics.subtractive_candidates += diagnostics.subtractive_candidates;
+            pass_diagnostics.single_host_candidates += diagnostics.single_host_candidates;
+            pass_diagnostics.multi_host_candidates += diagnostics.multi_host_candidates;
+            pass_diagnostics.families.extend(diagnostics.families);
+
+            pass_stats.families += stats.families;
+            pass_stats.instances += stats.instances;
+            pass_stats.additive_instances += stats.additive_instances;
+            pass_stats.subtractive_instances += stats.subtractive_instances;
+            pass_stats.faces_removed_from_shells += stats.faces_removed_from_shells;
+            pass_stats.interface_bounds_healed += stats.interface_bounds_healed;
+        }
+
+        pass_diagnostics.families.sort_by(|a, b| {
+            b.instances
+                .cmp(&a.instances)
+                .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+                .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+        });
+
+        if pass_stats.families == 0 {
+            break;
+        }
+
+        report.total_families += pass_stats.families;
+        report.total_instances += pass_stats.instances;
+        report.total_additive_instances += pass_stats.additive_instances;
+        report.total_subtractive_instances += pass_stats.subtractive_instances;
+        report.total_faces_removed_from_shells += pass_stats.faces_removed_from_shells;
+        report.total_interface_bounds_healed += pass_stats.interface_bounds_healed;
+        report.passes.push(BoundaryFeaturePeelPassReport {
+            pass_index,
+            diagnostics: pass_diagnostics,
+            stats: pass_stats,
+        });
+    }
+
+    let output = write_exchange(&exchange)?;
+    Ok((output.into_bytes(), report))
+}
+
+/// Detect translation-periodic open boundary paths on planar carrier faces.
+///
+/// This is read-only evidence for edge-entering slots/notches and other
+/// features whose interface is a repeated detour on a FACE_OUTER_BOUND rather
+/// than a complete inner FACE_BOUND. It does not yet heal or mutate those
+/// chains.
+pub fn analyze_open_chain_patterns_bytes(
+    input: &[u8],
+) -> Result<planar_features::OpenChainDiagnostics> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+
+    let mut merged = planar_features::OpenChainDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_open_chain_patterns(&section.entities);
+        merged.planar_faces += report.planar_faces;
+        merged.loops_considered += report.loops_considered;
+        merged.patterned_loops += report.patterned_loops;
+        merged.runs.extend(report.runs);
+    }
+    merged.runs.sort_by(|a, b| {
+        b.covered_edges
+            .cmp(&a.covered_edges)
+            .then_with(|| b.repeats.cmp(&a.repeats))
+            .then_with(|| a.face_id.cmp(&b.face_id))
+            .then_with(|| a.bound_id.cmp(&b.bound_id))
+            .then_with(|| a.start_edge_index.cmp(&b.start_edge_index))
+    });
+    Ok(merged)
+}
+
+/// Materialize one closed canonical tool solid per recovered boundary-feature
+/// family while leaving the source solid unchanged.
+///
+/// The output STEP is an analysis artifact: generated tool solids may reuse
+/// source topology and are intentionally not inserted into product structure.
+/// Their IDs are returned explicitly for recursive recognition/rendering.
+pub fn materialize_boundary_feature_tools_for_analysis_bytes(
+    input: &[u8],
+    min_instances: usize,
+) -> Result<(
+    Vec<u8>,
+    planar_features::BoundaryFeatureDiagnostics,
+    Vec<planar_features::BoundaryFeatureToolMaterialization>,
+)> {
+    let (input_text, _) = decode_input(input)?;
+    let mut exchange =
+        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+    if exchange.data.len() != 1 {
+        bail!("boundary feature tool materialization currently requires exactly one DATA section");
+    }
+
+    let (diagnostics, tools) = planar_features::materialize_boundary_feature_tools_for_analysis(
+        &mut exchange.data[0].entities,
+        min_instances,
+    )?;
+    let output = write_exchange(&exchange)?;
+    Ok((output.into_bytes(), diagnostics, tools))
+}
+
+/// Detect additive and subtractive planar boundary features without rewriting STEP.
+///
+/// This is the polarity-neutral front end for constructive decomposition:
+/// single-host leaves cover protrusions and blind recesses, while paired
+/// parallel hosts expose through-cuts/tunnels that cannot disconnect when only
+/// one host face is removed. Pattern fitting is applied to the resulting
+/// feature instances after topology/polarity proof.
+pub fn analyze_boundary_features_bytes(
+    input: &[u8],
+) -> Result<planar_features::BoundaryFeatureDiagnostics> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+
+    let mut merged = planar_features::BoundaryFeatureDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_boundary_features(&section.entities);
+        merged.shell_contexts += report.shell_contexts;
+        merged.planar_hosts += report.planar_hosts;
+        merged.raw_candidates += report.raw_candidates;
+        merged.additive_candidates += report.additive_candidates;
+        merged.subtractive_candidates += report.subtractive_candidates;
+        merged.single_host_candidates += report.single_host_candidates;
+        merged.multi_host_candidates += report.multi_host_candidates;
+        merged.families.extend(report.families);
+    }
+    merged.families.sort_by(|a, b| {
+        b.instances
+            .cmp(&a.instances)
+            .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+    });
+    Ok(merged)
+}
+
+/// Diagnose repeated planar attached-feature candidates without rewriting STEP.
+/// This reports parser blind spots (negative recesses, host orientation, topology
+/// rejection reasons) so constructive recovery can be extended deliberately.
+pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFeatureDiagnostics> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+
+    let mut merged = PlanarFeatureDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_planar_features(&section.entities);
+        merged.shell_contexts += report.shell_contexts;
+        merged.qualifying_host_faces += report.qualifying_host_faces;
+        merged.total_components += report.total_components;
+        merged.rejected_empty_or_large += report.rejected_empty_or_large;
+        merged.rejected_non_manifold += report.rejected_non_manifold;
+        merged.rejected_interface += report.rejected_interface;
+        merged.rejected_bound_match += report.rejected_bound_match;
+        merged.rejected_vertices += report.rejected_vertices;
+        merged.rejected_signature += report.rejected_signature;
+        merged.positive_components += report.positive_components;
+        merged.negative_components += report.negative_components;
+        merged.straddling_components += report.straddling_components;
+        merged.coplanar_components += report.coplanar_components;
+        merged.hosts.extend(report.hosts);
+    }
+    Ok(merged)
 }
 
 /// Detect read-only formed-sheet geometric evidence in a STEP exchange.

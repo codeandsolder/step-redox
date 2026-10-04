@@ -1,18 +1,25 @@
 use crate::brep::{
-    append_refs_to_list_param, bound_loop_edges, face_edge_curves, face_sense, face_surface,
-    manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
+    append_refs_to_list_param, bound_loop_edges, face_edge_curves, face_loops, face_sense,
+    face_surface, manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{
     StyleRef, build_index, cartesian_point, collect_styles_by_target, entity_id, entity_ref,
     entity_ref_map, entity_ref_value, face_topology_signature, inbound_map,
-    patch_presentation_lists, push_point, push_simple, representation_items_and_context,
-    simple_record, simple_record_mut, visit_entity_refs,
+    oriented_edge_signature, patch_presentation_lists, push_point, push_simple,
+    representation_items_and_context, simple_record, simple_record_mut, visit_entity_refs,
 };
+use crate::patterns::{
+    PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
+};
+use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Parameter};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const MIN_GROUP: usize = 8;
 const MAX_FEATURE_FACES: usize = 128;
+const MAX_BOUNDARY_FEATURE_FACES: usize = 4096;
+const MIN_COMPLEX_HOST_EDGES: usize = 32;
 const SIDE_TOLERANCE: f64 = 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
@@ -58,6 +65,1283 @@ struct PlaneFrame {
     sense: String,
     origin: [f64; 3],
     outward: [f64; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeaturePolarity {
+    Additive,
+    Subtractive,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryFeatureInstanceEvidence {
+    pub face_ids: Vec<u64>,
+    pub center_mm: [f64; 3],
+    pub interface_bound_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryFeatureFamilyEvidence {
+    pub shell_id: u64,
+    pub polarity: FeaturePolarity,
+    pub host_face_ids: Vec<u64>,
+    pub faces_per_instance: usize,
+    pub instances: usize,
+    pub signature: String,
+    pub members: Vec<BoundaryFeatureInstanceEvidence>,
+    pub lattice: Option<PointLattice>,
+    pub motif_pattern: Option<PointMotifPattern>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryFeatureToolMaterialization {
+    pub family_index: usize,
+    pub solid_id: u64,
+    pub shell_id: u64,
+    pub polarity: FeaturePolarity,
+    pub instances: usize,
+    pub source_face_ids: Vec<u64>,
+    pub interface_bound_ids: Vec<u64>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct BoundaryFeaturePeelStats {
+    pub families: usize,
+    pub instances: usize,
+    pub additive_instances: usize,
+    pub subtractive_instances: usize,
+    pub faces_removed_from_shells: usize,
+    pub interface_bounds_healed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenChainRunEvidence {
+    pub face_id: u64,
+    pub bound_id: u64,
+    pub outer: bool,
+    pub start_edge_index: usize,
+    pub motif_edges: usize,
+    pub repeats: usize,
+    pub covered_edges: usize,
+    pub wraps_loop: bool,
+    pub translation_mm: [f64; 3],
+    pub motif_oriented_edge_ids: Vec<u64>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct OpenChainDiagnostics {
+    pub planar_faces: usize,
+    pub loops_considered: usize,
+    pub patterned_loops: usize,
+    pub runs: Vec<OpenChainRunEvidence>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct BoundaryFeatureDiagnostics {
+    pub shell_contexts: usize,
+    pub planar_hosts: usize,
+    pub raw_candidates: usize,
+    pub additive_candidates: usize,
+    pub subtractive_candidates: usize,
+    pub single_host_candidates: usize,
+    pub multi_host_candidates: usize,
+    pub families: Vec<BoundaryFeatureFamilyEvidence>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundaryFeatureCandidate {
+    shell_id: u64,
+    polarity: FeaturePolarity,
+    host_face_ids: Vec<u64>,
+    face_ids: Vec<u64>,
+    interface_bound_ids: Vec<u64>,
+    center: [f64; 3],
+    signature: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct PlanarFeatureDiagnostics {
+    pub shell_contexts: usize,
+    pub qualifying_host_faces: usize,
+    pub total_components: usize,
+    pub rejected_empty_or_large: usize,
+    pub rejected_non_manifold: usize,
+    pub rejected_interface: usize,
+    pub rejected_bound_match: usize,
+    pub rejected_vertices: usize,
+    pub rejected_signature: usize,
+    pub positive_components: usize,
+    pub negative_components: usize,
+    pub straddling_components: usize,
+    pub coplanar_components: usize,
+    pub hosts: Vec<PlanarHostDiagnostic>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct PlanarHostDiagnostic {
+    pub host_face_id: u64,
+    pub bound_count: usize,
+    pub outward: [f64; 3],
+    pub component_count: usize,
+    pub positive_components: usize,
+    pub negative_components: usize,
+    pub straddling_components: usize,
+    pub coplanar_components: usize,
+    pub largest_positive_signature_group: usize,
+    pub largest_negative_signature_group: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaneSide {
+    Positive,
+    Negative,
+    Straddling,
+    Coplanar,
+}
+
+pub fn diagnose_open_chain_patterns(entities: &[EntityInstance]) -> OpenChainDiagnostics {
+    const MIN_LOOP_EDGES: usize = 16;
+    const MAX_MOTIF_EDGES: usize = 32;
+    const MIN_REPEATS: usize = 4;
+    const TOL: f64 = 1.0e-7;
+
+    let mut report = OpenChainDiagnostics::default();
+    if entities.is_empty() {
+        return report;
+    }
+    let index = build_index(entities);
+    let contexts = collect_shell_contexts(entities, &index);
+
+    for context in contexts {
+        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+            continue;
+        };
+        for face_id in shell_faces {
+            if plane_frame(face_id, entities, &index).is_none() {
+                continue;
+            }
+            report.planar_faces += 1;
+            let Some(loops) = face_loops(face_id, entities, &index) else {
+                continue;
+            };
+
+            for loop_data in loops {
+                let n = loop_data.edges.len();
+                if n < MIN_LOOP_EDGES {
+                    continue;
+                }
+                report.loops_considered += 1;
+
+                let signatures = loop_data
+                    .edges
+                    .iter()
+                    .map(|edge| {
+                        oriented_edge_signature(
+                            edge.oriented_edge_id,
+                            entities,
+                            &index,
+                            edge.start_mm,
+                            0,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(signatures) = signatures else {
+                    continue;
+                };
+
+                let mut candidates = Vec::<OpenChainRunEvidence>::new();
+                let max_period = MAX_MOTIF_EDGES.min(n / MIN_REPEATS);
+                for period in 1..=max_period {
+                    if n % period == 0 {
+                        collect_cyclic_open_chain_runs(
+                            face_id,
+                            &loop_data,
+                            &signatures,
+                            period,
+                            MIN_REPEATS,
+                            TOL,
+                            &mut candidates,
+                        );
+                        continue;
+                    }
+
+                    for residue in 0..period {
+                        let mut block = residue;
+                        let mut run_start = residue;
+                        let mut matched_boundaries = 0usize;
+
+                        while block + 2 * period <= n {
+                            let matched = translated_blocks_match(
+                                &loop_data.edges,
+                                &signatures,
+                                block,
+                                period,
+                                TOL,
+                            );
+                            if matched {
+                                if matched_boundaries == 0 {
+                                    run_start = block;
+                                }
+                                matched_boundaries += 1;
+                            } else {
+                                if matched_boundaries + 1 >= MIN_REPEATS {
+                                    candidates.push(open_chain_run(
+                                        face_id,
+                                        &loop_data,
+                                        run_start,
+                                        period,
+                                        matched_boundaries + 1,
+                                        false,
+                                    ));
+                                }
+                                matched_boundaries = 0;
+                            }
+                            block += period;
+                        }
+
+                        if matched_boundaries + 1 >= MIN_REPEATS {
+                            candidates.push(open_chain_run(
+                                face_id,
+                                &loop_data,
+                                run_start,
+                                period,
+                                matched_boundaries + 1,
+                                false,
+                            ));
+                        }
+                    }
+                }
+
+                // Prefer maximal coverage, then the primitive (smallest)
+                // translated motif. Greedily suppress overlapping aliases such
+                // as 8-edge/35-repeat when a 4-edge/70-repeat path covers the
+                // same boundary run.
+                candidates.sort_by(|a, b| {
+                    b.covered_edges
+                        .cmp(&a.covered_edges)
+                        .then_with(|| a.motif_edges.cmp(&b.motif_edges))
+                        .then_with(|| b.repeats.cmp(&a.repeats))
+                        .then_with(|| a.start_edge_index.cmp(&b.start_edge_index))
+                });
+                let mut accepted = Vec::<OpenChainRunEvidence>::new();
+                let mut occupied = vec![false; n];
+                for candidate in candidates {
+                    let coverage = candidate.covered_edges.min(n);
+                    let indices = (0..coverage)
+                        .map(|offset| (candidate.start_edge_index + offset) % n)
+                        .collect::<Vec<_>>();
+                    if indices.iter().any(|&index| occupied[index]) {
+                        continue;
+                    }
+                    for index in indices {
+                        occupied[index] = true;
+                    }
+                    accepted.push(candidate);
+                }
+                if !accepted.is_empty() {
+                    report.patterned_loops += 1;
+                    report.runs.extend(accepted);
+                }
+            }
+        }
+    }
+
+    report.runs.sort_by(|a, b| {
+        b.covered_edges
+            .cmp(&a.covered_edges)
+            .then_with(|| b.repeats.cmp(&a.repeats))
+            .then_with(|| a.face_id.cmp(&b.face_id))
+            .then_with(|| a.bound_id.cmp(&b.bound_id))
+            .then_with(|| a.start_edge_index.cmp(&b.start_edge_index))
+    });
+    report
+}
+
+fn collect_cyclic_open_chain_runs(
+    face_id: u64,
+    loop_data: &crate::brep::FaceLoop,
+    signatures: &[String],
+    period: usize,
+    min_repeats: usize,
+    tolerance_mm: f64,
+    out: &mut Vec<OpenChainRunEvidence>,
+) {
+    let n = loop_data.edges.len();
+    if period == 0 || n % period != 0 {
+        return;
+    }
+    let block_count = n / period;
+    if block_count < min_repeats {
+        return;
+    }
+
+    for residue in 0..period {
+        let matches = (0..block_count)
+            .map(|block| {
+                translated_blocks_match_cyclic(
+                    &loop_data.edges,
+                    signatures,
+                    (residue + block * period) % n,
+                    period,
+                    tolerance_mm,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if matches.iter().all(|matched| *matched) {
+            out.push(open_chain_run(
+                face_id,
+                loop_data,
+                residue,
+                period,
+                block_count,
+                false,
+            ));
+            continue;
+        }
+
+        let Some(cut) = matches.iter().position(|matched| !*matched) else {
+            continue;
+        };
+        let mut run_start = None::<usize>;
+        let mut run_len = 0usize;
+        for step in 1..=block_count {
+            let block = (cut + step) % block_count;
+            if matches[block] {
+                if run_start.is_none() {
+                    run_start = Some(block);
+                }
+                run_len += 1;
+                continue;
+            }
+
+            if let Some(start_block) = run_start.take() {
+                let repeats = run_len + 1;
+                if repeats >= min_repeats {
+                    let start = (residue + start_block * period) % n;
+                    let covered_edges = period.saturating_mul(repeats);
+                    out.push(open_chain_run(
+                        face_id,
+                        loop_data,
+                        start,
+                        period,
+                        repeats,
+                        start + covered_edges > n,
+                    ));
+                }
+                run_len = 0;
+            }
+        }
+        if let Some(start_block) = run_start {
+            let repeats = run_len + 1;
+            if repeats >= min_repeats {
+                let start = (residue + start_block * period) % n;
+                let covered_edges = period.saturating_mul(repeats);
+                out.push(open_chain_run(
+                    face_id,
+                    loop_data,
+                    start,
+                    period,
+                    repeats,
+                    start + covered_edges > n,
+                ));
+            }
+        }
+    }
+}
+
+fn translated_blocks_match_cyclic(
+    edges: &[crate::brep::OrientedEdgeUse],
+    signatures: &[String],
+    start: usize,
+    period: usize,
+    tolerance_mm: f64,
+) -> bool {
+    let n = edges.len();
+    if n == 0 || period == 0 || period >= n {
+        return false;
+    }
+    let right_start = (start + period) % n;
+    let translation = sub3d(edges[right_start].start_mm, edges[start].start_mm);
+    if translation.iter().all(|value| value.abs() <= tolerance_mm) {
+        return false;
+    }
+
+    for offset in 0..period {
+        let left = (start + offset) % n;
+        let right = (start + period + offset) % n;
+        if signatures[left] != signatures[right]
+            || point_distance(
+                add3d(edges[left].start_mm, translation),
+                edges[right].start_mm,
+            ) > tolerance_mm
+            || point_distance(add3d(edges[left].end_mm, translation), edges[right].end_mm)
+                > tolerance_mm
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn translated_blocks_match(
+    edges: &[crate::brep::OrientedEdgeUse],
+    signatures: &[String],
+    start: usize,
+    period: usize,
+    tolerance_mm: f64,
+) -> bool {
+    if start + 2 * period > edges.len() {
+        return false;
+    }
+    let translation = sub3d(edges[start + period].start_mm, edges[start].start_mm);
+    if translation.iter().all(|value| value.abs() <= tolerance_mm) {
+        return false;
+    }
+
+    for offset in 0..period {
+        let left = start + offset;
+        let right = left + period;
+        if signatures[left] != signatures[right]
+            || point_distance(
+                add3d(edges[left].start_mm, translation),
+                edges[right].start_mm,
+            ) > tolerance_mm
+            || point_distance(add3d(edges[left].end_mm, translation), edges[right].end_mm)
+                > tolerance_mm
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn open_chain_run(
+    face_id: u64,
+    loop_data: &crate::brep::FaceLoop,
+    start: usize,
+    period: usize,
+    repeats: usize,
+    wraps_loop: bool,
+) -> OpenChainRunEvidence {
+    let n = loop_data.edges.len();
+    let translation = sub3d(
+        loop_data.edges[(start + period) % n].start_mm,
+        loop_data.edges[start].start_mm,
+    );
+    OpenChainRunEvidence {
+        face_id,
+        bound_id: loop_data.bound_id,
+        outer: loop_data.outer,
+        start_edge_index: start,
+        motif_edges: period,
+        repeats,
+        covered_edges: period * repeats,
+        wraps_loop,
+        translation_mm: translation,
+        motif_oriented_edge_ids: (0..period)
+            .map(|offset| loop_data.edges[(start + offset) % n].oriented_edge_id)
+            .collect(),
+    }
+}
+
+fn add3d(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn sub3d(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn point_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let delta = sub3d(left, right);
+    (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt()
+}
+
+/// Materialize one closed canonical tool solid per recovered boundary-feature
+/// family without changing the source solid.
+///
+/// This is an analysis aid for recursive decomposition. The generated tool
+/// solid reuses the canonical feature's source faces and closes each planar
+/// carrier interface with a synthetic cap. Additive tools need the interface
+/// cap normal opposite the source host's outward normal; subtractive tools
+/// need it aligned with the host outward normal.
+pub(crate) fn materialize_boundary_feature_tools_for_analysis(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+) -> Result<(
+    BoundaryFeatureDiagnostics,
+    Vec<BoundaryFeatureToolMaterialization>,
+)> {
+    if min_instances == 0 {
+        bail!("boundary feature tool materialization requires min_instances > 0");
+    }
+
+    let initial_index = build_index(entities);
+    let representation_by_shell = collect_shell_contexts(entities, &initial_index)
+        .into_iter()
+        .map(|context| (context.shell_id, context.representation_id))
+        .collect::<HashMap<_, _>>();
+    let report = diagnose_boundary_features(entities);
+    let mut next_id = entities
+        .iter()
+        .map(entity_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut materialized = Vec::new();
+
+    for (family_index, family) in report.families.iter().enumerate() {
+        if family.instances < min_instances {
+            continue;
+        }
+        let Some(member) = family.members.first() else {
+            continue;
+        };
+
+        let index = build_index(entities);
+        let mut bound_owner = HashMap::<u64, u64>::new();
+        for &host in &family.host_face_ids {
+            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+                bail!("feature host face #{host} has no readable bounds");
+            };
+            for bound in bounds {
+                if let Some(previous) = bound_owner.insert(bound, host)
+                    && previous != host
+                {
+                    bail!("interface bound #{bound} is owned by multiple host faces");
+                }
+            }
+        }
+
+        let mut cap_faces = Vec::new();
+        for &bound_id in &member.interface_bound_ids {
+            let Some(&host_id) = bound_owner.get(&bound_id) else {
+                bail!("feature interface bound #{bound_id} has no owning host face");
+            };
+            let Some(frame) = plane_frame(host_id, entities, &index) else {
+                bail!("feature host face #{host_id} is not a supported plane");
+            };
+            let Some(&bound_index) = index.get(&bound_id) else {
+                bail!("feature interface bound #{bound_id} is missing");
+            };
+            let Some(bound_record) = simple_record(&entities[bound_index]) else {
+                bail!("feature interface bound #{bound_id} is complex");
+            };
+            if bound_record.name != "FACE_BOUND" && bound_record.name != "FACE_OUTER_BOUND" {
+                bail!(
+                    "feature interface #{bound_id} has unsupported type {}",
+                    bound_record.name
+                );
+            }
+            let Parameter::List(bound_params) = &bound_record.parameter else {
+                bail!("feature interface bound #{bound_id} parameters are malformed");
+            };
+            let Some(loop_id) = bound_params.get(1).and_then(entity_ref_value) else {
+                bail!("feature interface bound #{bound_id} has no loop");
+            };
+            let Some(bound_orientation) =
+                bound_params.get(2).and_then(|parameter| match parameter {
+                    Parameter::Enumeration(value) if value == "T" || value == "F" => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+            else {
+                bail!("feature interface bound #{bound_id} has invalid orientation");
+            };
+
+            let flip = family.polarity == FeaturePolarity::Additive;
+            let cap_bound = push_simple(
+                entities,
+                &mut next_id,
+                "FACE_OUTER_BOUND",
+                vec![
+                    Parameter::String("NONE".to_string()),
+                    entity_ref(loop_id),
+                    Parameter::Enumeration(if flip {
+                        toggle_tf(&bound_orientation)
+                    } else {
+                        bound_orientation
+                    }),
+                ],
+            );
+            let cap_face = push_simple(
+                entities,
+                &mut next_id,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String("NONE".to_string()),
+                    Parameter::List(vec![entity_ref(cap_bound)]),
+                    entity_ref(frame.surface_id),
+                    Parameter::Enumeration(if flip {
+                        toggle_tf(&frame.sense)
+                    } else {
+                        frame.sense
+                    }),
+                ],
+            );
+            cap_faces.push(cap_face);
+        }
+
+        let mut closed_faces = member
+            .face_ids
+            .iter()
+            .copied()
+            .map(entity_ref)
+            .collect::<Vec<_>>();
+        closed_faces.extend(cap_faces.iter().copied().map(entity_ref));
+        let tool_shell = push_simple(
+            entities,
+            &mut next_id,
+            "CLOSED_SHELL",
+            vec![
+                Parameter::String("NONE".to_string()),
+                Parameter::List(closed_faces),
+            ],
+        );
+        let tool_solid = push_simple(
+            entities,
+            &mut next_id,
+            "MANIFOLD_SOLID_BREP",
+            vec![
+                Parameter::String(format!(
+                    "step-redox canonical {:?} boundary feature tool",
+                    family.polarity
+                )),
+                entity_ref(tool_shell),
+            ],
+        );
+
+        let Some(&representation_id) = representation_by_shell.get(&family.shell_id) else {
+            bail!(
+                "feature shell #{} has no source representation",
+                family.shell_id
+            );
+        };
+        let current_index = build_index(entities);
+        let Some(&representation_index) = current_index.get(&representation_id) else {
+            bail!("feature representation #{representation_id} is missing");
+        };
+        if !append_refs_to_list_param(&mut entities[representation_index], 1, &[tool_solid]) {
+            bail!("failed to append feature tool to representation #{representation_id}");
+        }
+
+        materialized.push(BoundaryFeatureToolMaterialization {
+            family_index,
+            solid_id: tool_solid,
+            shell_id: tool_shell,
+            polarity: family.polarity,
+            instances: family.instances,
+            source_face_ids: member.face_ids.clone(),
+            interface_bound_ids: member.interface_bound_ids.clone(),
+        });
+    }
+
+    Ok((report, materialized))
+}
+
+/// Remove proven patterned feature boundary patches from shell topology so the
+/// simpler residual can be decomposed recursively.
+///
+/// This is an analysis transform, not a semantics-preserving STEP rewrite:
+/// additive tools and subtractive tools are recorded separately by the caller
+/// and must be replayed in reverse peel order with Union/Difference. Healing
+/// the host interface is intentionally identical for both polarities.
+pub(crate) fn peel_patterned_boundary_features_for_analysis(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+) -> Result<(BoundaryFeatureDiagnostics, BoundaryFeaturePeelStats)> {
+    if min_instances < 2 {
+        bail!("patterned feature peel requires min_instances >= 2");
+    }
+    let report = diagnose_boundary_features(entities);
+    let selected = report
+        .families
+        .iter()
+        .filter(|family| family.instances >= min_instances && family.lattice.is_some())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok((report, BoundaryFeaturePeelStats::default()));
+    }
+
+    let index = build_index(entities);
+    let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
+    let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
+    let mut bound_owner = HashMap::<u64, u64>::new();
+    let mut seen_faces = HashSet::<u64>::new();
+    let mut seen_bounds = HashSet::<u64>::new();
+    let mut stats = BoundaryFeaturePeelStats::default();
+
+    for family in selected {
+        for &host in &family.host_face_ids {
+            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+                bail!("feature host face #{host} has no readable bounds");
+            };
+            for bound in bounds {
+                if let Some(previous) = bound_owner.insert(bound, host) {
+                    if previous != host {
+                        bail!("interface bound #{bound} is owned by multiple host faces");
+                    }
+                }
+            }
+        }
+
+        stats.families += 1;
+        stats.instances += family.instances;
+        match family.polarity {
+            FeaturePolarity::Additive => stats.additive_instances += family.instances,
+            FeaturePolarity::Subtractive => stats.subtractive_instances += family.instances,
+        }
+
+        for member in &family.members {
+            for &face in &member.face_ids {
+                if !seen_faces.insert(face) {
+                    bail!("feature peel candidates overlap at face #{face}");
+                }
+                shell_remove
+                    .entry(family.shell_id)
+                    .or_default()
+                    .insert(face);
+            }
+            for &bound in &member.interface_bound_ids {
+                if !seen_bounds.insert(bound) {
+                    bail!("feature peel candidates overlap at interface bound #{bound}");
+                }
+                let Some(&host) = bound_owner.get(&bound) else {
+                    bail!("feature interface bound #{bound} has no selected host owner");
+                };
+                host_remove.entry(host).or_default().insert(bound);
+            }
+        }
+    }
+
+    for (shell, faces) in &shell_remove {
+        let Some(&shell_index) = index.get(shell) else {
+            bail!("feature shell #{shell} is missing");
+        };
+        if !remove_refs_from_list_param(&mut entities[shell_index], 1, faces) {
+            bail!("failed to remove feature faces from shell #{shell}");
+        }
+    }
+    for (host, bounds) in &host_remove {
+        let Some(&host_index) = index.get(host) else {
+            bail!("feature host face #{host} is missing");
+        };
+        if !remove_refs_from_list_param(&mut entities[host_index], 1, bounds) {
+            bail!("failed to heal interface bounds on host face #{host}");
+        }
+    }
+
+    stats.faces_removed_from_shells = seen_faces.len();
+    stats.interface_bounds_healed = seen_bounds.len();
+    Ok((report, stats))
+}
+
+pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatureDiagnostics {
+    let mut report = BoundaryFeatureDiagnostics::default();
+    if entities.is_empty() {
+        return report;
+    }
+
+    let index = build_index(entities);
+    let contexts = collect_shell_contexts(entities, &index);
+    report.shell_contexts = contexts.len();
+    let mut candidates = Vec::<BoundaryFeatureCandidate>::new();
+
+    for context in contexts {
+        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+            continue;
+        };
+        if shell_faces.len() < 3 {
+            continue;
+        }
+
+        let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
+        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
+        for &face in &shell_faces {
+            let Some(edges) = face_edge_curves(face, entities, &index) else {
+                continue;
+            };
+            for &edge in &edges {
+                edge_faces.entry(edge).or_default().push(face);
+            }
+            face_edges.insert(face, edges);
+        }
+
+        let mut adjacency = HashMap::<u64, Vec<u64>>::new();
+        for &face in &shell_faces {
+            adjacency.entry(face).or_default();
+        }
+        for attached in edge_faces.values() {
+            if attached.len() < 2 {
+                continue;
+            }
+            for &face in attached {
+                let out = adjacency.entry(face).or_default();
+                out.extend(attached.iter().copied().filter(|other| *other != face));
+            }
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort_unstable();
+            neighbors.dedup();
+        }
+
+        let hosts = shell_faces
+            .iter()
+            .copied()
+            .filter_map(|face| {
+                let frame = plane_frame(face, entities, &index)?;
+                let bounds = ref_list_param(face, 1, entities, &index)?;
+                let boundary_edges = face_edges.get(&face).map_or(0, HashSet::len);
+                (bounds.len() > MIN_GROUP || boundary_edges >= MIN_COMPLEX_HOST_EDGES)
+                    .then_some((face, frame, bounds))
+            })
+            .collect::<Vec<_>>();
+        report.planar_hosts += hosts.len();
+
+        // Single-host leaves cover both protrusions and blind pockets.  The
+        // topology peel is identical for the two; only the reconstruction
+        // operator (union vs difference) changes.
+        for (host_face, frame, bounds) in &hosts {
+            let host_set = HashSet::from([*host_face]);
+            let lookups =
+                HashMap::from([(*host_face, host_bound_lookup(bounds, entities, &index))]);
+            for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
+                let Some(candidate) = boundary_feature_candidate(
+                    context.shell_id,
+                    component,
+                    &host_set,
+                    &HashMap::from([(*host_face, frame.clone())]),
+                    &lookups,
+                    &face_edges,
+                    &edge_faces,
+                    entities,
+                    &index,
+                ) else {
+                    continue;
+                };
+                candidates.push(candidate);
+            }
+        }
+
+        // Multi-interface features are graph separators, not a special
+        // "two-host hole" case. Remove every currently-qualified carrier face
+        // as a barrier, flood the remaining dual graph once, and classify each
+        // small component by the host bounds it actually touches. This exposes
+        // through-cuts, edge cuts, and other features with two or more planar
+        // interfaces without combinatorial host-pair enumeration.
+        if hosts.len() >= 2 {
+            let host_set = hosts
+                .iter()
+                .map(|(face, _, _)| *face)
+                .collect::<HashSet<_>>();
+            let frames = hosts
+                .iter()
+                .map(|(face, frame, _)| (*face, frame.clone()))
+                .collect::<HashMap<_, _>>();
+            let lookups = hosts
+                .iter()
+                .map(|(face, _, bounds)| (*face, host_bound_lookup(bounds, entities, &index)))
+                .collect::<HashMap<_, _>>();
+
+            for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
+                let Some(candidate) = boundary_feature_candidate(
+                    context.shell_id,
+                    component,
+                    &host_set,
+                    &frames,
+                    &lookups,
+                    &face_edges,
+                    &edge_faces,
+                    entities,
+                    &index,
+                ) else {
+                    continue;
+                };
+                if candidate.host_face_ids.len() >= 2 {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    // Prefer the candidate with the richer interface set when an identical
+    // face patch was rediscovered from more than one host selection.
+    candidates.sort_by(|a, b| {
+        a.face_ids
+            .cmp(&b.face_ids)
+            .then_with(|| b.host_face_ids.len().cmp(&a.host_face_ids.len()))
+    });
+    let mut deduped = Vec::<BoundaryFeatureCandidate>::new();
+    let mut seen_faces = HashSet::<Vec<u64>>::new();
+    for candidate in candidates {
+        if seen_faces.insert(candidate.face_ids.clone()) {
+            deduped.push(candidate);
+        }
+    }
+
+    report.raw_candidates = deduped.len();
+    report.additive_candidates = deduped
+        .iter()
+        .filter(|candidate| candidate.polarity == FeaturePolarity::Additive)
+        .count();
+    report.subtractive_candidates = deduped
+        .iter()
+        .filter(|candidate| candidate.polarity == FeaturePolarity::Subtractive)
+        .count();
+    report.single_host_candidates = deduped
+        .iter()
+        .filter(|candidate| candidate.host_face_ids.len() == 1)
+        .count();
+    report.multi_host_candidates = deduped
+        .iter()
+        .filter(|candidate| candidate.host_face_ids.len() > 1)
+        .count();
+
+    let mut groups =
+        HashMap::<(u64, FeaturePolarity, Vec<u64>, String), Vec<BoundaryFeatureCandidate>>::new();
+    for candidate in deduped {
+        groups
+            .entry((
+                candidate.shell_id,
+                candidate.polarity,
+                candidate.host_face_ids.clone(),
+                candidate.signature.clone(),
+            ))
+            .or_default()
+            .push(candidate);
+    }
+
+    let mut families = groups
+        .into_iter()
+        .map(
+            |((shell_id, polarity, host_face_ids, signature), mut members)| {
+                members.sort_by_key(|member| member.face_ids.clone());
+                let centers = members
+                    .iter()
+                    .map(|member| member.center)
+                    .collect::<Vec<_>>();
+                let lattice = fit_point_lattice(&centers, 1.0e-7);
+                let motif_pattern = factor_point_motif_pattern(&centers, 1.0e-7);
+                BoundaryFeatureFamilyEvidence {
+                    shell_id,
+                    polarity,
+                    host_face_ids,
+                    faces_per_instance: members[0].face_ids.len(),
+                    instances: members.len(),
+                    signature,
+                    members: members
+                        .into_iter()
+                        .map(|member| BoundaryFeatureInstanceEvidence {
+                            face_ids: member.face_ids,
+                            center_mm: member.center,
+                            interface_bound_ids: member.interface_bound_ids,
+                        })
+                        .collect(),
+                    lattice,
+                    motif_pattern,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    families.sort_by(|a, b| {
+        b.instances
+            .cmp(&a.instances)
+            .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+            .then_with(|| a.signature.cmp(&b.signature))
+    });
+    report.families = families;
+    report
+}
+
+fn boundary_feature_candidate(
+    shell_id: u64,
+    component: HashSet<u64>,
+    requested_hosts: &HashSet<u64>,
+    frames: &HashMap<u64, PlaneFrame>,
+    bound_lookups: &HashMap<u64, HashMap<Vec<u64>, Vec<(u64, u64, String)>>>,
+    face_edges: &HashMap<u64, HashSet<u64>>,
+    edge_faces: &HashMap<u64, Vec<u64>>,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BoundaryFeatureCandidate> {
+    if component.is_empty() || component.len() > MAX_BOUNDARY_FEATURE_FACES {
+        return None;
+    }
+    if !component_is_two_manifold_with_hosts(&component, requested_hosts, face_edges, edge_faces) {
+        return None;
+    }
+
+    let mut host_face_ids = Vec::new();
+    let mut interface_bound_ids = Vec::new();
+    let mut sides = Vec::new();
+    let vertices = component_vertex_points(&component, face_edges, entities, index)?;
+    for &host in requested_hosts {
+        let interface_edges = component_interface_edges(&component, host, face_edges, edge_faces);
+        if interface_edges.is_empty() {
+            continue;
+        }
+        let matches = bound_lookups
+            .get(&host)?
+            .get(&edge_set_key(&interface_edges))?;
+        if matches.len() != 1 {
+            return None;
+        }
+        host_face_ids.push(host);
+        interface_bound_ids.push(matches[0].0);
+        sides.push(plane_side(&vertices, frames.get(&host)?));
+    }
+    if host_face_ids.is_empty() {
+        return None;
+    }
+
+    let polarity = if sides.iter().all(|side| *side == PlaneSide::Positive) {
+        FeaturePolarity::Additive
+    } else if sides.iter().all(|side| *side == PlaneSide::Negative) {
+        FeaturePolarity::Subtractive
+    } else {
+        return None;
+    };
+
+    host_face_ids.sort_unstable();
+    interface_bound_ids.sort_unstable();
+    let center = bbox_center(&vertices)?;
+    let (signature, _) = component_signature(&component, center, entities, index)?;
+    let mut face_ids = component.into_iter().collect::<Vec<_>>();
+    face_ids.sort_unstable();
+
+    Some(BoundaryFeatureCandidate {
+        shell_id,
+        polarity,
+        host_face_ids,
+        face_ids,
+        interface_bound_ids,
+        center,
+        signature,
+    })
+}
+
+fn face_components_without_hosts(
+    faces: &[u64],
+    hosts: &HashSet<u64>,
+    adjacency: &HashMap<u64, Vec<u64>>,
+) -> Vec<HashSet<u64>> {
+    let mut remaining = faces
+        .iter()
+        .copied()
+        .filter(|face| !hosts.contains(face))
+        .collect::<HashSet<_>>();
+    let mut out = Vec::new();
+
+    while let Some(&seed) = remaining.iter().next() {
+        remaining.remove(&seed);
+        let mut component = HashSet::from([seed]);
+        let mut queue = VecDeque::from([seed]);
+        while let Some(face) = queue.pop_front() {
+            for &neighbor in adjacency.get(&face).into_iter().flatten() {
+                if hosts.contains(&neighbor) || !remaining.remove(&neighbor) {
+                    continue;
+                }
+                component.insert(neighbor);
+                queue.push_back(neighbor);
+            }
+        }
+        out.push(component);
+    }
+    out
+}
+
+fn component_is_two_manifold_with_hosts(
+    component: &HashSet<u64>,
+    hosts: &HashSet<u64>,
+    face_edges: &HashMap<u64, HashSet<u64>>,
+    edge_faces: &HashMap<u64, Vec<u64>>,
+) -> bool {
+    let mut edges = HashSet::new();
+    for face in component {
+        let Some(face_edges) = face_edges.get(face) else {
+            return false;
+        };
+        edges.extend(face_edges.iter().copied());
+    }
+
+    edges.into_iter().all(|edge| {
+        let Some(attached) = edge_faces.get(&edge) else {
+            return false;
+        };
+        attached.len() == 2
+            && attached
+                .iter()
+                .all(|face| hosts.contains(face) || component.contains(face))
+            && attached.iter().filter(|face| hosts.contains(face)).count() <= 1
+    })
+}
+
+pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDiagnostics {
+    let mut report = PlanarFeatureDiagnostics::default();
+    if entities.is_empty() {
+        return report;
+    }
+
+    let index = build_index(entities);
+    let contexts = collect_shell_contexts(entities, &index);
+    report.shell_contexts = contexts.len();
+
+    for context in contexts {
+        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+            continue;
+        };
+        if shell_faces.len() < MIN_GROUP + 2 {
+            continue;
+        }
+
+        let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
+        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
+        for &face in &shell_faces {
+            let Some(edges) = face_edge_curves(face, entities, &index) else {
+                continue;
+            };
+            for &edge in &edges {
+                edge_faces.entry(edge).or_default().push(face);
+            }
+            face_edges.insert(face, edges);
+        }
+
+        let mut adjacency = HashMap::<u64, Vec<u64>>::new();
+        for &face in &shell_faces {
+            adjacency.entry(face).or_default();
+        }
+        for attached in edge_faces.values() {
+            if attached.len() < 2 {
+                continue;
+            }
+            for &face in attached {
+                adjacency
+                    .entry(face)
+                    .or_default()
+                    .extend(attached.iter().copied().filter(|other| *other != face));
+            }
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort_unstable();
+            neighbors.dedup();
+        }
+
+        let host_faces = shell_faces
+            .iter()
+            .copied()
+            .filter(|face| {
+                face_surface(*face, entities, &index)
+                    .and_then(|surface| index.get(&surface).copied())
+                    .and_then(|idx| simple_record(&entities[idx]))
+                    .is_some_and(|record| record.name == "PLANE")
+                    && ref_list_param(*face, 1, entities, &index)
+                        .is_some_and(|bounds| bounds.len() > MIN_GROUP)
+            })
+            .collect::<Vec<_>>();
+
+        report.qualifying_host_faces += host_faces.len();
+        for host_face in host_faces {
+            let Some(frame) = plane_frame(host_face, entities, &index) else {
+                continue;
+            };
+            let Some(host_bounds) = ref_list_param(host_face, 1, entities, &index) else {
+                continue;
+            };
+            let bound_lookup = host_bound_lookup(&host_bounds, entities, &index);
+            let components = face_components_without_host(&shell_faces, host_face, &adjacency);
+            let mut host = PlanarHostDiagnostic {
+                host_face_id: host_face,
+                bound_count: host_bounds.len(),
+                outward: frame.outward,
+                component_count: components.len(),
+                ..Default::default()
+            };
+            report.total_components += components.len();
+
+            let mut positive_groups = HashMap::<String, usize>::new();
+            let mut negative_groups = HashMap::<String, usize>::new();
+
+            for component in components {
+                if component.is_empty() || component.len() > MAX_FEATURE_FACES {
+                    report.rejected_empty_or_large += 1;
+                    continue;
+                }
+                if !component_is_two_manifold_with_host(
+                    &component,
+                    host_face,
+                    &face_edges,
+                    &edge_faces,
+                ) {
+                    report.rejected_non_manifold += 1;
+                    continue;
+                }
+                let interface_edges =
+                    component_interface_edges(&component, host_face, &face_edges, &edge_faces);
+                if interface_edges.is_empty() {
+                    report.rejected_interface += 1;
+                    continue;
+                }
+                let Some(matches) = bound_lookup.get(&edge_set_key(&interface_edges)) else {
+                    report.rejected_bound_match += 1;
+                    continue;
+                };
+                if matches.len() != 1 {
+                    report.rejected_bound_match += 1;
+                    continue;
+                }
+
+                let Some(vertices) =
+                    component_vertex_points(&component, &face_edges, entities, &index)
+                else {
+                    report.rejected_vertices += 1;
+                    continue;
+                };
+                let Some(center) = bbox_center(&vertices) else {
+                    report.rejected_vertices += 1;
+                    continue;
+                };
+                let Some((signature, _)) =
+                    component_signature(&component, center, entities, &index)
+                else {
+                    report.rejected_signature += 1;
+                    continue;
+                };
+
+                match plane_side(&vertices, &frame) {
+                    PlaneSide::Positive => {
+                        report.positive_components += 1;
+                        host.positive_components += 1;
+                        *positive_groups.entry(signature).or_default() += 1;
+                    }
+                    PlaneSide::Negative => {
+                        report.negative_components += 1;
+                        host.negative_components += 1;
+                        *negative_groups.entry(signature).or_default() += 1;
+                    }
+                    PlaneSide::Straddling => {
+                        report.straddling_components += 1;
+                        host.straddling_components += 1;
+                    }
+                    PlaneSide::Coplanar => {
+                        report.coplanar_components += 1;
+                        host.coplanar_components += 1;
+                    }
+                }
+            }
+
+            host.largest_positive_signature_group =
+                positive_groups.values().copied().max().unwrap_or(0);
+            host.largest_negative_signature_group =
+                negative_groups.values().copied().max().unwrap_or(0);
+            report.hosts.push(host);
+        }
+    }
+
+    report
 }
 
 pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> PlanarFeatureStats {
@@ -872,7 +2156,8 @@ fn numeric(parameter: &Parameter) -> Option<f64> {
     }
 }
 
-fn positive_side(points: &[[f64; 3]], frame: &PlaneFrame) -> bool {
+fn plane_side(points: &[[f64; 3]], frame: &PlaneFrame) -> PlaneSide {
+    let mut min_projection = f64::INFINITY;
     let mut max_projection = f64::NEG_INFINITY;
     for point in points {
         let delta = [
@@ -884,12 +2169,26 @@ fn positive_side(points: &[[f64; 3]], frame: &PlaneFrame) -> bool {
             frame.outward[2],
             delta[1].mul_add(frame.outward[1], delta[0] * frame.outward[0]),
         );
-        if !projection.is_finite() || projection < -SIDE_TOLERANCE {
-            return false;
+        if !projection.is_finite() {
+            return PlaneSide::Straddling;
         }
+        min_projection = min_projection.min(projection);
         max_projection = max_projection.max(projection);
     }
-    max_projection > SIDE_TOLERANCE
+
+    if min_projection >= -SIDE_TOLERANCE && max_projection > SIDE_TOLERANCE {
+        PlaneSide::Positive
+    } else if max_projection <= SIDE_TOLERANCE && min_projection < -SIDE_TOLERANCE {
+        PlaneSide::Negative
+    } else if min_projection.abs() <= SIDE_TOLERANCE && max_projection.abs() <= SIDE_TOLERANCE {
+        PlaneSide::Coplanar
+    } else {
+        PlaneSide::Straddling
+    }
+}
+
+fn positive_side(points: &[[f64; 3]], frame: &PlaneFrame) -> bool {
+    plane_side(points, frame) == PlaneSide::Positive
 }
 
 fn component_signature(
@@ -1044,15 +2343,19 @@ mod tests {
     }
 
     #[test]
-    fn positive_side_rejects_recess() {
+    fn plane_side_classifies_protrusions_and_recesses() {
         let frame = PlaneFrame {
             surface_id: 1,
             sense: "T".to_string(),
             origin: [0.0, 0.0, 0.0],
             outward: [0.0, 0.0, 1.0],
         };
-        assert!(positive_side(&[[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]], &frame));
-        assert!(!positive_side(&[[0.0, 0.0, 0.0], [0.0, 0.0, -2.0]], &frame));
+        let protrusion = [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]];
+        let recess = [[0.0, 0.0, 0.0], [0.0, 0.0, -2.0]];
+        assert_eq!(plane_side(&protrusion, &frame), PlaneSide::Positive);
+        assert_eq!(plane_side(&recess, &frame), PlaneSide::Negative);
+        assert!(positive_side(&protrusion, &frame));
+        assert!(!positive_side(&recess, &frame));
     }
 
     #[test]
