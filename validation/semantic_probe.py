@@ -43,10 +43,15 @@ def close(a: float, b: float, tol: float = 1e-8) -> bool:
 
 
 def validate_cad_fragments(name: str, fragments: list[dict], expected: dict) -> dict:
+    pattern_fragments = [
+        fragment for fragment in fragments
+        if fragment.get("source", {}).get("kind") == "instance_pattern"
+    ]
     expected_count = expected["linear_patterns"]
-    if len(fragments) != expected_count:
+    if len(pattern_fragments) != expected_count:
         raise AssertionError(
-            f"{name}: expected {expected_count} CAD fragments, got {len(fragments)}"
+            f"{name}: expected {expected_count} instance-pattern CAD fragments, "
+            f"got {len(pattern_fragments)} from {len(fragments)} total fragments"
         )
 
     expected_instances = expected["instances_per_pattern"]
@@ -110,8 +115,67 @@ def validate_cad_fragments(name: str, fragments: list[dict], expected: dict) -> 
 
     return {
         "fixture": name,
-        "fragments": len(fragments),
+        "fragments": len(pattern_fragments),
         "patterns": observed,
+    }
+
+
+def validate_periodic_cad_fragment(name: str, fragments: list[dict], expected: dict) -> dict:
+    candidates = [
+        fragment for fragment in fragments
+        if fragment.get("source", {}).get("kind") == "periodic_chain"
+        and fragment.get("source", {}).get("sites") == expected["sites"]
+    ]
+    if len(candidates) != 1:
+        raise AssertionError(
+            f"{name}: expected one {expected['sites']}-site periodic CAD fragment, "
+            f"got {len(candidates)}"
+        )
+
+    fragment = candidates[0]
+    model = fragment["model"]
+    root = fragment["root"]
+    try:
+        node = model["nodes"][root]["PeriodicChain"]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise AssertionError(f"{name}: periodic CAD root is not PeriodicChain") from exc
+
+    checks = {
+        "source_solid": node["source_solid_id"] == fragment["source"]["solid_id"],
+        "sites": node["sites"] == expected["sites"],
+        "pitch_mm": close(node["pitch_mm"], expected["pitch_mm"], 1e-9),
+        "interior_site_face_count":
+            node["interior_site_face_count"] == expected["interior_site_face_count"],
+        "interior_gap_face_count":
+            node["interior_gap_face_count"] == expected["interior_gap_face_count"],
+        "stretch_face_count": node["stretch_face_count"] == expected["stretch_faces"],
+        "fixed_negative_face_count":
+            node["fixed_negative_face_count"] == expected["fixed_negative_faces"],
+        "fixed_positive_face_count":
+            node["fixed_positive_face_count"] == expected["fixed_positive_faces"],
+    }
+    failed = [key for key, ok in checks.items() if not ok]
+    if failed:
+        raise AssertionError(
+            f"{name}: periodic CAD fragment failed {failed}; node={node}"
+        )
+
+    provenance = model["provenance"][str(root)]
+    if provenance["proof"] != "StructurallyProven":
+        raise AssertionError(
+            f"{name}: periodic CAD fragment unexpectedly claims {provenance['proof']} proof"
+        )
+    if provenance["max_residual_mm"] is not None:
+        raise AssertionError(
+            f"{name}: structural periodic CAD proof must not invent a geometric residual"
+        )
+
+    return {
+        "source_solid_id": node["source_solid_id"],
+        "sites": node["sites"],
+        "pitch_mm": node["pitch_mm"],
+        "site_face_count_overrides": node["site_face_count_overrides"],
+        "gap_face_count_overrides": node["gap_face_count_overrides"],
     }
 
 
@@ -234,6 +298,10 @@ def main():
         if chain_expected:
             chains = json.loads(prefix.with_suffix(".chains.json").read_text())
             result = validate_chain(name, chains, chain_expected)
+            fragments = json.loads(prefix.with_suffix(".cad-fragments.json").read_text())
+            result["cad_ir"] = validate_periodic_cad_fragment(
+                name, fragments, chain_expected
+            )
             chain_results.append(result)
             print(
                 f"{name}: sites={result['sites']} pitch={result['pitch_mm']:.9f} mm "
