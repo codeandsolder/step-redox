@@ -87,16 +87,29 @@ impl Options {
             experimental_recover_v_extrusions: true,
             experimental_intern_geometric_supports: true,
             experimental_recover_partitioned_bodies: true,
-            experimental_coalesce_same_support_faces: true,
+            // Same-support face coalescing has a production repro where the
+            // reconstructed boundary drops occupied volume. Keep it opt-in
+            // until loop reconstruction is proven geometry-preserving.
+            experimental_coalesce_same_support_faces: false,
             minify_placeholder_names: true,
             ..Self::default()
         };
 
         if profile == OutputProfile::Compact {
             options.experimental_instance_translated_bspline_curves = true;
-            options.experimental_instance_z90 = true;
-            options.experimental_instance_planar_positive_features = true;
-            options.experimental_instance_spherical_caps = true;
+            // Bare mapped-solid instancing can expose the canonical source
+            // representation as an additional transfer root in OCCT, duplicating
+            // one repeated solid. Keep it explicit-only until the representation
+            // is embedded in a product/assembly structure or otherwise hidden
+            // from top-level transfer.
+            options.experimental_instance_z90 = false;
+            // Positive-feature and spherical-cap factoring currently closes
+            // extracted features with interface caps. That preserves occupied
+            // volume but changes a fused B-rep into touching solids, so keep
+            // both transformations explicit-only until boundary semantics are
+            // preserved by construction.
+            options.experimental_instance_planar_positive_features = false;
+            options.experimental_instance_spherical_caps = false;
         }
         options
     }
@@ -2165,6 +2178,20 @@ mod tests {
             "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{data}\nENDSEC;\nEND-ISO-10303-21;\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn production_profiles_keep_unvalidated_boundary_rewrites_opt_in() {
+        for profile in [OutputProfile::Compat, OutputProfile::Compact] {
+            let options = Options::for_profile(profile);
+            assert!(!options.experimental_coalesce_same_support_faces);
+            assert!(!options.experimental_instance_planar_positive_features);
+            assert!(!options.experimental_instance_spherical_caps);
+        }
+
+        let compact = Options::for_profile(OutputProfile::Compact);
+        assert!(compact.experimental_instance_translated_bspline_curves);
+        assert!(!compact.experimental_instance_z90);
     }
 
     #[test]

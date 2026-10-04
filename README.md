@@ -9,6 +9,12 @@ The project now has three output policies:
 - `--profile compat`: broadly compatible plain-BREP cleanup
 - `--profile compact`: proven semantic recovery, instancing, and aggressive compact output
 
+Experimental rewrites that do not preserve the imported top-level solid set or
+fused-solid boundary decomposition remain explicit-only even when they can
+produce large byte savings. In particular, same-support face coalescing, bare
+Z90 mapped-solid instancing, planar positive-feature factoring, and spherical-cap
+factoring are not enabled by `compat` or `compact`.
+
 The current semantic layer also recovers regular instance patterns, coupled count
 parameters, and periodic body grammars. On a validated 2.00 mm dual-row header,
 step-redox independently recovers two contact rows plus a 24-face-per-site housing
@@ -247,6 +253,11 @@ the exact host plane and reused through `REPRESENTATION_MAP` /
 `MAPPED_ITEM`, while the expanded feature faces and matching host holes are
 removed.
 
+This representation preserves the occupied union but changes a fused B-rep
+into touching solids and introduces coincident interface caps. Corpus
+differential validation therefore treats it as an explicit experimental
+representation transform rather than a semantics-preserving `compact` rewrite.
+
 Detection is deliberately strict. The source must be a closed shell, the host
 must be planar, every extracted feature edge must be exactly two-manifold with
 the feature or host, the complete feature/host interface must match exactly one
@@ -283,7 +294,7 @@ The output is byte-idempotent after all applicable aggressive passes have run.
 
 The pass is intentionally narrow. It requires two matching spherical faces per feature, an exact two-edge circular interface to one shared planar face, a one-to-one matching `FACE_BOUND` hole in that plane, identical normalized B-rep topology and style across the feature array, and identical sphere centers modulo translation.
 
-It removes the circular holes from the substrate plane, keeps one feature as a canonical closed solid by adding a planar interface disk, and maps that solid to all feature locations with `REPRESENTATION_MAP` / `MAPPED_ITEM`. This changes solid decomposition and introduces hidden coincident interface faces, so it is kept separate from the topology-preserving safe tier.
+It removes the circular holes from the substrate plane, keeps one feature as a canonical closed solid by adding a planar interface disk, and maps that solid to all feature locations with `REPRESENTATION_MAP` / `MAPPED_ITEM`. This changes solid decomposition and introduces hidden coincident interface faces, so it is kept separate from the topology-preserving safe tier and is not enabled by `compat` or `compact`.
 
 On the BGA-636 corpus example:
 
