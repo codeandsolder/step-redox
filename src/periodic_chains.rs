@@ -75,6 +75,7 @@ struct LatticeCandidate {
     pitch_ticks: i64,
     sites: usize,
     votes: usize,
+    site_family_rows: Vec<Vec<(i64, u64)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +147,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 }
 
 fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
-    let mut votes = HashMap::<(usize, i64, usize), usize>::new();
+    let mut families = HashMap::<(usize, i64, usize), Vec<Vec<(i64, u64)>>>::new();
 
     for axis in 0..3 {
         let other = other_axes(axis);
@@ -183,18 +184,22 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
             if row.windows(2).any(|pair| pair[1].0 - pair[0].0 != pitch) {
                 continue;
             }
-            *votes.entry((axis, pitch, row.len())).or_insert(0) += 1;
+            families
+                .entry((axis, pitch, row.len()))
+                .or_default()
+                .push(row.clone());
         }
     }
 
-    votes
+    families
         .into_iter()
         .map(
-            |((axis_index, pitch_ticks, sites), votes)| LatticeCandidate {
+            |((axis_index, pitch_ticks, sites), site_family_rows)| LatticeCandidate {
                 axis_index,
                 pitch_ticks,
                 sites,
-                votes,
+                votes: site_family_rows.len(),
+                site_family_rows,
             },
         )
         .max_by(|a, b| {
@@ -204,7 +209,6 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
                 .then_with(|| b.pitch_ticks.cmp(&a.pitch_ticks))
         })
 }
-
 fn choose_partition(
     geoms: &HashMap<u64, FaceGeom>,
     candidate: &LatticeCandidate,
@@ -264,7 +268,7 @@ fn choose_partition(
 
     let mut best: Option<Partition> = None;
     for (observation_score, centers) in windows {
-        let mut partition = classify_faces(geoms, &centers, axis, pitch)?;
+        let mut partition = classify_faces(geoms, &centers, axis, pitch, candidate)?;
         partition.score = partition_score(geoms, &partition, axis, observation_score);
         if best
             .as_ref()
@@ -406,33 +410,46 @@ fn classify_faces(
     centers: &[f64],
     axis: usize,
     pitch: f64,
+    candidate: &LatticeCandidate,
 ) -> Option<Partition> {
     let sites_count = centers.len();
     if sites_count < 2 {
         return None;
     }
 
-    let half = pitch.mul_add(0.5, GEOM_TOL_MM);
     let mut site_of = HashMap::<u64, usize>::new();
     let mut sites = vec![Vec::<u64>::new(); sites_count];
     let mut stretch = HashSet::<u64>::new();
     let mut remaining = geoms.keys().copied().collect::<HashSet<_>>();
 
-    for geom in geoms.values() {
-        let candidates = centers
+    // The lattice inference already proved exact translated face families. Use
+    // those families as site membership instead of treating every face that
+    // happens to fit inside a site window as periodic. The latter swallows
+    // unique connector end-cap/housing geometry into the end sites.
+    let center_ticks = centers.iter().map(|&x| quantize_mm(x)).collect::<Vec<_>>();
+    for row in &candidate.site_family_rows {
+        if row.len() != sites_count {
+            continue;
+        }
+        let offset = row[0].0 - center_ticks[0];
+        if !row
             .iter()
             .enumerate()
-            .filter_map(|(index, &center)| {
-                (geom.lo[axis] >= center - half && geom.hi[axis] <= center + half).then_some(index)
-            })
-            .collect::<Vec<_>>();
+            .all(|(site, (tick, _))| *tick - center_ticks[site] == offset)
+        {
+            continue;
+        }
+        for (site, &(_, face)) in row.iter().enumerate() {
+            if site_of.insert(face, site).is_some() {
+                return None;
+            }
+            sites[site].push(face);
+            remaining.remove(&face);
+        }
+    }
 
-        if candidates.len() == 1 {
-            let site = candidates[0];
-            site_of.insert(geom.id, site);
-            sites[site].push(geom.id);
-            remaining.remove(&geom.id);
-        } else if geom.span[axis] > pitch + GEOM_TOL_MM {
+    for geom in geoms.values() {
+        if remaining.contains(&geom.id) && geom.span[axis] > pitch + GEOM_TOL_MM {
             stretch.insert(geom.id);
             remaining.remove(&geom.id);
         }
