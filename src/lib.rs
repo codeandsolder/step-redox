@@ -87,7 +87,10 @@ impl Options {
             experimental_recover_v_extrusions: true,
             experimental_intern_geometric_supports: true,
             experimental_recover_partitioned_bodies: true,
-            experimental_coalesce_same_support_faces: true,
+            // Same-support face coalescing has a production repro where the
+            // reconstructed boundary drops occupied volume. Keep it opt-in
+            // until loop reconstruction is proven geometry-preserving.
+            experimental_coalesce_same_support_faces: false,
             minify_placeholder_names: true,
             ..Self::default()
         };
@@ -2181,6 +2184,7 @@ mod tests {
     fn production_profiles_keep_unvalidated_boundary_rewrites_opt_in() {
         for profile in [OutputProfile::Compat, OutputProfile::Compact] {
             let options = Options::for_profile(profile);
+            assert!(!options.experimental_coalesce_same_support_faces);
             assert!(!options.experimental_instance_planar_positive_features);
             assert!(!options.experimental_instance_spherical_caps);
         }
