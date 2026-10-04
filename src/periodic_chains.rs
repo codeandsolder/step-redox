@@ -1161,6 +1161,7 @@ mod tests {
             pitch_ticks: quantize_mm(pitch),
             sites: centers.len(),
             votes: MIN_LATTICE_FAMILY_VOTES,
+            site_family_rows: Vec::new(),
         };
         let mut partition = Partition {
             centers,
@@ -1200,6 +1201,7 @@ mod tests {
             pitch_ticks: quantize_mm(pitch),
             sites: centers.len(),
             votes: MIN_LATTICE_FAMILY_VOTES,
+            site_family_rows: Vec::new(),
         };
         let mut partition = Partition {
             centers,
