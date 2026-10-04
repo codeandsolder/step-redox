@@ -2360,16 +2360,16 @@ mod tests {
 
     #[test]
     fn v_extrusion_generated_bezier_is_byte_idempotent() -> Result<()> {
-        let src = wrap(
-            "#1=CARTESIAN_POINT('',(0.,0.,0.));\n\
-             #2=CARTESIAN_POINT('',(0.,2.,0.));\n\
-             #3=CARTESIAN_POINT('',(1.,0.,0.));\n\
-             #4=CARTESIAN_POINT('',(1.,2.,0.));\n\
-             #5=CARTESIAN_POINT('',(2.,0.,0.));\n\
-             #6=CARTESIAN_POINT('',(2.,2.,0.));\n\
-             #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
-             #11=ADVANCED_FACE('',(),#10,.T.);",
-        );
+        let src = wrap(concat!(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));\n",
+            "#2=CARTESIAN_POINT('',(0.,2.,0.));\n",
+            "#3=CARTESIAN_POINT('',(1.,0.,0.));\n",
+            "#4=CARTESIAN_POINT('',(1.,2.,0.));\n",
+            "#5=CARTESIAN_POINT('',(2.,0.,0.));\n",
+            "#6=CARTESIAN_POINT('',(2.,2.,0.));\n",
+            "#10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n",
+            "#11=ADVANCED_FACE('',(),#10,.T.);",
+        ));
         let options = Options {
             experimental_recover_exact_bezier_curves: true,
             experimental_recover_v_extrusions: true,
