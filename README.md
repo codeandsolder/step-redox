@@ -9,9 +9,10 @@ The project now has three output policies:
 - `--profile compat`: broadly compatible plain-BREP cleanup
 - `--profile compact`: proven semantic recovery, instancing, and aggressive compact output
 
-Experimental rewrites that alter fused-solid boundary decomposition remain
-explicit-only even when they can produce large byte savings. In particular,
-planar positive-feature factoring and spherical-cap factoring are not enabled
+Experimental rewrites that do not preserve the imported top-level solid set or
+fused-solid boundary decomposition remain explicit-only even when they can
+produce large byte savings. In particular, bare Z90 mapped-solid instancing,
+planar positive-feature factoring, and spherical-cap factoring are not enabled
 by `compat` or `compact`.
 
 The current semantic layer also recovers regular instance patterns, coupled count
