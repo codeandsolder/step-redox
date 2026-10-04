@@ -55,11 +55,16 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
     let mut old_points = HashSet::new();
     let mut transform_cache: HashMap<[i64; 3], u64> = HashMap::new();
 
-    for mut group in groups.into_values() {
+    let mut groups: Vec<_> = groups.into_values().collect();
+    for group in &mut groups {
+        group.sort_by_key(|curve| curve.id);
+    }
+    groups.sort_by_key(|group| group.first().map_or(u64::MAX, |curve| curve.id));
+
+    for group in groups {
         if group.len() < 2 {
             continue;
         }
-        group.sort_by_key(|c| c.id);
         let canonical = group[0].clone();
         let mut accepted = 1usize;
 
