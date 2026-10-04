@@ -555,7 +555,11 @@ fn resize_periodic_chain_bytes_one_side(
             && candidate.fixed_positive_face_ids.len() == chain.fixed_positive_face_ids.len()
             && candidate.faces_without_geometry == 0
             && candidate.nonmanifold_edges == 0
-            && candidate.cross_site_edges == 0
+            && candidate.nonlocal_cross_site_edges == 0
+            && candidate
+                .adjacent_site_edge_counts
+                .iter()
+                .all(|count| Some(count) == chain.adjacent_site_edge_counts.first())
     });
     if !verified {
         bail!(
