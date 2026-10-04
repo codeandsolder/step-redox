@@ -1398,6 +1398,29 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    // Higher-level rewrites can remove the only non-topological users of a
+    // geometric support and thereby make a locus alias newly safe. Re-run the
+    // support pass after those rewrites so Compact reaches a fixed point in one
+    // invocation instead of discovering the alias on clean #2.
+    if options.experimental_intern_geometric_supports
+        && (partition_components_recovered > 0
+            || face_coalesce_groups > 0
+            || instance_groups > 0
+            || planar_feature_arrays > 0
+            || spherical_cap_arrays > 0
+            || curve_replicas > 0
+            || curve_replica_direct_aliases > 0)
+    {
+        for section in &mut exchange.data {
+            let pass = geometric_intern::intern_geometric_supports(&mut section.entities);
+            geometric_supports_merged += pass.supports_merged;
+            geometric_support_entities_removed += pass.entities_removed;
+            geometric_planes_merged += pass.planes_merged;
+            geometric_lines_merged += pass.lines_merged;
+            geometric_cylinders_merged += pass.cylinders_merged;
+        }
+    }
+
     // Experimental passes can create new placeholder-labelled entities.
     // Minify those before the post-rewrite intern pass so name normalization
     // cannot create fresh duplicates that only disappear on a second run.
