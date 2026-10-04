@@ -290,6 +290,10 @@ fn promote_periodic_overlays(
         return;
     }
 
+    let Some(pitch_mm) = crate::numeric::exact_i64_to_f64(candidate.pitch_ticks) else {
+        return;
+    };
+    let pitch_mm = pitch_mm * GEOM_TOL_MM;
     let axis = candidate.axis_index;
     let other = other_axes(axis);
     let center_ticks = partition
@@ -301,7 +305,7 @@ fn promote_periodic_overlays(
 
     for &face in &partition.fixed {
         let geom = &geoms[&face];
-        if geom.span[axis] > candidate.pitch_ticks as f64 * GEOM_TOL_MM + GEOM_TOL_MM {
+        if geom.span[axis] > pitch_mm + GEOM_TOL_MM {
             continue;
         }
         let key = IntrinsicFaceKey {
@@ -333,40 +337,13 @@ fn promote_periodic_overlays(
                 end += 1;
             }
             let run = &row[start..end];
-            if run.len() >= min_run && run.len() <= sites {
-                let mut best_alignment: Option<(i64, usize)> = None;
-                let mut best_is_ambiguous = false;
-                for (site_start, &site_tick) in
-                    center_ticks.iter().take(sites - run.len() + 1).enumerate()
-                {
-                    let offset = run[0].0 - site_tick;
-                    if offset.abs() > candidate.pitch_ticks / 2 + 1 {
-                        continue;
-                    }
-                    let score = offset.abs();
-                    match best_alignment {
-                        None => {
-                            best_alignment = Some((score, site_start));
-                            best_is_ambiguous = false;
-                        }
-                        Some((best_score, _)) if score < best_score => {
-                            best_alignment = Some((score, site_start));
-                            best_is_ambiguous = false;
-                        }
-                        Some((best_score, best_start))
-                            if score == best_score && site_start != best_start =>
-                        {
-                            best_is_ambiguous = true;
-                        }
-                        Some(_) => {}
-                    }
-                }
-                if let Some((_, site_start)) = best_alignment
-                    && !best_is_ambiguous
-                {
-                    for (index, &(_, face)) in run.iter().enumerate() {
-                        promote.push((face, site_start + index));
-                    }
+            if run.len() >= min_run
+                && run.len() <= sites
+                && let Some(site_start) =
+                    overlay_site_alignment(run, &center_ticks, sites, candidate.pitch_ticks)
+            {
+                for (index, &(_, face)) in run.iter().enumerate() {
+                    promote.push((face, site_start + index));
                 }
             }
             start = end;
@@ -386,6 +363,41 @@ fn promote_periodic_overlays(
     }
     for site in &mut partition.sites {
         site.sort_unstable();
+    }
+}
+
+fn overlay_site_alignment(
+    run: &[(i64, u64)],
+    center_ticks: &[i64],
+    sites: usize,
+    pitch_ticks: i64,
+) -> Option<usize> {
+    let mut best: Option<(i64, usize)> = None;
+    let mut ambiguous = false;
+    for (site_start, &site_tick) in center_ticks.iter().take(sites - run.len() + 1).enumerate() {
+        let score = (run[0].0 - site_tick).abs();
+        if score > pitch_ticks / 2 + 1 {
+            continue;
+        }
+        match best {
+            None => {
+                best = Some((score, site_start));
+                ambiguous = false;
+            }
+            Some((best_score, _)) if score < best_score => {
+                best = Some((score, site_start));
+                ambiguous = false;
+            }
+            Some((best_score, best_start)) if score == best_score && site_start != best_start => {
+                ambiguous = true;
+            }
+            Some(_) => {}
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        best.map(|(_, site_start)| site_start)
     }
 }
 
@@ -1117,13 +1129,13 @@ mod tests {
     }
 
     #[test]
-    fn promotes_long_exact_overlay_row_into_sites() {
+    fn promotes_long_exact_overlay_row_into_sites() -> anyhow::Result<()> {
         let pitch = 2.54;
-        let centers = (0..6).map(|i| i as f64 * pitch).collect::<Vec<_>>();
+        let centers = (0_i32..6).map(|i| f64::from(i) * pitch).collect::<Vec<_>>();
         let mut geoms = HashMap::new();
         let mut fixed = HashSet::new();
         for (index, &center) in centers.iter().take(4).enumerate() {
-            let id = index as u64 + 1;
+            let id = u64::try_from(index)? + 1;
             geoms.insert(id, test_face(id, [center + 0.4, 3.81, 8.5]));
             fixed.insert(id);
         }
@@ -1151,17 +1163,18 @@ mod tests {
             partition.sites.iter().map(Vec::len).collect::<Vec<_>>(),
             [1, 1, 1, 1, 0, 0]
         );
+        Ok(())
     }
 
     #[test]
-    fn ambiguous_half_pitch_overlay_row_stays_fixed() {
+    fn ambiguous_half_pitch_overlay_row_stays_fixed() -> anyhow::Result<()> {
         let pitch = 2.54;
-        let centers = (0..6).map(|i| i as f64 * pitch).collect::<Vec<_>>();
+        let centers = (0_i32..6).map(|i| f64::from(i) * pitch).collect::<Vec<_>>();
         let mut geoms = HashMap::new();
         let mut fixed = HashSet::new();
-        for index in 0..4 {
-            let id = index as u64 + 1;
-            let x = pitch * (index as f64 + 0.5);
+        for index in 0_i32..4 {
+            let id = u64::try_from(index)? + 1;
+            let x = pitch * (f64::from(index) + 0.5);
             geoms.insert(id, test_face(id, [x, 3.81, 8.5]));
             fixed.insert(id);
         }
@@ -1186,6 +1199,7 @@ mod tests {
 
         assert_eq!(partition.fixed, fixed);
         assert!(partition.sites.iter().all(Vec::is_empty));
+        Ok(())
     }
 
     #[test]
