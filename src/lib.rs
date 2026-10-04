@@ -1254,6 +1254,16 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    // V-extrusion recovery materializes profile B-splines after the first
+    // Bezier pass. Revisit exact Bezier recovery once so eligible generated
+    // profiles are canonicalized in the same clean instead of on clean #2.
+    if options.experimental_recover_exact_bezier_curves && v_extrusion_profile_curves_created > 0 {
+        for section in &mut exchange.data {
+            let pass = bezier_recovery::recover_exact_bezier_curves(&mut section.entities);
+            exact_bezier_curves_recovered += pass.curves_recovered;
+        }
+    }
+
     let mut geometric_supports_merged = 0usize;
     let mut geometric_support_entities_removed = 0usize;
     let mut geometric_planes_merged = 0usize;
@@ -2344,6 +2354,37 @@ mod tests {
         );
         let once = clean_bytes(&src, &Options::default())?;
         let twice = clean_bytes(&once.bytes, &Options::default())?;
+        assert_eq!(once.bytes, twice.bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn v_extrusion_generated_bezier_is_byte_idempotent() -> Result<()> {
+        let src = wrap(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));\n\
+             #2=CARTESIAN_POINT('',(0.,2.,0.));\n\
+             #3=CARTESIAN_POINT('',(1.,0.,0.));\n\
+             #4=CARTESIAN_POINT('',(1.,2.,0.));\n\
+             #5=CARTESIAN_POINT('',(2.,0.,0.));\n\
+             #6=CARTESIAN_POINT('',(2.,2.,0.));\n\
+             #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
+             #11=ADVANCED_FACE('',(),#10,.T.);",
+        );
+        let options = Options {
+            experimental_recover_exact_bezier_curves: true,
+            experimental_recover_v_extrusions: true,
+            ..Options::default()
+        };
+
+        let once = clean_bytes(&src, &options)?;
+        assert_eq!(once.stats.v_extrusion_surfaces_recovered, 1);
+        assert_eq!(once.stats.v_extrusion_profile_curves_created, 1);
+        assert_eq!(once.stats.exact_bezier_curves_recovered, 1);
+        assert!(std::str::from_utf8(&once.bytes)?.contains("BEZIER_CURVE"));
+
+        let twice = clean_bytes(&once.bytes, &options)?;
+        assert_eq!(twice.stats.v_extrusion_surfaces_recovered, 0);
+        assert_eq!(twice.stats.exact_bezier_curves_recovered, 0);
         assert_eq!(once.bytes, twice.bytes);
         Ok(())
     }
