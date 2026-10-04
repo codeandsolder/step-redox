@@ -67,6 +67,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Merge adjacent coplanar faces sharing the exact same PLANE support and sense"
+    )]
+    coalesce_same_support_planar_faces: bool,
+
+    #[arg(
+        long,
         help = "Experimental: merge adjacent faces sharing the exact same support surface and sense"
     )]
     experimental_coalesce_same_support_faces: bool,
@@ -186,6 +192,7 @@ fn main() -> Result<()> {
     options.experimental_recover_v_extrusions |= cli.experimental_recover_v_extrusions;
     options.experimental_intern_geometric_supports |= cli.experimental_intern_geometric_supports;
     options.experimental_recover_partitioned_bodies |= cli.experimental_recover_partitioned_bodies;
+    options.coalesce_same_support_planar_faces |= cli.coalesce_same_support_planar_faces;
     options.experimental_coalesce_same_support_faces |=
         cli.experimental_coalesce_same_support_faces;
     options.experimental_instance_translated_bspline_curves |=
