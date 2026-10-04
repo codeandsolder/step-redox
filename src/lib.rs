@@ -94,7 +94,12 @@ impl Options {
 
         if profile == OutputProfile::Compact {
             options.experimental_instance_translated_bspline_curves = true;
-            options.experimental_instance_z90 = true;
+            // Bare mapped-solid instancing can expose the canonical source
+            // representation as an additional transfer root in OCCT, duplicating
+            // one repeated solid. Keep it explicit-only until the representation
+            // is embedded in a product/assembly structure or otherwise hidden
+            // from top-level transfer.
+            options.experimental_instance_z90 = false;
             // Positive-feature and spherical-cap factoring currently closes
             // extracted features with interface caps. That preserves occupied
             // volume but changes a fused B-rep into touching solids, so keep
@@ -2182,7 +2187,7 @@ mod tests {
 
         let compact = Options::for_profile(OutputProfile::Compact);
         assert!(compact.experimental_instance_translated_bspline_curves);
-        assert!(compact.experimental_instance_z90);
+        assert!(!compact.experimental_instance_z90);
     }
 
     #[test]
