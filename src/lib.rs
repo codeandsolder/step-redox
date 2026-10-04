@@ -10,6 +10,7 @@ pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
 pub mod compatibility;
+pub mod complete_ir;
 mod curve_replicas;
 mod face_coalesce;
 pub mod formed_sheet;

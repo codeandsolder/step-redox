@@ -136,6 +136,13 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
+        help = "Write compact complete semantic CAD IR with exact B-rep fallbacks"
+    )]
+    complete_ir_json: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
         help = "Write formed-sheet geometric evidence as JSON"
     )]
     formed_sheet_json: Option<PathBuf>,
@@ -216,6 +223,12 @@ fn main() -> Result<()> {
         let data = serde_json::to_vec_pretty(&cleaned.patterns)?;
         std::fs::write(path, data)
             .with_context(|| format!("write pattern report {}", path.display()))?;
+    }
+    if let Some(path) = &cli.complete_ir_json {
+        let report = step_redox::complete_ir::recover_complete_ir_bytes(&cleaned.bytes)?;
+        let data = serde_json::to_vec_pretty(&report)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write complete CAD IR {}", path.display()))?;
     }
     if let Some(path) = &cli.cad_fragments_json {
         let mut fragments =
