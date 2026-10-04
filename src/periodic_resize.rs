@@ -9,7 +9,7 @@ use crate::periodic_chains::PeriodicChainPattern;
 
 const COORD_TOL_MM: f64 = 1.0e-7;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PeriodicBodyResizeStats {
     pub old_sites: usize,
     pub new_sites: usize,
@@ -59,6 +59,9 @@ fn insert_stretch_edge(
 /// The graph transformation is exact: repeat-cell faces are cloned by rigid
 /// translation and the spanning planar faces receive freshly traced boundary
 /// loops over the target shared-edge graph.
+///
+/// # Errors
+/// Returns an error if the periodic-body proof is incomplete, the requested expansion is invalid, or the STEP graph cannot be rewritten safely.
 pub fn expand_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,
@@ -145,7 +148,7 @@ pub fn expand_periodic_body_positive(
             Ok(total / faces.len().max(1) as f64)
         })
         .collect::<Result<Vec<_>>>()?;
-    let right_threshold = site_projection[old_sites - 1] + pitch * 0.5;
+    let right_threshold = pitch.mul_add(0.5, site_projection[old_sites - 1]);
 
     let mut right_fixed = HashSet::new();
     let mut left_fixed = HashSet::new();
@@ -352,8 +355,7 @@ pub fn expand_periodic_body_positive(
         }
         if short.len() != old_sites + 1 {
             bail!(
-                "unexpected short stretch-edge grammar for faces {:?}: {} rows, expected {}",
-                pair,
+                "unexpected short stretch-edge grammar for faces {pair:?}: {} rows, expected {}",
                 short.len(),
                 old_sites + 1
             );
@@ -443,8 +445,11 @@ pub fn expand_periodic_body_positive(
 ///
 /// The negative end and the first `new_sites` repeat cells remain in place.
 /// The positive fixed cap is cloned inward, the removed repeat faces are
-/// omitted from the CLOSED_SHELL, and the spanning-face boundary grammar is
+/// omitted from the `CLOSED_SHELL`, and the spanning-face boundary grammar is
 /// rebuilt over the shortened cell/gap sequence.
+///
+/// # Errors
+/// Returns an error if the periodic-body proof is incomplete, the requested shrink is invalid, or the STEP graph cannot be rewritten safely.
 pub fn shrink_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,
@@ -532,7 +537,7 @@ pub fn shrink_periodic_body_positive(
             Ok(total / faces.len().max(1) as f64)
         })
         .collect::<Result<Vec<_>>>()?;
-    let right_threshold = site_projection[old_sites - 1] + pitch * 0.5;
+    let right_threshold = pitch.mul_add(0.5, site_projection[old_sites - 1]);
 
     let mut right_fixed = HashSet::new();
     let mut left_fixed = HashSet::new();
@@ -703,8 +708,7 @@ pub fn shrink_periodic_body_positive(
         }
         if short.len() != old_sites + 1 {
             bail!(
-                "unexpected short stretch-edge grammar for faces {:?}: {} rows, expected {}",
-                pair,
+                "unexpected short stretch-edge grammar for faces {pair:?}: {} rows, expected {}",
                 short.len(),
                 old_sites + 1
             );
@@ -772,7 +776,7 @@ pub fn shrink_periodic_body_positive(
     })
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PeriodicChainResizeStats {
     pub old_sites: usize,
     pub new_sites: usize,
@@ -813,6 +817,9 @@ struct ChainEdgeKey {
 /// fixed end regions. Growth clones one generic (gap + interior-site) unit per
 /// added site, translates the positive two-site/end-cap tail, welds supported
 /// seam edges by geometric identity, and rebuilds only the spanning face loops.
+///
+/// # Errors
+/// Returns an error if the periodic-chain proof is incomplete, the requested expansion is invalid, or the STEP graph cannot be rewritten safely.
 pub fn expand_periodic_chain_positive(
     entities: &mut Vec<EntityInstance>,
     chain: &PeriodicChainPattern,
@@ -1196,7 +1203,10 @@ pub fn expand_periodic_chain_positive(
     }
 
     let chain_span = old_sites.saturating_sub(1) as f64 * pitch;
-    let chain_mid = (chain.site_centers_mm[0] + chain.site_centers_mm[old_sites - 1]) * 0.5;
+    let chain_mid = f64::midpoint(
+        chain.site_centers_mm[0],
+        chain.site_centers_mm[old_sites - 1],
+    );
     let mut new_stretch_edges = 0usize;
     for row in ss_rows {
         let pair = ss_pairs
@@ -1295,6 +1305,9 @@ pub fn expand_periodic_chain_positive(
 /// immediately before the proven positive tail, clones/translates that tail
 /// toward the negative end, welds the new site-gap seam, and rebuilds only the
 /// spanning face loops. No booleans or tessellation are used.
+///
+/// # Errors
+/// Returns an error if the periodic-chain proof is incomplete, the requested shrink is invalid, or the STEP graph cannot be rewritten safely.
 pub fn shrink_periodic_chain_positive(
     entities: &mut Vec<EntityInstance>,
     chain: &PeriodicChainPattern,
@@ -1611,7 +1624,10 @@ pub fn shrink_periodic_chain_positive(
     }
 
     let chain_span = old_sites.saturating_sub(1) as f64 * pitch;
-    let chain_mid = (chain.site_centers_mm[0] + chain.site_centers_mm[old_sites - 1]) * 0.5;
+    let chain_mid = f64::midpoint(
+        chain.site_centers_mm[0],
+        chain.site_centers_mm[old_sites - 1],
+    );
     let mut new_stretch_edges = 0usize;
     for row in ss_rows {
         let pair = ss_pairs
@@ -1923,11 +1939,7 @@ fn chain_pair_edges_by_geometry(
         let left = &a[&key];
         let right = &b[&key];
         if left.len() != 1 || right.len() != 1 {
-            bail!(
-                "periodic-chain seam geometry is ambiguous: {:?} vs {:?}",
-                left,
-                right
-            );
+            bail!("periodic-chain seam geometry is ambiguous: {left:?} vs {right:?}");
         }
         out.push((left[0], right[0]));
     }
@@ -2463,9 +2475,9 @@ impl<'a> GraphEditor<'a> {
             }
         }
         Ok([
-            (lo[0] + hi[0]) * 0.5,
-            (lo[1] + hi[1]) * 0.5,
-            (lo[2] + hi[2]) * 0.5,
+            f64::midpoint(lo[0], hi[0]),
+            f64::midpoint(lo[1], hi[1]),
+            f64::midpoint(lo[2], hi[2]),
         ])
     }
 
@@ -2473,7 +2485,7 @@ impl<'a> GraphEditor<'a> {
         let [va, vb] = self.edge_vertices(edge)?;
         let pa = dot(self.vertex_coord(va)?, axis);
         let pb = dot(self.vertex_coord(vb)?, axis);
-        Ok(((pa + pb) * 0.5, (pb - pa).abs()))
+        Ok((f64::midpoint(pa, pb), (pb - pa).abs()))
     }
 
     fn make_edge_like(&mut self, prototype: u64, va: u64, vb: u64) -> Result<u64> {
@@ -2744,9 +2756,7 @@ impl<'a> GraphEditor<'a> {
                     .collect::<Vec<_>>();
                 if candidates.len() != 1 {
                     bail!(
-                        "cycle continuation at vertex #{} is ambiguous: {:?}",
-                        current_vertex,
-                        candidates
+                        "cycle continuation at vertex #{current_vertex} is ambiguous: {candidates:?}"
                     );
                 }
                 current_edge = candidates[0];
@@ -2826,7 +2836,7 @@ fn remap_param_refs(param: &mut Parameter, mapping: &HashMap<u64, u64>) {
     }
 }
 
-fn set_entity_id(entity: &mut EntityInstance, id: u64) {
+const fn set_entity_id(entity: &mut EntityInstance, id: u64) {
     match entity {
         EntityInstance::Simple { id: current, .. }
         | EntityInstance::Complex { id: current, .. } => *current = id,
@@ -2876,21 +2886,21 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
@@ -2903,11 +2913,11 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
     }
 }
 
-fn entity_ref(id: u64) -> Parameter {
+const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -2923,7 +2933,7 @@ fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
 
 fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Real(value) => Some(*value),
         _ => None,
     }
@@ -2946,14 +2956,14 @@ fn scale(v: [f64; 3], scalar: f64) -> [f64; 3] {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -2983,7 +2993,7 @@ mod tests {
     }
 
     #[test]
-    fn rational_single_span_seam_key_ignores_parameter_interval_noise() {
+    fn rational_single_span_seam_key_ignores_parameter_interval_noise() -> anyhow::Result<()> {
         let simple = |id, name: &str, params: Vec<Parameter>| EntityInstance::Simple {
             id,
             record: Record {
@@ -3082,14 +3092,9 @@ mod tests {
         ];
 
         let graph = GraphEditor::new(&mut entities);
-        assert_eq!(
-            chain_curve_key(&graph, 20).unwrap(),
-            chain_curve_key(&graph, 21).unwrap()
-        );
-        assert_ne!(
-            chain_curve_key(&graph, 20).unwrap(),
-            chain_curve_key(&graph, 22).unwrap()
-        );
+        assert_eq!(chain_curve_key(&graph, 20)?, chain_curve_key(&graph, 21)?);
+        assert_ne!(chain_curve_key(&graph, 20)?, chain_curve_key(&graph, 22)?);
+        Ok(())
     }
 
     #[test]
@@ -3166,7 +3171,7 @@ fn entity_descendant_closure(
 }
 
 /// Remove detached topological vertex roots left after later support/value
-/// interning. A bare VERTEX_POINT with no inbound STEP reference cannot
+/// interning. A bare `VERTEX_POINT` with no inbound STEP reference cannot
 /// participate in any represented B-rep; descendants are collected only when
 /// every surviving parent is collected with it.
 pub(crate) fn prune_detached_vertex_points(entities: &mut Vec<EntityInstance>) -> usize {

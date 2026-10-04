@@ -1,15 +1,16 @@
 use crate::cad_ir::{
-    Axis3, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d, ProfileLoop,
-    ProofStatus, Provenance, RigidTransform,
+    Axis3, BooleanOp, BrepFallback, CadModel, CadNode, Curve2d, NodeId, PatternSpec, Profile2d,
+    ProfileLoop, ProofStatus, Provenance, RigidTransform,
 };
+use crate::numeric::exact_usize_to_f64;
 use crate::patterns::InstancePattern;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
 use crate::solid_revolutions::{
     MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    RecoveredSolidRevolution,
+    RecoveredRadialSlotRevolution, RecoveredSolidRevolution,
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -19,7 +20,7 @@ pub struct CadFragment {
     pub root: NodeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CadFragmentSource {
     InstancePattern {
@@ -36,12 +37,68 @@ pub enum CadFragmentSource {
         solid_id: u64,
         face_ids: Vec<u64>,
     },
+    RadialSlotRevolution {
+        solid_id: u64,
+        base_face_ids: Vec<u64>,
+        slot_face_ids: [u64; 3],
+    },
+    BrepFallback {
+        solid_id: u64,
+    },
+}
+
+/// Admit any source solid into CAD IR without pretending it has been
+/// constructively recovered yet.
+///
+/// The fallback is exact by provenance: it names the original B-rep root and
+/// carries only complexity estimates. Later recovery passes can replace this
+/// leaf with an Extrude/Revolve/Boolean/etc. without changing the rule that
+/// every parseable source body is representable from day one.
+///
+/// # Errors
+/// Returns an error if the source solid id is invalid or the fallback CAD fragment cannot be validated.
+pub fn recover_brep_fallback_fragment(
+    solid_id: u64,
+    estimated_faces: usize,
+    estimated_edges: usize,
+    estimated_control_points: usize,
+) -> Result<CadFragment> {
+    if solid_id == 0 {
+        bail!("B-rep fallback solid id must be nonzero");
+    }
+
+    let mut model = CadModel::new();
+    let root = model.add_node(CadNode::BrepFallback(BrepFallback {
+        source_entity_ids: vec![solid_id],
+        estimated_faces,
+        estimated_edges,
+        estimated_control_points,
+    }));
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids: vec![solid_id],
+            proof: ProofStatus::Exact,
+            max_residual_mm: Some(0.0),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::BrepFallback { solid_id },
+        model,
+        root,
+    })
 }
 
 /// Recover a constructive CAD fragment from a geometrically-proven solid extrusion.
 ///
 /// The sketch is expressed in a canonical local XY frame and extruded along local +Z.
 /// A rigid transform then places that constructive body back into source coordinates.
+///
+/// # Errors
+/// Returns an error if the recovered extrusion proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_solid_extrusion_fragment(
     extrusion: &RecoveredSolidExtrusion,
 ) -> Result<CadFragment> {
@@ -104,6 +161,9 @@ pub fn recover_solid_extrusion_fragment(
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the recovered extrusions.
 pub fn recover_solid_extrusion_fragments(
     extrusions: &[RecoveredSolidExtrusion],
 ) -> Result<Vec<CadFragment>> {
@@ -118,21 +178,16 @@ pub fn recover_solid_extrusion_fragments(
 /// The detector expresses the meridian sketch directly in local [radius, axial]
 /// coordinates. Local +Y is the revolution axis; the rigid transform maps local
 /// +X to the detector's deterministic radial direction and local +Y to the world axis.
+///
+/// # Errors
+/// Returns an error if the recovered revolution proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_solid_revolution_fragment(
     revolution: &RecoveredSolidRevolution,
 ) -> Result<CadFragment> {
     validate_solid_revolution(revolution)?;
 
     let mut model = CadModel::new();
-    let profile = Profile2d {
-        loops: vec![ProfileLoop {
-            curves: revolution
-                .profile_curves
-                .iter()
-                .map(recovered_profile_curve_to_ir)
-                .collect(),
-        }],
-    };
+    let profile = recovered_revolution_profile(revolution);
     let body = model.add_node(CadNode::Revolve {
         profile,
         axis: Axis3 {
@@ -179,6 +234,9 @@ pub fn recover_solid_revolution_fragment(
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the recovered revolutions.
 pub fn recover_solid_revolution_fragments(
     revolutions: &[RecoveredSolidRevolution],
 ) -> Result<Vec<CadFragment>> {
@@ -186,6 +244,204 @@ pub fn recover_solid_revolution_fragments(
         .iter()
         .map(recover_solid_revolution_fragment)
         .collect()
+}
+
+/// Recover a proven radially-slotted turned solid as a boolean difference.
+///
+/// The detector proves an axisymmetric host plus three planes describing one
+/// constant-width slot.  The canonical IR therefore keeps the host as a full
+/// revolution and subtracts a rectangular prism extending from the axis plane
+/// past the host's maximum radius.
+///
+/// # Errors
+/// Returns an error if the recovered host or slot proof is internally
+/// inconsistent, if the cutter profile cannot be constructed, or if the CAD
+/// model cannot be validated.
+pub fn recover_radial_slot_revolution_fragment(
+    slotted: &RecoveredRadialSlotRevolution,
+) -> Result<CadFragment> {
+    validate_radial_slot_revolution(slotted)?;
+
+    let base = &slotted.base;
+    let mut model = CadModel::new();
+    let host_profile = recovered_revolution_profile(base);
+    let host_body = model.add_node(CadNode::Revolve {
+        profile: host_profile,
+        axis: Axis3 {
+            origin_mm: [0.0, 0.0, 0.0],
+            direction: [0.0, 1.0, 0.0],
+        },
+        angle_rad: std::f64::consts::TAU,
+    });
+    let host_z = cross(base.radial_direction, base.axis_direction);
+    let host = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            base.axis_origin_mm,
+            base.radial_direction,
+            base.axis_direction,
+            host_z,
+        ),
+        child: host_body,
+    });
+
+    let max_radius_mm = maximum_revolution_radius(base)?;
+    let cutter_margin_mm = (10.0 * base.source_tolerance_mm).max(1.0e-5);
+    let cutter_depth_mm = max_radius_mm + cutter_margin_mm;
+    // The detector proves that the open end coincides with exactly one global
+    // axial extreme of the host. Extend the cutter only through that already-open
+    // end so Boolean kernels never have to resolve a coincident cutter/host cap.
+    // This extension lies outside the source solid and therefore does not change
+    // the occupied geometry.
+    let extended_open_end_axial_mm = if slotted.slot_open_end_axial_mm > slotted.slot_root_axial_mm
+    {
+        slotted.slot_open_end_axial_mm + cutter_margin_mm
+    } else {
+        slotted.slot_open_end_axial_mm - cutter_margin_mm
+    };
+    let axial_min = slotted.slot_root_axial_mm.min(extended_open_end_axial_mm);
+    let axial_max = slotted.slot_root_axial_mm.max(extended_open_end_axial_mm);
+    let half_width = slotted.slot_half_width_mm;
+    let cutter_profile = Profile2d::polygon(vec![
+        [-half_width, axial_min],
+        [half_width, axial_min],
+        [half_width, axial_max],
+        [-half_width, axial_max],
+    ])?;
+    let cutter_body = model.add_node(CadNode::Extrude {
+        profile: cutter_profile,
+        vector_mm: [0.0, 0.0, cutter_depth_mm],
+    });
+    let cutter_x = normalize3(cross(base.axis_direction, slotted.slot_outward_direction))?;
+    let cutter = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            base.axis_origin_mm,
+            cutter_x,
+            base.axis_direction,
+            slotted.slot_outward_direction,
+        ),
+        child: cutter_body,
+    });
+
+    let root = model.add_node(CadNode::Boolean {
+        op: BooleanOp::Difference,
+        children: vec![host, cutter],
+    });
+
+    let mut source_entity_ids = Vec::with_capacity(base.face_ids.len() + 4);
+    source_entity_ids.push(base.solid_id);
+    source_entity_ids.extend(base.face_ids.iter().copied());
+    source_entity_ids.extend(slotted.slot_face_ids);
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    let proof = Provenance {
+        source_entity_ids,
+        proof: ProofStatus::WithinTolerance,
+        max_residual_mm: Some(base.max_residual_mm.max(slotted.slot_max_residual_mm)),
+    };
+    model.set_provenance(root, proof)?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::RadialSlotRevolution {
+            solid_id: base.solid_id,
+            base_face_ids: base.face_ids.clone(),
+            slot_face_ids: slotted.slot_face_ids,
+        },
+        model,
+        root,
+    })
+}
+
+/// Recover several proven radial-slot revolutions into canonical CAD fragments.
+///
+/// # Errors
+/// Returns the first recovery error from [`recover_radial_slot_revolution_fragment`].
+pub fn recover_radial_slot_revolution_fragments(
+    revolutions: &[RecoveredRadialSlotRevolution],
+) -> Result<Vec<CadFragment>> {
+    revolutions
+        .iter()
+        .map(recover_radial_slot_revolution_fragment)
+        .collect()
+}
+
+fn recovered_revolution_profile(revolution: &RecoveredSolidRevolution) -> Profile2d {
+    Profile2d {
+        loops: vec![ProfileLoop {
+            curves: revolution
+                .profile_curves
+                .iter()
+                .map(recovered_profile_curve_to_ir)
+                .collect(),
+        }],
+    }
+}
+
+fn maximum_revolution_radius(revolution: &RecoveredSolidRevolution) -> Result<f64> {
+    let mut maximum = 0.0_f64;
+    for curve in &revolution.profile_curves {
+        let candidate = match curve {
+            RecoveredProfileCurve::Line {
+                start_mm, end_mm, ..
+            } => start_mm[0].max(end_mm[0]),
+            RecoveredProfileCurve::CircleArc {
+                center_mm,
+                radius_mm,
+                ..
+            } => center_mm[0].abs() + radius_mm,
+            RecoveredProfileCurve::Bezier { .. } | RecoveredProfileCurve::BSpline { .. } => {
+                bail!("radial-slot revolution has unsupported spline meridian")
+            }
+        };
+        maximum = maximum.max(candidate);
+    }
+    if !maximum.is_finite() || maximum <= 0.0 {
+        bail!("radial-slot revolution has no positive radial extent");
+    }
+    Ok(maximum)
+}
+
+fn validate_radial_slot_revolution(slotted: &RecoveredRadialSlotRevolution) -> Result<()> {
+    validate_solid_revolution(&slotted.base)?;
+    if slotted.slot_face_ids.contains(&0) {
+        bail!("radial-slot source face ids must be nonzero");
+    }
+    let mut unique_faces = slotted.slot_face_ids;
+    unique_faces.sort_unstable();
+    if unique_faces.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("radial-slot source face ids must be distinct");
+    }
+    if !slotted.slot_half_width_mm.is_finite() || slotted.slot_half_width_mm <= 0.0 {
+        bail!("radial-slot half width must be finite and positive");
+    }
+    if !slotted.slot_root_axial_mm.is_finite()
+        || !slotted.slot_open_end_axial_mm.is_finite()
+        || (slotted.slot_root_axial_mm - slotted.slot_open_end_axial_mm).abs()
+            <= slotted.base.source_tolerance_mm
+    {
+        bail!("radial-slot axial span must be finite and nonzero");
+    }
+    for direction in [slotted.slot_outward_direction, slotted.slot_side_direction] {
+        if direction.iter().any(|component| !component.is_finite())
+            || (norm(direction) - 1.0).abs() > 1.0e-10
+        {
+            bail!("radial-slot direction must be a finite unit vector");
+        }
+    }
+    if dot(slotted.slot_outward_direction, slotted.base.axis_direction).abs() > 1.0e-10
+        || dot(slotted.slot_side_direction, slotted.base.axis_direction).abs() > 1.0e-10
+        || dot(slotted.slot_outward_direction, slotted.slot_side_direction).abs() > 1.0e-10
+    {
+        bail!("radial-slot frame must be orthogonal to the revolution axis");
+    }
+    if !slotted.slot_max_residual_mm.is_finite()
+        || slotted.slot_max_residual_mm < 0.0
+        || slotted.slot_max_residual_mm > slotted.base.source_tolerance_mm + 1.0e-15
+    {
+        bail!("radial-slot proof residual exceeds the source tolerance");
+    }
+    Ok(())
 }
 
 fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
@@ -287,7 +543,7 @@ fn validate_solid_revolution(revolution: &RecoveredSolidRevolution) -> Result<()
         let Some(start) = next.start_point() else {
             bail!("solid revolution profile curve has no start point");
         };
-        if ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt() > 1.0e-7 {
+        if (end[0] - start[0]).hypot(end[1] - start[1]) > 1.0e-7 {
             bail!("solid revolution profile curves are not topologically continuous");
         }
     }
@@ -470,8 +726,9 @@ fn validate_profile_curve_geometry(curve: &RecoveredProfileCurve) -> Result<()> 
 }
 
 fn circle_arc_min_radius(center_radius: f64, radius: f64, start_angle: f64, end_angle: f64) -> f64 {
-    let mut minimum =
-        (center_radius + radius * start_angle.cos()).min(center_radius + radius * end_angle.cos());
+    let mut minimum = radius
+        .mul_add(start_angle.cos(), center_radius)
+        .min(radius.mul_add(end_angle.cos(), center_radius));
     if angle_on_sweep(std::f64::consts::PI, start_angle, end_angle) {
         minimum = minimum.min(center_radius - radius);
     }
@@ -487,7 +744,7 @@ fn angle_on_sweep(angle: f64, start: f64, end: f64) -> bool {
     }
 }
 
-fn local_frame_transform(
+const fn local_frame_transform(
     origin: [f64; 3],
     x_axis: [f64; 3],
     y_axis: [f64; 3],
@@ -505,10 +762,13 @@ fn local_frame_transform(
 
 /// Recover a constructive CAD fragment from an already-proven STEP instance pattern.
 ///
-/// The child is the first actual MAPPED_ITEM occurrence, preserved as an exact B-rep
-/// fallback leaf. This is deliberate: using only the REPRESENTATION_MAP would lose
+/// The child is the first actual `MAPPED_ITEM` occurrence, preserved as an exact B-rep
+/// fallback leaf. This is deliberate: using only the `REPRESENTATION_MAP` would lose
 /// the STEP mapping-origin transform when that origin is not global zero. The pattern
 /// node then describes only the repeated translation lattice.
+///
+/// # Errors
+/// Returns an error if the instance-pattern proof is inconsistent or its canonical CAD fragment cannot be constructed.
 pub fn recover_instance_pattern_fragment(pattern: &InstancePattern) -> Result<CadFragment> {
     validate_instance_pattern(pattern)?;
 
@@ -567,6 +827,9 @@ pub fn recover_instance_pattern_fragment(pattern: &InstancePattern) -> Result<Ca
     })
 }
 
+///
+/// # Errors
+/// Returns the first error produced while lowering one of the instance patterns.
 pub fn recover_instance_pattern_fragments(
     patterns: &[InstancePattern],
 ) -> Result<Vec<CadFragment>> {
@@ -613,8 +876,19 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
         bail!("instance pattern contains a zero-sized lattice dimension");
     }
 
-    let declared_cells = pattern.grid_shape.iter().copied().product::<usize>();
-    let expected_fill = pattern.item_ids.len() as f64 / declared_cells as f64;
+    let declared_cells = pattern
+        .grid_shape
+        .iter()
+        .copied()
+        .try_fold(1usize, usize::checked_mul)
+        .ok_or_else(|| anyhow!("instance pattern grid size overflows usize"))?;
+    let Some(item_count) = exact_usize_to_f64(pattern.item_ids.len()) else {
+        bail!("instance pattern item count exceeds exact binary64 integer range");
+    };
+    let Some(declared_cells) = exact_usize_to_f64(declared_cells) else {
+        bail!("instance pattern grid size exceeds exact binary64 integer range");
+    };
+    let expected_fill = item_count / declared_cells;
     if !pattern.fill_ratio.is_finite() || (pattern.fill_ratio - expected_fill).abs() > 1.0e-12 {
         bail!("instance pattern fill ratio disagrees with occupancy/grid shape");
     }
@@ -639,9 +913,11 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
         bail!("instance pattern has duplicate occupied lattice sites");
     }
 
-    let nu = pattern.grid_shape[0] as i64;
+    let nu = i64::try_from(pattern.grid_shape[0])
+        .map_err(|_| anyhow!("instance pattern U grid size exceeds i64 range"))?;
     let nv = if dimensions == 2 {
-        pattern.grid_shape[1] as i64
+        i64::try_from(pattern.grid_shape[1])
+            .map_err(|_| anyhow!("instance pattern V grid size exceeds i64 range"))?
     } else {
         1
     };
@@ -660,13 +936,16 @@ fn validate_instance_pattern(pattern: &InstancePattern) -> Result<()> {
 fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     let remaining_budget_mm = (pattern.tolerance_mm - pattern.max_residual_mm).max(0.0);
     let dimensions = usize::from(pattern.dimension);
-    let per_axis_budget_mm = remaining_budget_mm / dimensions as f64;
+    let Some(dimensions_f64) = exact_usize_to_f64(dimensions) else {
+        bail!("instance pattern dimension exceeds exact binary64 integer range");
+    };
+    let per_axis_budget_mm = remaining_budget_mm / dimensions_f64;
     let mut canonical_basis = Vec::with_capacity(dimensions);
     let mut canonicalization_residual_mm = 0.0;
     for axis in 0..dimensions {
         let span = pattern.grid_shape[axis];
         let (basis, added_residual) =
-            canonicalize_step(pattern.basis[axis], span, per_axis_budget_mm);
+            canonicalize_step(pattern.basis[axis], span, per_axis_budget_mm)?;
         canonical_basis.push(basis);
         canonicalization_residual_mm += added_residual;
     }
@@ -674,11 +953,9 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     let spec = match pattern.dimension {
         1 => {
             let full_contiguous = pattern.grid_shape[0] == pattern.item_ids.len()
-                && pattern
-                    .occupancy
-                    .iter()
-                    .enumerate()
-                    .all(|(index, site)| *site == [index as i64, 0]);
+                && pattern.occupancy.iter().enumerate().all(|(index, site)| {
+                    i64::try_from(index).is_ok_and(|index| *site == [index, 0])
+                });
             if full_contiguous {
                 PatternSpec::Linear {
                     count: pattern.item_ids.len(),
@@ -692,8 +969,8 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
                         pattern
                             .occupancy
                             .iter()
-                            .map(|site| [site[0] as usize, 0, 0])
-                            .collect(),
+                            .map(occupancy_site_to_grid_index)
+                            .collect::<Result<Vec<_>>>()?,
                     ),
                 }
             }
@@ -712,8 +989,8 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
                     pattern
                         .occupancy
                         .iter()
-                        .map(|site| [site[0] as usize, site[1] as usize, 0])
-                        .collect(),
+                        .map(occupancy_site_to_grid_index)
+                        .collect::<Result<Vec<_>>>()?,
                 )
             };
             PatternSpec::Grid {
@@ -727,18 +1004,32 @@ fn pattern_spec(pattern: &InstancePattern) -> Result<(PatternSpec, f64)> {
     Ok((spec, canonicalization_residual_mm))
 }
 
-fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> ([f64; 3], f64) {
-    let repeats = span.saturating_sub(1) as f64;
+fn occupancy_site_to_grid_index(site: &[i64; 2]) -> Result<[usize; 3]> {
+    let u = usize::try_from(site[0])
+        .map_err(|_| anyhow!("instance pattern U occupancy is negative or too large"))?;
+    let v = usize::try_from(site[1])
+        .map_err(|_| anyhow!("instance pattern V occupancy is negative or too large"))?;
+    Ok([u, v, 0])
+}
+
+fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> Result<([f64; 3], f64)> {
+    let Some(repeats) = exact_usize_to_f64(span.saturating_sub(1)) else {
+        bail!("instance pattern span exceeds exact binary64 integer range");
+    };
     if repeats == 0.0 || budget_mm <= 0.0 {
-        return (step, 0.0);
+        return Ok((step, 0.0));
     }
 
     let max_abs = step.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    let start_exponent = if max_abs > 0.0 {
-        max_abs.log10().ceil() as i32
-    } else {
-        0
-    };
+    if max_abs > 0.0 && max_abs < 1.0e-15 {
+        return Ok((step, 0.0));
+    }
+    let start_exponent = (-15..=308)
+        .find(|exponent| 10_f64.powi(*exponent) >= max_abs)
+        .unwrap_or(308);
+    if !max_abs.is_finite() {
+        bail!("instance pattern basis contains non-finite magnitude");
+    }
 
     for exponent in (-15..=start_exponent).rev() {
         let quantum = 10_f64.powi(exponent);
@@ -751,11 +1042,11 @@ fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> ([f64; 3], 
         }
         let added_residual_mm = norm(sub(candidate, step)) * repeats;
         if added_residual_mm <= budget_mm + 1.0e-15 {
-            return (candidate, added_residual_mm);
+            return Ok((candidate, added_residual_mm));
         }
     }
 
-    (step, 0.0)
+    Ok((step, 0.0))
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -768,8 +1059,14 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
     }
     let mut expected = Vec::with_capacity(occupancy.len());
     for u in 0..nu {
+        let Ok(u) = i64::try_from(u) else {
+            return false;
+        };
         for v in 0..nv {
-            expected.push([u as i64, v as i64]);
+            let Ok(v) = i64::try_from(v) else {
+                return false;
+            };
+            expected.push([u, v]);
         }
     }
     let mut actual = occupancy.to_vec();
@@ -779,33 +1076,54 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
+fn normalize3(vector: [f64; 3]) -> Result<[f64; 3]> {
+    let length = norm(vector);
+    if !length.is_finite() || length <= 1.0e-12 {
+        bail!("cannot normalize zero or non-finite CAD frame vector");
+    }
+    Ok([vector[0] / length, vector[1] / length, vector[2] / length])
+}
+
 fn norm(vector: [f64; 3]) -> f64 {
-    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
+    vector[2]
+        .mul_add(
+            vector[2],
+            vector[1].mul_add(vector[1], vector[0] * vector[0]),
+        )
+        .sqrt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn linear_pattern(occupancy: Vec<[i64; 2]>, span: usize, residual: f64) -> InstancePattern {
-        let fill_ratio = occupancy.len() as f64 / span as f64;
-        InstancePattern {
+    fn linear_pattern(
+        occupancy: Vec<[i64; 2]>,
+        span: usize,
+        residual: f64,
+    ) -> Result<InstancePattern> {
+        let item_count = exact_usize_to_f64(occupancy.len())
+            .ok_or_else(|| anyhow!("test item count exceeds exact binary64 integer range"))?;
+        let span_f64 = exact_usize_to_f64(span)
+            .ok_or_else(|| anyhow!("test span exceeds exact binary64 integer range"))?;
+        let item_ids = (0..occupancy.len())
+            .map(|index| u64::try_from(index).map(|index| 300 + index))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(InstancePattern {
             parent_representation: 100,
             representation_map: 200,
-            item_ids: (0..occupancy.len())
-                .map(|index| 300 + index as u64)
-                .collect(),
+            item_ids,
             style_signature: vec![vec![700]],
             dimension: 1,
             origin: [12.0, 3.0, -1.0],
@@ -813,10 +1131,36 @@ mod tests {
             pitch: vec![2.54],
             occupancy,
             grid_shape: vec![span],
-            fill_ratio,
+            fill_ratio: item_count / span_f64,
             tolerance_mm: 1.0e-7,
             max_residual_mm: residual,
-        }
+        })
+    }
+
+    #[test]
+    fn arbitrary_solid_can_enter_cad_ir_as_exact_brep_fallback() -> Result<()> {
+        let fragment = recover_brep_fallback_fragment(74952, 132, 395, 8)?;
+        assert_eq!(
+            fragment.source,
+            CadFragmentSource::BrepFallback { solid_id: 74952 }
+        );
+        let CadNode::BrepFallback(fallback) = fragment.model.node(fragment.root)? else {
+            bail!("expected B-rep fallback root");
+        };
+        assert_eq!(fallback.source_entity_ids, vec![74952]);
+        assert_eq!(fallback.estimated_faces, 132);
+        assert_eq!(fallback.estimated_edges, 395);
+        assert_eq!(fallback.estimated_control_points, 8);
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].proof,
+            ProofStatus::Exact
+        );
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].max_residual_mm,
+            Some(0.0)
+        );
+        assert!(recover_brep_fallback_fragment(0, 0, 0, 0).is_err());
+        Ok(())
     }
 
     #[test]
@@ -861,7 +1205,7 @@ mod tests {
 
         let fragment = recover_solid_extrusion_fragment(&extrusion)?;
         let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         assert_eq!(
             transform.matrix,
@@ -873,7 +1217,7 @@ mod tests {
             ]
         );
         let CadNode::Extrude { profile, vector_mm } = fragment.model.node(*child)? else {
-            panic!("expected local extrusion child");
+            bail!("expected local extrusion child");
         };
         assert_eq!(*vector_mm, [0.0, 0.0, 5.0]);
         assert_eq!(
@@ -915,10 +1259,10 @@ mod tests {
         let holed_fragment = recover_solid_extrusion_fragment(&holed)?;
         let CadNode::Transform { child, .. } = holed_fragment.model.node(holed_fragment.root)?
         else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         let CadNode::Extrude { profile, .. } = holed_fragment.model.node(*child)? else {
-            panic!("expected local extrusion child");
+            bail!("expected local extrusion child");
         };
         assert_eq!(profile.loops.len(), 2);
         for source_id in 200..=203 {
@@ -972,7 +1316,7 @@ mod tests {
 
         let fragment = recover_solid_revolution_fragment(&revolution)?;
         let CadNode::Transform { transform, child } = fragment.model.node(fragment.root)? else {
-            panic!("expected transform root");
+            bail!("expected transform root");
         };
         assert_eq!(
             transform.matrix,
@@ -989,7 +1333,7 @@ mod tests {
             angle_rad,
         } = fragment.model.node(*child)?
         else {
-            panic!("expected local revolution child");
+            bail!("expected local revolution child");
         };
         assert_eq!(profile.single_polygon_points(), revolution.polygon_points());
         assert_eq!(axis.origin_mm, [0.0, 0.0, 0.0]);
@@ -1011,6 +1355,95 @@ mod tests {
         let mut too_strict_tolerance = revolution.clone();
         too_strict_tolerance.source_tolerance_mm = 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM;
         assert!(recover_solid_revolution_fragment(&too_strict_tolerance).is_err());
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_radial_slot_fixture_recovers_and_evaluates() -> Result<()> {
+        let bytes = include_bytes!("../validation/fixtures/production_radial_slot.step");
+        let recovered = crate::detect_radial_slot_revolutions_bytes(bytes)?;
+        assert_eq!(recovered.len(), 1);
+
+        let fragment = recover_radial_slot_revolution_fragment(&recovered[0])?;
+        let CadNode::Boolean { op, children } = fragment.model.node(fragment.root)? else {
+            bail!("expected production radial-slot boolean root");
+        };
+        assert_eq!(*op, BooleanOp::Difference);
+        assert_eq!(children.len(), 2);
+
+        #[cfg(feature = "cad-kernel-monstertruck")]
+        {
+            use crate::cad_kernel::CadKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+            assert!(kernel.summarize(&evaluated).geometrically_consistent);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn radial_slot_revolution_becomes_revolve_minus_extrude() -> Result<()> {
+        let slotted = RecoveredRadialSlotRevolution {
+            base: RecoveredSolidRevolution {
+                solid_id: 10,
+                face_ids: vec![20, 21, 22],
+                profile_curves: vec![
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![100],
+                        start_mm: [0.0, -2.0],
+                        end_mm: [2.0, -2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![101],
+                        start_mm: [2.0, -2.0],
+                        end_mm: [2.0, 2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![102],
+                        start_mm: [2.0, 2.0],
+                        end_mm: [0.0, 2.0],
+                    },
+                    RecoveredProfileCurve::Line {
+                        source_edge_ids: vec![103],
+                        start_mm: [0.0, 2.0],
+                        end_mm: [0.0, -2.0],
+                    },
+                ],
+                axis_origin_mm: [0.0, 0.0, 0.0],
+                axis_direction: [0.0, 1.0, 0.0],
+                radial_direction: [1.0, 0.0, 0.0],
+                max_residual_mm: 0.0,
+                source_tolerance_mm: REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            },
+            slot_face_ids: [30, 31, 32],
+            slot_outward_direction: [1.0, 0.0, 0.0],
+            slot_side_direction: [0.0, 0.0, 1.0],
+            slot_half_width_mm: 0.25,
+            slot_root_axial_mm: 1.0,
+            slot_open_end_axial_mm: 2.0,
+            slot_max_residual_mm: 0.0,
+        };
+
+        let fragment = recover_radial_slot_revolution_fragment(&slotted)?;
+        let CadNode::Boolean { op, children } = fragment.model.node(fragment.root)? else {
+            bail!("expected radial-slot boolean root");
+        };
+        assert_eq!(*op, BooleanOp::Difference);
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].source_entity_ids,
+            vec![10, 20, 21, 22, 30, 31, 32]
+        );
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
@@ -1092,7 +1525,7 @@ mod tests {
 
     #[test]
     fn full_linear_pattern_becomes_constructive_pattern_over_first_occurrence() -> Result<()> {
-        let pattern = linear_pattern(vec![[0, 0], [1, 0], [2, 0], [3, 0]], 4, 0.0);
+        let pattern = linear_pattern(vec![[0, 0], [1, 0], [2, 0], [3, 0]], 4, 0.0)?;
         let fragment = recover_instance_pattern_fragment(&pattern)?;
 
         let CadNode::Pattern {
@@ -1100,13 +1533,13 @@ mod tests {
             child,
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected linear pattern root");
+            bail!("expected linear pattern root");
         };
         assert_eq!(*count, 4);
         assert_eq!(*step_mm, [2.54, 0.0, 0.0]);
 
         let CadNode::BrepFallback(fallback) = fragment.model.node(*child)? else {
-            panic!("expected B-rep fallback child");
+            bail!("expected B-rep fallback child");
         };
         assert_eq!(fallback.source_entity_ids, vec![300]);
         assert_eq!(
@@ -1118,13 +1551,13 @@ mod tests {
 
     #[test]
     fn canonicalizes_floating_lattice_noise_within_far_end_budget() -> Result<()> {
-        let mut pattern = linear_pattern((0..24).map(|index| [index, 0]).collect(), 24, 2.4e-13);
+        let mut pattern = linear_pattern((0..24).map(|index| [index, 0]).collect(), 24, 2.4e-13)?;
         pattern.basis = vec![[
-            1.9999999999999893,
-            4.440892098500626e-16,
-            -4.440892098500626e-16,
+            1.999_999_999_999_989_3,
+            4.440_892_098_500_626e-16,
+            -4.440_892_098_500_626e-16,
         ]];
-        pattern.pitch = vec![1.9999999999999893];
+        pattern.pitch = vec![1.999_999_999_999_989_3];
 
         let fragment = recover_instance_pattern_fragment(&pattern)?;
         let CadNode::Pattern {
@@ -1132,21 +1565,20 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected linear pattern root");
+            bail!("expected linear pattern root");
         };
         assert_eq!(*step_mm, [2.0, 0.0, 0.0]);
-        assert!(
-            fragment.model.provenance[&fragment.root]
-                .max_residual_mm
-                .unwrap()
-                <= pattern.tolerance_mm
-        );
+        let Some(max_residual_mm) = fragment.model.provenance[&fragment.root].max_residual_mm
+        else {
+            bail!("pattern provenance should carry a residual");
+        };
+        assert!(max_residual_mm <= pattern.tolerance_mm);
         Ok(())
     }
 
     #[test]
     fn sparse_linear_pattern_preserves_holes_as_grid_occupancy() -> Result<()> {
-        let pattern = linear_pattern(vec![[0, 0], [2, 0], [4, 0]], 5, 3.0e-8);
+        let pattern = linear_pattern(vec![[0, 0], [2, 0], [4, 0]], 5, 3.0e-8)?;
         let fragment = recover_instance_pattern_fragment(&pattern)?;
 
         let CadNode::Pattern {
@@ -1156,7 +1588,7 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected sparse grid pattern root");
+            bail!("expected sparse grid pattern root");
         };
         assert_eq!(*counts, [5, 1, 1]);
         assert_eq!(
@@ -1199,7 +1631,7 @@ mod tests {
             ..
         } = fragment.model.node(fragment.root)?
         else {
-            panic!("expected grid pattern root");
+            bail!("expected grid pattern root");
         };
         assert_eq!(*counts, [2, 2, 1]);
         assert!(occupancy.is_none());
@@ -1207,9 +1639,10 @@ mod tests {
     }
 
     #[test]
-    fn malformed_pattern_fails_closed() {
-        let mut pattern = linear_pattern(vec![[0, 0], [1, 0]], 2, 0.0);
+    fn malformed_pattern_fails_closed() -> Result<()> {
+        let mut pattern = linear_pattern(vec![[0, 0], [1, 0]], 2, 0.0)?;
         pattern.occupancy[0] = [1, 0];
         assert!(recover_instance_pattern_fragment(&pattern).is_err());
+        Ok(())
     }
 }

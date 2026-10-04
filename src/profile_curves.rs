@@ -33,6 +33,7 @@ impl RecoveredProfileCurve {
         self.source_edge_ids().first().copied().unwrap_or(u64::MAX)
     }
 
+    #[must_use]
     pub fn source_edge_ids(&self) -> &[u64] {
         match self {
             Self::Line {
@@ -157,7 +158,7 @@ impl RecoveredProfileCurve {
         }
     }
 
-    pub(crate) fn is_spline(&self) -> bool {
+    pub(crate) const fn is_spline(&self) -> bool {
         matches!(self, Self::Bezier { .. } | Self::BSpline { .. })
     }
 }

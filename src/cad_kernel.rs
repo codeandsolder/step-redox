@@ -16,15 +16,27 @@ pub struct KernelSummary {
 pub trait CadKernel {
     type Evaluated;
 
+    /// Evaluate one canonical CAD root in the backend.
+    ///
+    /// # Errors
+    /// Returns an error when the model cannot be represented or evaluated by this kernel.
     fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated>;
+
     fn summarize(&self, evaluated: &Self::Evaluated) -> KernelSummary;
+
+    /// Serialize an evaluated shape as a STEP exchange.
+    ///
+    /// # Errors
+    /// Returns an error when the evaluated topology cannot be serialized as STEP.
     fn to_step(&self, evaluated: &Self::Evaluated) -> Result<String>;
 }
 
 #[cfg(feature = "cad-kernel-monstertruck")]
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
-    use crate::cad_ir::{Axis3, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform};
+    use crate::cad_ir::{
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform,
+    };
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::*;
@@ -148,7 +160,7 @@ pub mod monstertruck {
             }
 
             let shell =
-                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 4);
+                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 2);
             return Ok(Solid::try_new(vec![shell])?);
         }
 
@@ -398,6 +410,44 @@ pub mod monstertruck {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
     }
 
+    const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-6;
+
+    fn evaluate_boolean(model: &CadModel, op: BooleanOp, children: &[NodeId]) -> Result<Solid> {
+        let Some((&first, rest)) = children.split_first() else {
+            bail!("boolean node needs at least one child");
+        };
+        let mut result = evaluate_node(model, first)?;
+        for &child in rest {
+            let rhs = evaluate_node(model, child)?;
+            result = match op {
+                BooleanOp::Union => monstertruck_solid::or(&result, &rhs, BOOLEAN_TOLERANCE_MM)?,
+                BooleanOp::Intersection => {
+                    monstertruck_solid::and(&result, &rhs, BOOLEAN_TOLERANCE_MM)?
+                }
+                BooleanOp::Difference => {
+                    match monstertruck_solid::difference(&result, &rhs, BOOLEAN_TOLERANCE_MM) {
+                        Ok(solid) => solid,
+                        Err(error) => {
+                            #[cfg(test)]
+                            for tolerance in [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 5.0e-2] {
+                                match monstertruck_solid::difference(&result, &rhs, tolerance) {
+                                    Ok(_) => eprintln!(
+                                        "Monstertruck difference succeeds at tolerance {tolerance:.1e}"
+                                    ),
+                                    Err(retry_error) => eprintln!(
+                                        "Monstertruck difference still fails at tolerance {tolerance:.1e}: {retry_error}"
+                                    ),
+                                }
+                            }
+                            return Err(error.into());
+                        }
+                    }
+                }
+            };
+        }
+        Ok(result)
+    }
+
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
         match model.node(root)? {
             CadNode::Extrude { profile, vector_mm } => {
@@ -411,6 +461,7 @@ pub mod monstertruck {
                 axis,
                 angle_rad,
             } => revolve_profile(profile, *axis, *angle_rad),
+            CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
                     profile,
@@ -514,6 +565,43 @@ pub mod monstertruck {
             let step = kernel.to_step(&evaluated)?;
             assert!(step.contains(expected_step_fragment));
             ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_boolean_difference() -> Result<()> {
+            use crate::cad_ir::BooleanOp;
+
+            let mut model = CadModel::new();
+            let base = model.add_node(CadNode::Extrude {
+                profile: Profile2d::polygon(vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 6.0],
+                    [0.0, 6.0],
+                ])?,
+                vector_mm: [0.0, 0.0, 2.0],
+            });
+            let cutter_body = model.add_node(CadNode::Extrude {
+                profile: Profile2d::polygon(vec![[3.0, 2.0], [7.0, 2.0], [7.0, 4.0], [3.0, 4.0]])?,
+                vector_mm: [0.0, 0.0, 4.0],
+            });
+            let cutter = model.add_node(CadNode::Transform {
+                transform: RigidTransform::translation_mm([0.0, 0.0, -1.0]),
+                child: cutter_body,
+            });
+            let root = model.add_node(CadNode::Boolean {
+                op: BooleanOp::Difference,
+                children: vec![base, cutter],
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert!(summary.faces >= 8);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
             Ok(())
         }
 
@@ -768,10 +856,10 @@ pub mod monstertruck {
 
             let fragment = crate::cad_recovery::recover_solid_extrusion_fragment(&recovered[0])?;
             let CadNode::Transform { child, .. } = fragment.model.node(fragment.root)? else {
-                panic!("expected transform root");
+                bail!("expected transform root");
             };
             let CadNode::Extrude { profile, .. } = fragment.model.node(*child)? else {
-                panic!("expected extrusion child");
+                bail!("expected extrusion child");
             };
             assert_eq!(profile.loops.len(), 2);
 
@@ -921,7 +1009,7 @@ pub mod monstertruck {
             model.add_root(patterned)?;
 
             let error = match MonstertruckKernel.evaluate(&model, patterned) {
-                Ok(_) => panic!("unimplemented pattern unexpectedly evaluated"),
+                Ok(_) => bail!("unimplemented pattern unexpectedly evaluated"),
                 Err(error) => error,
             };
             assert!(error.to_string().contains("does not yet evaluate"));

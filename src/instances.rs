@@ -2,7 +2,7 @@ use ruststep::ast::{EntityInstance, Name, Parameter, Record, SubSuperRecord};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct InstanceStats {
+pub struct InstanceStats {
     pub groups: usize,
     pub solids_replaced: usize,
     pub entities_removed: usize,
@@ -20,18 +20,97 @@ struct SolidInfo {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-struct ShapeKey {
-    vertices: usize,
-    edges: usize,
-    oriented_edges: usize,
-    faces: usize,
-    points: Vec<[i64; 3]>,
-    edge_geometry: Vec<(String, Vec<i64>)>,
-    face_geometry: Vec<(String, Vec<i64>)>,
-    topology: String,
+pub struct ShapeKey {
+    pub(crate) vertices: usize,
+    pub(crate) edges: usize,
+    pub(crate) oriented_edges: usize,
+    pub(crate) faces: usize,
+    pub(crate) points: Vec<[i64; 3]>,
+    pub(crate) edge_geometry: Vec<(String, Vec<i64>)>,
+    pub(crate) face_geometry: Vec<(String, Vec<i64>)>,
+    pub(crate) topology: String,
 }
 
-pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats {
+/// Translation- and Z-quarter-turn-invariant identity for one manifold solid.
+///
+/// This deliberately mirrors the geometry key used by whole-solid instancing,
+/// but does not require presentation/style evidence. It is intended for corpus
+/// deduplication and diagnostics, not as permission to rewrite an occurrence.
+pub fn solid_shape_key(
+    root: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<(ShapeKey, [f64; 3], u8, usize)> {
+    let closure = semantic_solid_closure(root, entities, index)?;
+    let mut face_count = 0usize;
+    let mut vertex_points = Vec::new();
+    let mut edge_count = 0usize;
+    let mut oriented_edge_count = 0usize;
+    let mut face_geometry = Vec::new();
+    let mut edge_geometry = Vec::new();
+
+    for &id in &closure {
+        let &idx = index.get(&id)?;
+        let Some(record) = simple_record(&entities[idx]) else {
+            continue;
+        };
+        match record.name.as_str() {
+            "ADVANCED_FACE" => {
+                face_count += 1;
+                let geometry = nth_entity_ref(&record.parameter, 2)?;
+                face_geometry.push(geometry_signature(geometry, entities, index)?);
+            }
+            "EDGE_CURVE" => {
+                edge_count += 1;
+                let geometry = nth_entity_ref(&record.parameter, 3)?;
+                edge_geometry.push(geometry_signature(geometry, entities, index)?);
+            }
+            "EDGE_LOOP" => {
+                let Parameter::List(params) = &record.parameter else {
+                    return None;
+                };
+                let Parameter::List(edge_uses) = params.get(1)? else {
+                    return None;
+                };
+                oriented_edge_count += edge_uses.len();
+            }
+            "VERTEX_POINT" => {
+                let point = nth_entity_ref(&record.parameter, 1)?;
+                vertex_points.push(cartesian_point(point, entities, index)?);
+            }
+            _ => {}
+        }
+    }
+
+    if face_count == 0 || vertex_points.is_empty() || edge_count == 0 {
+        return None;
+    }
+
+    let center = centroid(&vertex_points);
+    let (points, topology, canonical_quarter) =
+        canonical_z90_solid_signature(root, &vertex_points, entities, index, center)?;
+
+    face_geometry.sort();
+    edge_geometry.sort();
+
+    Some((
+        ShapeKey {
+            vertices: vertex_points.len(),
+            edges: edge_count,
+            oriented_edges: oriented_edge_count,
+            faces: face_count,
+            points,
+            edge_geometry,
+            face_geometry,
+            topology,
+        },
+        center,
+        canonical_quarter,
+        closure.len(),
+    ))
+}
+
+pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats {
     let mut stats = InstanceStats::default();
     if entities.is_empty() {
         return stats;
@@ -102,8 +181,7 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
             }
 
             eprintln!(
-                "instance grouping representation={} solids={} analyzed={}",
-                representation_id,
+                "instance grouping representation={representation_id} solids={} analyzed={}",
                 solid_ids.len(),
                 infos.len()
             );
@@ -236,8 +314,8 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
                         rigid_translation(canonical.center, target.center, relative_quarter);
                     if std::env::var_os("STEP_REDOX_DEBUG_INSTANCES").is_some() {
                         eprintln!(
-                            "emit instance source={} target={} quarter={} translation={:?}",
-                            canonical.root, target.root, relative_quarter, translation
+                            "emit instance source={} target={} quarter={relative_quarter} translation={translation:?}",
+                            canonical.root, target.root
                         );
                     }
                     let point = push_point(entities, &mut next_id, translation);
@@ -357,7 +435,7 @@ pub(crate) fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> Instanc
     stats
 }
 
-pub(crate) fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> InstanceStats {
+pub fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> InstanceStats {
     // Reuse the mature geometric proof + guarded GC from the MAPPED_ITEM pass,
     // then replace only its representation layer with the assembly structure
     // emitted by OpenCascade itself. Keep a rollback copy because assembly
@@ -952,7 +1030,10 @@ fn push_child_product(
     pd
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP assembly emission naturally carries the linked entity identifiers as separate arguments"
+)]
 fn push_assembly_occurrence(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
@@ -1033,12 +1114,12 @@ fn push_assembly_occurrence(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct StyleRef {
+pub struct StyleRef {
     pub(crate) id: u64,
     pub(crate) assignments: Vec<u64>,
 }
 
-pub(crate) fn collect_styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<StyleRef>> {
+pub fn collect_styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<StyleRef>> {
     let mut out: HashMap<u64, Vec<StyleRef>> = HashMap::new();
     for entity in entities {
         let EntityInstance::Simple { id, record } = entity else {
@@ -1159,13 +1240,39 @@ fn analyze_solid(
     })
 }
 
-fn solid_topology_signature(
+/// Return the semantic face list for a `MANIFOLD_SOLID_BREP`.
+///
+/// Some production exporters put non-FACE topology into `CLOSED_SHELL.cfs_faces`.
+/// EXPRESS gives those entries no shell semantics at all: the field is a set of
+/// FACE. Tolerant importers such as `OpenCascade` effectively discard the
+/// wrong-type members. Do the same for semantic recovery/hashing while the exact
+/// source B-rep remains available through provenance/fallback.
+pub fn semantic_solid_closure(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-    center: [f64; 3],
-    quarter: u8,
-) -> Option<String> {
+) -> Option<HashSet<u64>> {
+    let root_record = simple_record(&entities[*index.get(&root)?])?;
+    if root_record.name != "MANIFOLD_SOLID_BREP" {
+        return None;
+    }
+    let shell_id = nth_entity_ref(&root_record.parameter, 1)?;
+    let face_ids = manifold_solid_face_ids(root, entities, index)?;
+
+    let mut closure = HashSet::new();
+    closure.insert(root);
+    closure.insert(shell_id);
+    for face_id in face_ids {
+        closure.extend(closure_from(face_id, entities, index));
+    }
+    Some(closure)
+}
+
+pub fn manifold_solid_face_ids(
+    root: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<u64>> {
     let root_record = simple_record(&entities[*index.get(&root)?])?;
     if root_record.name != "MANIFOLD_SOLID_BREP" {
         return None;
@@ -1178,13 +1285,32 @@ fn solid_topology_signature(
     let Parameter::List(shell_params) = &shell_record.parameter else {
         return None;
     };
-    let Parameter::List(face_refs) = shell_params.get(1)? else {
+    let Parameter::List(member_refs) = shell_params.get(1)? else {
         return None;
     };
 
-    let mut faces = Vec::with_capacity(face_refs.len());
-    for face_ref in face_refs {
-        let face_id = entity_ref_value(face_ref)?;
+    let mut faces = Vec::new();
+    for member_ref in member_refs {
+        let id = entity_ref_value(member_ref)?;
+        let record = simple_record(&entities[*index.get(&id)?])?;
+        if matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE") {
+            faces.push(id);
+        }
+    }
+    (!faces.is_empty()).then_some(faces)
+}
+
+fn solid_topology_signature(
+    root: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<String> {
+    let face_ids = manifold_solid_face_ids(root, entities, index)?;
+
+    let mut faces = Vec::with_capacity(face_ids.len());
+    for face_id in face_ids {
         faces.push(face_topology_signature(
             face_id, entities, index, center, quarter,
         )?);
@@ -1193,7 +1319,7 @@ fn solid_topology_signature(
     Some(format!("SHELL[{}]", faces.join("|")))
 }
 
-pub(crate) fn face_topology_signature(
+pub fn face_topology_signature(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1235,11 +1361,7 @@ pub(crate) fn face_topology_signature(
         0,
     )?;
 
-    Some(format!(
-        "FACE({same_sense};{};{})",
-        surface,
-        bounds.join("&")
-    ))
+    Some(format!("FACE({same_sense};{surface};{})", bounds.join("&")))
 }
 
 fn bound_topology_signature(
@@ -1293,6 +1415,46 @@ fn edge_loop_signature(
     Some(format!("LOOP[{}]", canonical_cycle(&uses).join(">")))
 }
 
+/// Resolve a possibly nested `ORIENTED_EDGE` chain to its base `EDGE_CURVE` and
+/// effective traversal direction. A direct `EDGE_CURVE` in `EDGE_LOOP` is accepted
+/// as the de-facto shorthand for an orientation=.T. wrapper used by real
+/// exporters and tolerated by `OpenCascade`.
+pub fn resolve_edge_curve_use(
+    use_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<(u64, bool)> {
+    let mut current = use_id;
+    let mut forward = true;
+    let mut seen = HashSet::new();
+
+    for _ in 0..32 {
+        if !seen.insert(current) {
+            return None;
+        }
+        let record = simple_record(&entities[*index.get(&current)?])?;
+        match record.name.as_str() {
+            "EDGE_CURVE" => return Some((current, forward)),
+            "ORIENTED_EDGE" => {
+                let Parameter::List(params) = &record.parameter else {
+                    return None;
+                };
+                current = entity_ref_value(params.get(3)?)?;
+                let orientation = match params.get(4)? {
+                    Parameter::Enumeration(value) if value == "T" => true,
+                    Parameter::Enumeration(value) if value == "F" => false,
+                    _ => return None,
+                };
+                if !orientation {
+                    forward = !forward;
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn oriented_edge_signature(
     oriented_id: u64,
     entities: &[EntityInstance],
@@ -1300,15 +1462,8 @@ fn oriented_edge_signature(
     center: [f64; 3],
     quarter: u8,
 ) -> Option<String> {
-    let record = simple_record(&entities[*index.get(&oriented_id)?])?;
-    if record.name != "ORIENTED_EDGE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let edge_id = entity_ref_value(params.get(3)?)?;
-    let orientation = parameter_literal_signature(params.get(4)?)?;
+    let (edge_id, forward) = resolve_edge_curve_use(oriented_id, entities, index)?;
+    let orientation = if forward { ".T." } else { ".F." };
 
     let edge_record = simple_record(&entities[*index.get(&edge_id)?])?;
     if edge_record.name != "EDGE_CURVE" {
@@ -1528,8 +1683,10 @@ fn canonical_axis_offset(
     center: [f64; 3],
     quarter: u8,
 ) -> Option<[i64; 3]> {
-    let norm2 =
-        direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
+    let norm2 = direction[2].mul_add(
+        direction[2],
+        direction[1].mul_add(direction[1], direction[0] * direction[0]),
+    );
     if !norm2.is_finite() || norm2 <= 1.0e-24 {
         return None;
     }
@@ -1538,11 +1695,14 @@ fn canonical_axis_offset(
         point[1] - center[1],
         point[2] - center[2],
     ];
-    let along = (rel[0] * direction[0] + rel[1] * direction[1] + rel[2] * direction[2]) / norm2;
+    let along = rel[2].mul_add(
+        direction[2],
+        rel[1].mul_add(direction[1], rel[0] * direction[0]),
+    ) / norm2;
     let perpendicular = [
-        rel[0] - along * direction[0],
-        rel[1] - along * direction[1],
-        rel[2] - along * direction[2],
+        along.mul_add(-direction[0], rel[0]),
+        along.mul_add(-direction[1], rel[1]),
+        along.mul_add(-direction[2], rel[2]),
     ];
     let (x, y) = rotate_xy(perpendicular[0], perpendicular[1], quarter);
     Some([
@@ -1589,7 +1749,10 @@ fn plane_support_signature(
     let q_rel = [rx, ry, rel[2]];
     let (anx, any) = rotate_xy(axis[0], axis[1], quarter);
     let q_axis_f = [anx, any, axis[2]];
-    let offset = (q_rel[0] * q_axis_f[0] + q_rel[1] * q_axis_f[1] + q_rel[2] * q_axis_f[2]) * 1.0e9;
+    let offset = q_rel[2].mul_add(
+        q_axis_f[2],
+        q_rel[1].mul_add(q_axis_f[1], q_rel[0] * q_axis_f[0]),
+    ) * 1.0e9;
     Some(format!(
         "PLANE(OFFSET{};DIR({},{},{}))",
         offset.round() as i64,
@@ -1663,7 +1826,7 @@ fn support_record_signature(
             depth + 1,
         )?
     };
-    Some(format!("{}{}", record.name, params))
+    Some(format!("{}{params}", record.name))
 }
 
 fn support_param_signature(
@@ -1684,7 +1847,7 @@ fn support_param_signature(
         Parameter::Ref(Name::ConstantValue(value)) => Some(format!("@{value}")),
         Parameter::Real(value) => Some(format!("R{}", (value * 1.0e9).round() as i64)),
         Parameter::Integer(value) => Some(format!("I{value}")),
-        Parameter::String(value) => Some(format!("S{:?}", value)),
+        Parameter::String(value) => Some(format!("S{value:?}")),
         Parameter::Enumeration(value) => Some(format!(".{value}.")),
         Parameter::List(items) => {
             let mut parts = Vec::with_capacity(items.len());
@@ -1702,8 +1865,7 @@ fn support_param_signature(
             Some(format!("({})", parts.join(",")))
         }
         Parameter::Typed { keyword, parameter } => Some(format!(
-            "{}({})",
-            keyword,
+            "{keyword}({})",
             support_param_signature(
                 parameter,
                 entities,
@@ -1941,8 +2103,8 @@ fn unique_relative_quarter(
 
     if std::env::var_os("STEP_REDOX_DEBUG_INSTANCES").is_some() {
         eprintln!(
-            "instance transform source={} target={} candidates={:?} source_center={:?} target_center={:?}",
-            source.root, target.root, matches, source.center, target.center
+            "instance transform source={} target={} candidates={matches:?} source_center={:?} target_center={:?}",
+            source.root, target.root, source.center, target.center
         );
     }
 
@@ -1954,17 +2116,33 @@ fn unique_relative_quarter(
 }
 
 fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
-    let mut center = [0.0; 3];
-    for point in points {
-        center[0] += point[0];
-        center[1] += point[1];
-        center[2] += point[2];
+    // Points are normally collected by walking a HashSet closure. Summing in
+    // that randomized iteration order made the final few bits of the centroid
+    // process-dependent and could flip coordinates across the 1e-9 canonical
+    // quantization boundary. Sort first so identity is reproducible across
+    // processes and extraction/reparse cycles.
+    let mut ordered = points.to_vec();
+    ordered.sort_by(|a, b| {
+        a[0].total_cmp(&b[0])
+            .then_with(|| a[1].total_cmp(&b[1]))
+            .then_with(|| a[2].total_cmp(&b[2]))
+    });
+
+    let mut sum = [0.0; 3];
+    let mut compensation = [0.0; 3];
+    for point in &ordered {
+        for axis in 0..3 {
+            let value = point[axis] - compensation[axis];
+            let next = sum[axis] + value;
+            compensation[axis] = (next - sum[axis]) - value;
+            sum[axis] = next;
+        }
     }
-    let n = points.len() as f64;
-    [center[0] / n, center[1] / n, center[2] / n]
+    let n = ordered.len() as f64;
+    [sum[0] / n, sum[1] / n, sum[2] / n]
 }
 
-pub(crate) fn cartesian_point(
+pub fn cartesian_point(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1990,29 +2168,29 @@ pub(crate) fn cartesian_point(
     ])
 }
 
-pub(crate) fn number(param: &Parameter) -> Option<f64> {
+pub fn number(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         _ => None,
     }
 }
 
-pub(crate) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
+pub fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     let Parameter::List(params) = parameter else {
         return None;
     };
     entity_ref_value(params.get(idx)?)
 }
 
-pub(crate) fn entity_ref_value(param: &Parameter) -> Option<u64> {
+pub const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
     }
 }
 
-pub(crate) fn closure_from(
+pub fn closure_from(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -2035,7 +2213,7 @@ pub(crate) fn closure_from(
     seen
 }
 
-pub(crate) fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
+pub fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
     let record = simple_record(entity)?;
     let Parameter::List(params) = &record.parameter else {
         return None;
@@ -2070,7 +2248,7 @@ fn replace_representation_items(entity: &mut EntityInstance, replacements: &Hash
     }
 }
 
-pub(crate) fn patch_presentation_lists(
+pub fn patch_presentation_lists(
     entities: &mut [EntityInstance],
     remove: &HashSet<u64>,
     add: &[u64],
@@ -2102,7 +2280,7 @@ pub(crate) fn patch_presentation_lists(
     }
 }
 
-pub(crate) fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
+pub fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     entities
         .iter()
         .map(|entity| {
@@ -2113,7 +2291,7 @@ pub(crate) fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u6
         .collect()
 }
 
-pub(crate) fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
+pub fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
     let mut inbound: HashMap<u64, HashSet<u64>> = HashMap::new();
     for (&parent, children) in refs {
         for &child in children {
@@ -2123,7 +2301,7 @@ pub(crate) fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet
     inbound
 }
 
-pub(crate) fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
+pub fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
     entities
         .iter()
         .enumerate()
@@ -2131,29 +2309,25 @@ pub(crate) fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-pub(crate) fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
+pub fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
     entities.iter().position(|entity| entity_id(entity) == id)
 }
 
-pub(crate) fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+pub const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-pub(crate) fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+pub const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-pub(crate) fn push_point(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    point: [f64; 3],
-) -> u64 {
+pub fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64; 3]) -> u64 {
     push_simple(
         entities,
         next_id,
@@ -2165,7 +2339,7 @@ pub(crate) fn push_point(
     )
 }
 
-pub(crate) fn push_simple(
+pub fn push_simple(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
     name: &str,
@@ -2183,17 +2357,17 @@ pub(crate) fn push_simple(
     id
 }
 
-pub(crate) fn entity_ref(id: u64) -> Parameter {
+pub const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-pub(crate) fn entity_id(entity: &EntityInstance) -> u64 {
+pub const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-pub(crate) fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
+pub fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
     match entity {
         EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
         EntityInstance::Complex { subsuper, .. } => {
@@ -2252,6 +2426,144 @@ mod tests {
     }
 
     #[test]
+    fn centroid_is_independent_of_input_order() {
+        let a = vec![
+            [
+                7.187_335_566_918_112,
+                -10.551_553_818_311_925,
+                0.409_865_672_927_023_36,
+            ],
+            [
+                4.527_269_766_918_11,
+                -10.553_611_218_311_952,
+                0.409_865_672_927_023_36,
+            ],
+            [1.0e6, -1.0e6, 1.0e-9],
+            [-1.0e6, 1.0e6, -1.0e-9],
+        ];
+        let mut b = a.clone();
+        b.reverse();
+        assert_eq!(centroid(&a), centroid(&b));
+    }
+
+    #[test]
+    fn shape_key_ignores_edge_wrapper_serialization() -> anyhow::Result<()> {
+        fn key(loop_entities: &str) -> anyhow::Result<ShapeKey> {
+            let text = format!(
+                "ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('x'),'1');
+FILE_NAME('a','b',(''),(''),'x','y','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=VECTOR('',#3,1.);
+#5=LINE('',#1,#4);
+#6=VERTEX_POINT('',#1);
+#7=VERTEX_POINT('',#2);
+#8=EDGE_CURVE('',#6,#7,#5,.T.);
+{loop_entities}
+#11=FACE_OUTER_BOUND('',#10,.T.);
+#12=DIRECTION('',(0.,0.,1.));
+#13=AXIS2_PLACEMENT_3D('',#1,#12,#3);
+#14=PLANE('',#13);
+#15=ADVANCED_FACE('',(#11),#14,.T.);
+#16=CLOSED_SHELL('',(#15));
+#17=MANIFOLD_SOLID_BREP('',#16);
+ENDSEC;
+END-ISO-10303-21;
+"
+            );
+            let exchange = ruststep::parser::parse(&text)?;
+            let entities = &exchange.data[0].entities;
+            let index = build_index(entities);
+            Ok(solid_shape_key(17, entities, &index)
+                .ok_or_else(|| anyhow::anyhow!("fixture solid has no shape key"))?
+                .0)
+        }
+
+        let direct = key("#10=EDGE_LOOP('',(#8));")?;
+        let nested = key("#9=ORIENTED_EDGE('',*,*,#8,.F.);
+#19=ORIENTED_EDGE('',*,*,#9,.F.);
+#10=EDGE_LOOP('',(#19));")?;
+        assert_eq!(direct, nested);
+        assert_eq!(direct.oriented_edges, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn shell_face_list_ignores_non_face_members() -> anyhow::Result<()> {
+        fn parse(data: &str) -> anyhow::Result<(Vec<EntityInstance>, HashMap<u64, usize>)> {
+            let text = format!(
+                "ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('x'),'1');
+FILE_NAME('a','b',(''),(''),'x','y','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+{data}
+ENDSEC;
+END-ISO-10303-21;
+"
+            );
+            let exchange = ruststep::parser::parse(&text)?;
+            let entities = exchange.data[0].entities.clone();
+            let index = build_index(&entities);
+            Ok((entities, index))
+        }
+
+        let common = "
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=VECTOR('',#3,1.);
+#5=LINE('',#1,#4);
+#6=VERTEX_POINT('',#1);
+#7=VERTEX_POINT('',#2);
+#8=EDGE_CURVE('',#6,#7,#5,.T.);
+#9=ORIENTED_EDGE('',*,*,#8,.T.);
+#10=EDGE_LOOP('',(#9));
+#11=FACE_OUTER_BOUND('',#10,.T.);
+#12=DIRECTION('',(0.,0.,1.));
+#13=AXIS2_PLACEMENT_3D('',#1,#12,#3);
+#14=PLANE('',#13);
+#15=ADVANCED_FACE('',(#11),#14,.T.);
+";
+
+        let (entities, index) = parse(&format!(
+            "{common}
+#16=CLOSED_SHELL('',(#15,#9));
+#17=MANIFOLD_SOLID_BREP('',#16);"
+        ))?;
+        assert_eq!(
+            manifold_solid_face_ids(17, &entities, &index),
+            Some(vec![15])
+        );
+
+        let (entities, index) = parse(&format!(
+            "{common}
+#16=CLOSED_SHELL('',(#15,#18));
+#17=MANIFOLD_SOLID_BREP('',#16);
+#18=DIRECTION('',(0.,1.,0.));"
+        ))?;
+        assert_eq!(
+            manifold_solid_face_ids(17, &entities, &index),
+            Some(vec![15])
+        );
+        let raw = closure_from(17, &entities, &index);
+        let semantic = semantic_solid_closure(17, &entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("fixture solid has no semantic closure"))?;
+        assert!(raw.contains(&18));
+        assert!(!semantic.contains(&18));
+        assert!(semantic.contains(&15));
+        Ok(())
+    }
+
+    #[test]
     fn z90_signature_rejects_shape_change() {
         let a = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let b = vec![[0.0, 0.0, 0.0], [2.1, 0.0, 0.0], [0.0, 1.0, 0.0]];
@@ -2261,20 +2573,25 @@ mod tests {
     }
 
     #[test]
-    fn axis_offset_ignores_slide_along_axis() {
+    fn axis_offset_ignores_slide_along_axis() -> anyhow::Result<()> {
         let center = [0.0, 0.0, 0.0];
         let axis = [0.0, 2.0, 0.0];
-        let a = canonical_axis_offset([1.25, -7.0, 3.5], axis, center, 0).unwrap();
-        let b = canonical_axis_offset([1.25, 42.0, 3.5], axis, center, 0).unwrap();
+        let a = canonical_axis_offset([1.25, -7.0, 3.5], axis, center, 0)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
+        let b = canonical_axis_offset([1.25, 42.0, 3.5], axis, center, 0)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
         assert_eq!(a, b);
         assert_eq!(a, [125_000, 0, 350_000]);
+        Ok(())
     }
 
     #[test]
-    fn axis_offset_rotates_with_solid_quarter_turn() {
+    fn axis_offset_rotates_with_solid_quarter_turn() -> anyhow::Result<()> {
         let center = [0.0, 0.0, 0.0];
         let axis = [0.0, 0.0, 1.0];
-        let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1).unwrap();
+        let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1)
+            .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
         assert_eq!(a, [-100_000, 200_000, 0]);
+        Ok(())
     }
 }

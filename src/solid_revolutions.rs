@@ -39,6 +39,27 @@ pub struct RecoveredSolidRevolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveredRadialSlotRevolution {
+    /// The axisymmetric host body reconstructed before the slot is applied.
+    pub base: RecoveredSolidRevolution,
+    /// Source planes that prove the slot: the two side walls followed by the
+    /// axis-containing back plane.
+    pub slot_face_ids: [u64; 3],
+    /// Unit radial direction from the revolution axis toward the slot opening.
+    pub slot_outward_direction: [f64; 3],
+    /// Unit in-plane direction across the slot width.
+    pub slot_side_direction: [f64; 3],
+    /// Half the distance between the two symmetric slot side planes.
+    pub slot_half_width_mm: f64,
+    /// Axial coordinate where the slot terminates inside the turned body.
+    pub slot_root_axial_mm: f64,
+    /// Axial coordinate of the source end through which the slot is open.
+    pub slot_open_end_axial_mm: f64,
+    /// Worst residual in the slot-plane symmetry/axis proof.
+    pub slot_max_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SolidSurfaceSignature {
     pub solid_id: u64,
     pub face_count: usize,
@@ -163,6 +184,13 @@ struct TopologyContext<'a> {
     index: &'a HashMap<u64, usize>,
 }
 
+#[derive(Clone, Copy)]
+struct ProfileSegmentContext<'ctx, 'data> {
+    topology: &'ctx TopologyContext<'data>,
+    source_tolerance_mm: f64,
+    angular_trim_faces: Option<&'ctx HashSet<usize>>,
+}
+
 fn source_tolerance_by_representation_item(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -246,53 +274,9 @@ fn uncertainty_measure_mm(
     }
     let value = parameter_number(parameter)?;
     let unit_id = entity_ref_value(unit)?;
-    let scale_mm = si_length_unit_scale_mm(unit_id, entities, index)?;
+    let scale_mm = crate::units::length_unit_scale_mm(unit_id, entities, index)?;
     let result = value * scale_mm;
     result.is_finite().then_some(result)
-}
-
-fn si_length_unit_scale_mm(
-    unit_id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<f64> {
-    let entity = entities.get(*index.get(&unit_id)?)?;
-    entity_record_named(entity, "LENGTH_UNIT")?;
-    let record = entity_record_named(entity, "SI_UNIT")?;
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let [prefix, Parameter::Enumeration(unit_name)] = params.as_slice() else {
-        return None;
-    };
-    if unit_name != "METRE" {
-        return None;
-    }
-
-    let metres = match prefix {
-        Parameter::NotProvided => 1.0,
-        Parameter::Enumeration(prefix) => match prefix.as_str() {
-            "EXA" => 1.0e18,
-            "PETA" => 1.0e15,
-            "TERA" => 1.0e12,
-            "GIGA" => 1.0e9,
-            "MEGA" => 1.0e6,
-            "KILO" => 1.0e3,
-            "HECTO" => 1.0e2,
-            "DECA" => 1.0e1,
-            "DECI" => 1.0e-1,
-            "CENTI" => 1.0e-2,
-            "MILLI" => 1.0e-3,
-            "MICRO" => 1.0e-6,
-            "NANO" => 1.0e-9,
-            "PICO" => 1.0e-12,
-            "FEMTO" => 1.0e-15,
-            "ATTO" => 1.0e-18,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    Some(metres * 1000.0)
 }
 
 fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a Record> {
@@ -307,7 +291,7 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
 fn parameter_number(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Typed { parameter, .. } => parameter_number(parameter),
         _ => None,
     }
@@ -413,6 +397,34 @@ pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSol
         }
     }
     out.sort_by_key(|candidate| candidate.solid_id);
+    out
+}
+
+pub fn detect_radial_slot_revolutions(
+    entities: &[EntityInstance],
+) -> Vec<RecoveredRadialSlotRevolution> {
+    let index = build_index(entities);
+    let source_tolerances = source_tolerance_by_representation_item(entities, &index);
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        let source_tolerance_mm = source_tolerances
+            .get(&solid_id)
+            .copied()
+            .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+        if let Some(candidate) =
+            detect_one_radial_slot(solid_id, entities, &index, source_tolerance_mm)
+        {
+            out.push(candidate);
+        }
+    }
+    out.sort_by_key(|candidate| candidate.base.solid_id);
     out
 }
 
@@ -549,6 +561,384 @@ fn detect_one_solid(
         radial_direction,
         max_residual_mm,
         source_tolerance_mm,
+    })
+}
+
+fn detect_one_radial_slot(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    source_tolerance_mm: f64,
+) -> Option<RecoveredRadialSlotRevolution> {
+    let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
+    let faces = face_ids
+        .iter()
+        .copied()
+        .map(|id| {
+            Some(FaceInfo {
+                surface: brep::surface_support(
+                    brep::face_surface(id, entities, index)?,
+                    entities,
+                    index,
+                ),
+                loops: brep::face_loops(id, entities, index)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        if face.loops.is_empty() {
+            return None;
+        }
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            edge_faces.entry(edge.edge_id).or_default().push(face_index);
+        }
+    }
+    if edge_faces.values().any(|attached| attached.len() != 2)
+        || !shell_faces_connected(faces.len(), &edge_faces)
+    {
+        return None;
+    }
+    let context = TopologyContext {
+        faces: &faces,
+        edge_faces: &edge_faces,
+        entities,
+        index,
+    };
+
+    let (axis_reference_origin_mm, axis_reference_direction) =
+        faces.iter().find_map(|face| match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => Some((cylinder.axis_origin_mm, cylinder.axis)),
+            SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
+            _ => None,
+        })?;
+    let axis_direction = canonical_axis(axis_reference_direction);
+    let axis_origin_mm =
+        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+
+    let mut radial_plane_indices = Vec::<usize>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => {
+                if !parallel(cylinder.axis, axis_direction)
+                    || axis_distance(cylinder.axis_origin_mm, axis_origin_mm, axis_direction)
+                        > GEOM_TOL_MM
+                {
+                    return None;
+                }
+            }
+            SurfaceSupport::Cone(cone) => {
+                if !parallel(cone.axis, axis_direction)
+                    || axis_distance(cone.reference_origin_mm, axis_origin_mm, axis_direction)
+                        > GEOM_TOL_MM
+                {
+                    return None;
+                }
+            }
+            SurfaceSupport::Plane(plane) => {
+                let normal = normalize(plane.normal)?;
+                let alignment = dot(normal, axis_direction).abs();
+                if 1.0 - alignment <= DIR_TOL {
+                    continue;
+                }
+                if alignment <= DIR_TOL {
+                    radial_plane_indices.push(face_index);
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    let [plane_a, plane_b, plane_c] = radial_plane_indices.as_slice() else {
+        return None;
+    };
+    let radial_plane_indices = [*plane_a, *plane_b, *plane_c];
+
+    let plane_axis_distance = |face_index: usize| -> Option<f64> {
+        let SurfaceSupport::Plane(plane) = faces.get(face_index)?.surface else {
+            return None;
+        };
+        let normal = normalize(plane.normal)?;
+        Some(dot(sub(axis_origin_mm, plane.origin_mm), normal).abs())
+    };
+    let on_axis = radial_plane_indices
+        .iter()
+        .copied()
+        .filter(|&face_index| plane_axis_distance(face_index).is_some_and(|d| d <= GEOM_TOL_MM))
+        .collect::<Vec<_>>();
+    let [back_face_index] = on_axis.as_slice() else {
+        return None;
+    };
+    let side_face_indices = radial_plane_indices
+        .iter()
+        .copied()
+        .filter(|face_index| face_index != back_face_index)
+        .collect::<Vec<_>>();
+    let [side_a, side_b] = side_face_indices.as_slice() else {
+        return None;
+    };
+
+    let SurfaceSupport::Plane(back_plane) = faces[*back_face_index].surface else {
+        return None;
+    };
+    let SurfaceSupport::Plane(side_plane_a) = faces[*side_a].surface else {
+        return None;
+    };
+    let SurfaceSupport::Plane(side_plane_b) = faces[*side_b].surface else {
+        return None;
+    };
+    let back_normal = canonical_axis(back_plane.normal);
+    let side_direction = canonical_axis(side_plane_a.normal);
+    if !parallel(side_plane_a.normal, side_plane_b.normal)
+        || dot(back_normal, side_direction).abs() > DIR_TOL
+        || dot(back_normal, axis_direction).abs() > DIR_TOL
+        || dot(side_direction, axis_direction).abs() > DIR_TOL
+    {
+        return None;
+    }
+
+    let side_offset_a = dot(sub(side_plane_a.origin_mm, axis_origin_mm), side_direction);
+    let side_offset_b = dot(sub(side_plane_b.origin_mm, axis_origin_mm), side_direction);
+    if !side_offset_a.is_finite()
+        || !side_offset_b.is_finite()
+        || side_offset_a * side_offset_b >= 0.0
+    {
+        return None;
+    }
+    let slot_half_width_mm = 0.5 * (side_offset_a.abs() + side_offset_b.abs());
+    let mut slot_max_residual_mm = plane_axis_distance(*back_face_index)?
+        .max((side_offset_a.abs() - side_offset_b.abs()).abs())
+        .max((side_offset_a + side_offset_b).abs());
+    if !slot_half_width_mm.is_finite()
+        || slot_half_width_mm <= GEOM_TOL_MM
+        || slot_max_residual_mm > source_tolerance_mm
+    {
+        return None;
+    }
+
+    let projected_range = |direction: [f64; 3]| -> Option<(f64, f64)> {
+        let mut min_value = f64::INFINITY;
+        let mut max_value = f64::NEG_INFINITY;
+        for &face_index in &[*side_a, *side_b] {
+            for edge in faces[face_index]
+                .loops
+                .iter()
+                .flat_map(|loop_| &loop_.edges)
+            {
+                for point in [edge.start_mm, edge.end_mm] {
+                    let radial = sub(
+                        sub(point, axis_origin_mm),
+                        mul(
+                            axis_direction,
+                            axial_coordinate(point, axis_origin_mm, axis_direction),
+                        ),
+                    );
+                    let value = dot(radial, direction);
+                    min_value = min_value.min(value);
+                    max_value = max_value.max(value);
+                }
+            }
+        }
+        (min_value.is_finite() && max_value.is_finite()).then_some((min_value, max_value))
+    };
+    let candidate_outward = back_normal;
+    let (candidate_min, candidate_max) = projected_range(candidate_outward)?;
+    let slot_outward_direction =
+        if candidate_min >= -source_tolerance_mm && candidate_max > GEOM_TOL_MM {
+            candidate_outward
+        } else if candidate_max <= source_tolerance_mm && candidate_min < -GEOM_TOL_MM {
+            mul(candidate_outward, -1.0)
+        } else {
+            return None;
+        };
+
+    let mut excluded_profile_faces = radial_plane_indices.into_iter().collect::<HashSet<_>>();
+    let angular_trim_faces = [*side_a, *side_b].into_iter().collect::<HashSet<_>>();
+
+    let mut slot_min_t = f64::INFINITY;
+    let mut slot_max_t = f64::NEG_INFINITY;
+    for &face_index in &[*side_a, *side_b] {
+        for edge in faces[face_index]
+            .loops
+            .iter()
+            .flat_map(|loop_| &loop_.edges)
+        {
+            for point in [edge.start_mm, edge.end_mm] {
+                let t = axial_coordinate(point, axis_origin_mm, axis_direction);
+                slot_min_t = slot_min_t.min(t);
+                slot_max_t = slot_max_t.max(t);
+            }
+        }
+    }
+    let mut solid_min_t = f64::INFINITY;
+    let mut solid_max_t = f64::NEG_INFINITY;
+    for face in &faces {
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            for point in [edge.start_mm, edge.end_mm] {
+                let t = axial_coordinate(point, axis_origin_mm, axis_direction);
+                solid_min_t = solid_min_t.min(t);
+                solid_max_t = solid_max_t.max(t);
+            }
+        }
+    }
+    if !slot_min_t.is_finite()
+        || !slot_max_t.is_finite()
+        || !solid_min_t.is_finite()
+        || !solid_max_t.is_finite()
+        || slot_max_t - slot_min_t <= GEOM_TOL_MM
+    {
+        return None;
+    }
+    let matches_min = (slot_min_t - solid_min_t).abs() <= source_tolerance_mm;
+    let matches_max = (slot_max_t - solid_max_t).abs() <= source_tolerance_mm;
+    let (slot_root_axial_mm, slot_open_end_axial_mm) = match (matches_min, matches_max) {
+        (true, false) => (slot_max_t, slot_min_t),
+        (false, true) => (slot_min_t, slot_max_t),
+        _ => return None,
+    };
+
+    let shares_edge = |first: usize, second: usize| {
+        edge_faces
+            .values()
+            .any(|attached| attached.contains(&first) && attached.contains(&second))
+    };
+    let root_plane_faces = faces
+        .iter()
+        .enumerate()
+        .filter_map(|(face_index, face)| {
+            let SurfaceSupport::Plane(plane) = face.surface else {
+                return None;
+            };
+            (parallel(plane.normal, axis_direction)
+                && (axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction)
+                    - slot_root_axial_mm)
+                    .abs()
+                    <= source_tolerance_mm
+                && shares_edge(face_index, *side_a)
+                && shares_edge(face_index, *side_b))
+            .then_some(face_index)
+        })
+        .collect::<Vec<_>>();
+    let [root_plane_face] = root_plane_faces.as_slice() else {
+        return None;
+    };
+    // This axis-normal plane is the closed end of the slot cut, not a
+    // boundary of the axisymmetric host that existed before the cut.
+    excluded_profile_faces.insert(*root_plane_face);
+
+    let mut max_residual_mm = 0.0_f64;
+    let mut segments = Vec::<Segment2>::new();
+    let mut base_face_ids = Vec::<u64>::new();
+    let segment_context = ProfileSegmentContext {
+        topology: &context,
+        source_tolerance_mm,
+        angular_trim_faces: Some(&angular_trim_faces),
+    };
+    for (face_index, face) in faces.iter().enumerate() {
+        if excluded_profile_faces.contains(&face_index) {
+            continue;
+        }
+        let segment_result = match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => cylinder_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                cylinder,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            ),
+            SurfaceSupport::Cone(cone) => cone_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                cone,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            ),
+            SurfaceSupport::Plane(plane) => plane_profile_segment_with_angular_trims(
+                face_index,
+                face,
+                plane,
+                axis_origin_mm,
+                axis_direction,
+                segment_context,
+            ),
+            _ => return None,
+        };
+        let Some((segment, residual)) = segment_result else {
+            #[cfg(test)]
+            eprintln!(
+                "radial-slot base profile rejected face #{} ({}) at index {face_index}",
+                face_ids[face_index],
+                surface_kind(&face.surface)
+            );
+            return None;
+        };
+        max_residual_mm = max_residual_mm.max(residual);
+        if max_residual_mm > source_tolerance_mm {
+            #[cfg(test)]
+            eprintln!(
+                "radial-slot base profile residual {:.12e} exceeds source tolerance {:.12e} after face #{}",
+                max_residual_mm, source_tolerance_mm, face_ids[face_index]
+            );
+            return None;
+        }
+        push_unique_segment(&mut segments, segment);
+        base_face_ids.push(face_ids[face_index]);
+    }
+    let Some(profile_points_mm) = closed_profile_from_segments(segments.clone()) else {
+        #[cfg(test)]
+        eprintln!("radial-slot base profile failed closure: {segments:?}");
+        return None;
+    };
+    let profile_curves = line_profile_curves(&profile_points_mm);
+    let Some(radial_direction) = radial_basis(axis_direction) else {
+        #[cfg(test)]
+        eprintln!("radial-slot base profile failed radial basis for axis {axis_direction:?}");
+        return None;
+    };
+    let base = RecoveredSolidRevolution {
+        solid_id,
+        face_ids: base_face_ids,
+        profile_curves,
+        axis_origin_mm,
+        axis_direction,
+        radial_direction,
+        max_residual_mm,
+        source_tolerance_mm,
+    };
+
+    slot_max_residual_mm = slot_max_residual_mm.max(
+        (slot_min_t - solid_min_t)
+            .abs()
+            .min((slot_max_t - solid_max_t).abs()),
+    );
+    if slot_max_residual_mm > source_tolerance_mm {
+        #[cfg(test)]
+        eprintln!(
+            "radial-slot slot residual {:.12e} exceeds source tolerance {:.12e}",
+            slot_max_residual_mm, source_tolerance_mm
+        );
+        return None;
+    }
+    let mut side_face_ids = [face_ids[*side_a], face_ids[*side_b]];
+    side_face_ids.sort_unstable();
+
+    Some(RecoveredRadialSlotRevolution {
+        base,
+        slot_face_ids: [
+            side_face_ids[0],
+            side_face_ids[1],
+            face_ids[*back_face_index],
+        ],
+        slot_outward_direction,
+        slot_side_direction: side_direction,
+        slot_half_width_mm,
+        slot_root_axial_mm,
+        slot_open_end_axial_mm,
+        slot_max_residual_mm,
     })
 }
 
@@ -1807,6 +2197,33 @@ fn cylinder_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    cylinder_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        cylinder,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn cylinder_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    cylinder: brep::CylinderSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.len() != 1
         || !parallel(cylinder.axis, axis)
         || axis_distance(cylinder.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
@@ -1831,6 +2248,13 @@ fn cylinder_profile_segment(
             source_support_residual =
                 source_support_residual.max((radius - cylinder.radius_mm).abs());
             raw_t.push(t);
+        }
+
+        if angular_trim_faces.is_some_and(|trim_faces| {
+            unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+        }) {
+            continue;
         }
 
         match &edge.support {
@@ -1945,6 +2369,53 @@ fn cone_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    cone_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        cone,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn cone_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    cone: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    cone_profile_segment_with_angular_trims_inner(
+        face_index,
+        face,
+        cone,
+        axis_origin,
+        axis,
+        segment_context,
+        true,
+    )
+}
+
+fn cone_profile_segment_with_angular_trims_inner(
+    face_index: usize,
+    face: &FaceInfo,
+    cone: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+    allow_sibling_fallback: bool,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.len() != 1
         || !parallel(cone.axis, axis)
         || axis_distance(cone.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
@@ -1976,6 +2447,10 @@ fn cone_profile_segment(
     let mut source_support_residual = axis_distance(cone.reference_origin_mm, axis_origin, axis);
 
     for edge in &face.loops[0].edges {
+        let angular_trim = angular_trim_faces.is_some_and(|trim_faces| {
+            unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+        });
         for (vertex_id, point) in [
             (edge.start_vertex, edge.start_mm),
             (edge.end_vertex, edge.end_mm),
@@ -1995,12 +2470,19 @@ fn cone_profile_segment(
                 source_support_residual.max((sample[0] - source_radius).abs());
             raw_samples.push(sample);
 
-            if matches!(edge.support, CurveSupport::Line(_)) && sample[0] <= GEOM_TOL_MM {
+            if !angular_trim
+                && matches!(edge.support, CurveSupport::Line(_))
+                && sample[0] <= GEOM_TOL_MM
+            {
                 let entry = apex_vertices.entry(vertex_id).or_insert((0, sample));
                 entry.0 += 1;
                 entry.1[0] = entry.1[0].min(sample[0]);
                 entry.1[1] = sample[1];
             }
+        }
+
+        if angular_trim {
+            continue;
         }
 
         match &edge.support {
@@ -2127,13 +2609,54 @@ fn cone_profile_segment(
     match boundary_samples.len() {
         0 => return None,
         1 => {
-            let [apex] = apexes.as_slice() else {
-                return None;
-            };
-            if (apex[1] - boundary_samples[0][1]).abs() <= GEOM_TOL_MM {
+            if let [apex] = apexes.as_slice() {
+                if (apex[1] - boundary_samples[0][1]).abs() <= GEOM_TOL_MM {
+                    return None;
+                }
+                push_unique_point(&mut boundary_samples, *apex);
+            } else {
+                if !allow_sibling_fallback {
+                    return None;
+                }
+                for (sibling_index, sibling_face) in context.faces.iter().enumerate() {
+                    if sibling_index == face_index {
+                        continue;
+                    }
+                    let SurfaceSupport::Cone(sibling_cone) = sibling_face.surface else {
+                        continue;
+                    };
+                    if !same_cone_meridian_support(cone, sibling_cone, axis_origin, axis) {
+                        continue;
+                    }
+                    let Some((sibling_segment, sibling_residual)) =
+                        cone_profile_segment_with_angular_trims_inner(
+                            sibling_index,
+                            sibling_face,
+                            sibling_cone,
+                            axis_origin,
+                            axis,
+                            segment_context,
+                            false,
+                        )
+                    else {
+                        continue;
+                    };
+                    let coverage_residual = raw_samples
+                        .iter()
+                        .copied()
+                        .map(|sample| profile_point_segment_distance(sample, sibling_segment))
+                        .fold(0.0_f64, f64::max);
+                    if coverage_residual <= source_tolerance_mm {
+                        return Some((
+                            sibling_segment,
+                            source_support_residual
+                                .max(sibling_residual)
+                                .max(coverage_residual),
+                        ));
+                    }
+                }
                 return None;
             }
-            push_unique_point(&mut boundary_samples, *apex);
         }
         _ => {
             if !apexes.is_empty() {
@@ -2187,6 +2710,59 @@ fn cone_profile_segment(
         },
         profile_residual.max(source_support_residual),
     ))
+}
+
+fn same_cone_meridian_support(
+    first: brep::ConeSupport,
+    second: brep::ConeSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+) -> bool {
+    if axis_distance(first.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || axis_distance(second.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+    {
+        return false;
+    }
+    let Some(first_axis) = normalize(first.axis) else {
+        return false;
+    };
+    let Some(second_axis) = normalize(second.axis) else {
+        return false;
+    };
+    let first_alignment = dot(first_axis, axis);
+    let second_alignment = dot(second_axis, axis);
+    if 1.0 - first_alignment.abs() > DIR_TOL || 1.0 - second_alignment.abs() > DIR_TOL {
+        return false;
+    }
+
+    let first_t = axial_coordinate(first.reference_origin_mm, axis_origin, axis);
+    let second_t = axial_coordinate(second.reference_origin_mm, axis_origin, axis);
+    let first_slope = first_alignment.signum() * first.semi_angle_rad.tan();
+    let second_slope = second_alignment.signum() * second.semi_angle_rad.tan();
+    let first_intercept = first.reference_radius_mm - first_slope * first_t;
+    let second_intercept = second.reference_radius_mm - second_slope * second_t;
+    first_slope.is_finite()
+        && second_slope.is_finite()
+        && first_intercept.is_finite()
+        && second_intercept.is_finite()
+        && (first_slope - second_slope).abs() <= DIR_TOL
+        && (first_intercept - second_intercept).abs() <= GEOM_TOL_MM
+}
+
+fn profile_point_segment_distance(point: [f64; 2], segment: Segment2) -> f64 {
+    let delta = sub2(segment.b, segment.a);
+    let denominator = delta[0].mul_add(delta[0], delta[1] * delta[1]);
+    if !denominator.is_finite() || denominator <= GEOM_TOL_MM.powi(2) {
+        return distance2(point, segment.a);
+    }
+    let relative = sub2(point, segment.a);
+    let fraction = relative[0].mul_add(delta[0], relative[1] * delta[1]) / denominator;
+    let fraction = fraction.clamp(0.0, 1.0);
+    let projected = [
+        delta[0].mul_add(fraction, segment.a[0]),
+        delta[1].mul_add(fraction, segment.a[1]),
+    ];
+    distance2(point, projected)
 }
 
 fn revolution_line_profile_segment(
@@ -2367,6 +2943,33 @@ fn plane_profile_segment(
     context: &TopologyContext<'_>,
     source_tolerance_mm: f64,
 ) -> Option<(Segment2, f64)> {
+    plane_profile_segment_with_angular_trims(
+        face_index,
+        face,
+        plane,
+        axis_origin,
+        axis,
+        ProfileSegmentContext {
+            topology: context,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        },
+    )
+}
+
+fn plane_profile_segment_with_angular_trims(
+    face_index: usize,
+    face: &FaceInfo,
+    plane: brep::PlaneSupport,
+    axis_origin: [f64; 3],
+    axis: [f64; 3],
+    segment_context: ProfileSegmentContext<'_, '_>,
+) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        source_tolerance_mm,
+        angular_trim_faces,
+    } = segment_context;
     if face.loops.is_empty() || face.loops.len() > 2 || !parallel(plane.normal, axis) {
         return None;
     }
@@ -2399,6 +3002,13 @@ fn plane_profile_segment(
                 source_support_residual = source_support_residual.max(axial_residual);
                 raw_min_r = raw_min_r.min(radius);
                 raw_max_r = raw_max_r.max(radius);
+            }
+
+            if angular_trim_faces.is_some_and(|trim_faces| {
+                unique_neighbor_face(face_index, edge.edge_id, context.edge_faces)
+                    .is_some_and(|neighbor| trim_faces.contains(&neighbor))
+            }) {
+                continue;
             }
 
             match &edge.support {
@@ -2445,12 +3055,18 @@ fn plane_profile_segment(
                     )
                     .abs();
                     geometry_residual = geometry_residual.max(line_axis_distance);
-                    if line_axis_distance <= GEOM_TOL_MM
-                        && [edge.start_mm, edge.end_mm].iter().any(|point| {
-                            point_axis_distance(*point, axis_origin, axis) <= GEOM_TOL_MM
-                        })
-                    {
-                        touches_axis = true;
+                    if line_axis_distance <= GEOM_TOL_MM {
+                        // The finite edge may cross the revolution axis between
+                        // two off-axis vertices.  Testing only the endpoints
+                        // misses exactly that valid radial-boundary topology.
+                        let line_t = axial_coordinate(line.origin_mm, axis_origin, axis);
+                        let axis_point = add(axis_origin, mul(axis, line_t));
+                        let axis_parameter = dot(sub(axis_point, line.origin_mm), direction);
+                        let start_parameter = dot(sub(edge.start_mm, line.origin_mm), direction);
+                        let end_parameter = dot(sub(edge.end_mm, line.origin_mm), direction);
+                        if between(axis_parameter, start_parameter, end_parameter) {
+                            touches_axis = true;
+                        }
                     }
                 }
                 CurveSupport::BSpline(_) => {
@@ -2474,15 +3090,19 @@ fn plane_profile_segment(
                             cylinder.radius_mm
                         }
                         SurfaceSupport::Cone(cone) => {
-                            let (segment, cone_source_residual) = cone_profile_segment(
-                                neighbor,
-                                neighbor_face,
-                                cone,
-                                axis_origin,
-                                axis,
-                                context,
-                                source_tolerance_mm,
-                            )?;
+                            let (segment, cone_source_residual) =
+                                cone_profile_segment_with_angular_trims(
+                                    neighbor,
+                                    neighbor_face,
+                                    cone,
+                                    axis_origin,
+                                    axis,
+                                    ProfileSegmentContext {
+                                        topology: context,
+                                        source_tolerance_mm,
+                                        angular_trim_faces,
+                                    },
+                                )?;
                             source_support_residual =
                                 source_support_residual.max(cone_source_residual);
                             segment_radius_at_axial(segment, t)?
@@ -3532,10 +4152,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_representation_length_uncertainty_with_hard_cap() {
-        fn tolerance_from(text: &str) -> Option<f64> {
-            let exchange = ruststep::parser::parse(text).unwrap();
-            let entities = &exchange.data.first().unwrap().entities;
+    fn reads_representation_length_uncertainty_with_hard_cap() -> anyhow::Result<()> {
+        fn tolerance_from(text: &str) -> anyhow::Result<Option<f64>> {
+            let exchange = ruststep::parser::parse(text)?;
+            let entities = &exchange
+                .data
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("parsed exchange has no DATA section"))?
+                .entities;
             let index = build_index(entities);
             let solid_id = entities
                 .iter()
@@ -3543,37 +4167,49 @@ mod tests {
                     simple_record(entity).is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
                 })
                 .map(entity_id)
-                .unwrap();
-            source_tolerance_by_representation_item(entities, &index)
+                .ok_or_else(|| anyhow::anyhow!("fixture has no MANIFOLD_SOLID_BREP"))?;
+            Ok(source_tolerance_by_representation_item(entities, &index)
                 .get(&solid_id)
-                .copied()
+                .copied())
         }
 
         let source = std::str::from_utf8(include_bytes!(
             "../validation/fixtures/native_conical_frustum.step"
-        ))
-        .unwrap();
-        assert_eq!(tolerance_from(source), Some(GEOM_TOL_MM));
+        ))?;
+        assert_eq!(tolerance_from(source)?, Some(GEOM_TOL_MM));
 
         let widened = source.replacen("LENGTH_MEASURE(1.E-07)", "LENGTH_MEASURE(5.E-06)", 1);
-        assert!((tolerance_from(&widened).unwrap() - 5.0e-6).abs() <= 1.0e-15);
+        assert!(
+            (tolerance_from(&widened)?
+                .ok_or_else(|| anyhow::anyhow!("widened uncertainty missing"))?
+                - 5.0e-6)
+                .abs()
+                <= 1.0e-15
+        );
 
         let excessive = source.replacen("LENGTH_MEASURE(1.E-07)", "LENGTH_MEASURE(2.E-05)", 1);
-        assert_eq!(tolerance_from(&excessive), None);
+        assert_eq!(tolerance_from(&excessive)?, None);
 
         let centimetres = source.replacen(
             "LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.)",
             "LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.CENTI.,.METRE.)",
             1,
         );
-        assert!((tolerance_from(&centimetres).unwrap() - 1.0e-6).abs() <= 1.0e-15);
+        assert!(
+            (tolerance_from(&centimetres)?
+                .ok_or_else(|| anyhow::anyhow!("centimetre uncertainty missing"))?
+                - 1.0e-6)
+                .abs()
+                <= 1.0e-15
+        );
 
         let ambiguous = source.replacen(
             "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#117))",
             "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#117,#117))",
             1,
         );
-        assert_eq!(tolerance_from(&ambiguous), None);
+        assert_eq!(tolerance_from(&ambiguous)?, None);
+        Ok(())
     }
 
     fn test_circle_edge(
@@ -3604,6 +4240,10 @@ mod tests {
     }
 
     fn test_line_edge(edge_id: u64, start_mm: [f64; 3], end_mm: [f64; 3]) -> brep::OrientedEdgeUse {
+        let delta = sub(end_mm, start_mm);
+        let length = norm(delta);
+        assert!(length > 1.0e-12, "test edge must have nonzero length");
+        let direction = mul(delta, 1.0 / length);
         brep::OrientedEdgeUse {
             oriented_edge_id: edge_id + 10_000,
             edge_id,
@@ -3616,7 +4256,7 @@ mod tests {
             end_mm,
             support: CurveSupport::Line(brep::LineSupport {
                 origin_mm: start_mm,
-                direction: normalize(sub(end_mm, start_mm)).unwrap(),
+                direction,
             }),
         }
     }
@@ -3635,7 +4275,7 @@ mod tests {
     }
 
     #[test]
-    fn plane_profile_accepts_bounded_noisy_circle_vertices() {
+    fn plane_profile_accepts_bounded_noisy_circle_vertices() -> anyhow::Result<()> {
         let make_plane = |noise: f64| {
             let positive = [1.0, 0.0, noise];
             let negative = [-1.0, 0.0, 0.0];
@@ -3689,7 +4329,7 @@ mod tests {
             &context,
             REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
         assert_eq!(segment.a, [0.0, 0.0]);
         assert_eq!(segment.b, [1.0, 0.0]);
         assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -3718,10 +4358,88 @@ mod tests {
             )
             .is_none()
         );
+        Ok(())
     }
 
     #[test]
-    fn cylinder_profile_accepts_bounded_noisy_trim_vertices() {
+    fn plane_profile_detects_axis_crossing_inside_radial_edge() -> anyhow::Result<()> {
+        let make_face = |line_start: [f64; 3], line_end: [f64; 3]| {
+            test_face(
+                SurfaceSupport::Plane(brep::PlaneSupport {
+                    origin_mm: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    max_residual_mm: 0.0,
+                }),
+                vec![
+                    test_circle_edge(
+                        820,
+                        [1.0, 0.0, 0.0],
+                        [-1.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                        1.0,
+                    ),
+                    test_line_edge(821, line_start, line_end),
+                ],
+            )
+        };
+
+        let crossing = make_face([0.0, -0.25, 0.0], [0.0, 0.25, 0.0]);
+        let faces = vec![crossing.clone()];
+        let edge_faces = edge_face_map(&faces);
+        let entities = Vec::new();
+        let index = HashMap::new();
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        let (segment, _) = plane_profile_segment(
+            0,
+            &crossing,
+            match crossing.surface {
+                SurfaceSupport::Plane(plane) => plane,
+                _ => unreachable!(),
+            },
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            &context,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+        )
+        .ok_or_else(|| anyhow::anyhow!("axis-crossing radial edge should prove a disk"))?;
+        assert_eq!(segment.a, [0.0, 0.0]);
+        assert_eq!(segment.b, [1.0, 0.0]);
+
+        let one_sided = make_face([0.0, 0.25, 0.0], [0.0, 0.5, 0.0]);
+        let faces = vec![one_sided.clone()];
+        let edge_faces = edge_face_map(&faces);
+        let context = TopologyContext {
+            faces: &faces,
+            edge_faces: &edge_faces,
+            entities: &entities,
+            index: &index,
+        };
+        assert!(
+            plane_profile_segment(
+                0,
+                &one_sided,
+                match one_sided.surface {
+                    SurfaceSupport::Plane(plane) => plane,
+                    _ => unreachable!(),
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                &context,
+                REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cylinder_profile_accepts_bounded_noisy_trim_vertices() -> anyhow::Result<()> {
         let make_cylinder = |noise: f64| {
             let bottom_pos = [1.0 + noise, 0.0, 0.0];
             let bottom_neg = [-1.0, 0.0, 0.0];
@@ -3774,7 +4492,7 @@ mod tests {
             &context,
             REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
         assert_eq!(segment.a, [1.0, 0.0]);
         assert_eq!(segment.b, [1.0, 1.0]);
         assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -3802,10 +4520,11 @@ mod tests {
             )
             .is_none()
         );
+        Ok(())
     }
 
     #[test]
-    fn cone_profile_accepts_proven_apex_and_bounded_source_noise() {
+    fn cone_profile_accepts_proven_apex_and_bounded_source_noise() -> anyhow::Result<()> {
         let apex = [0.0, 0.0, 0.0];
         let base_pos = [1.0, 0.0, 1.0];
         let base_neg = [-1.0, 0.0, 1.0];
@@ -3856,7 +4575,7 @@ mod tests {
             &context,
             REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
         assert_eq!(segment.a, [0.0, 0.0]);
         assert_eq!(segment.b, [1.0, 1.0]);
         assert!(residual <= 1.0e-12);
@@ -3917,7 +4636,7 @@ mod tests {
             &context,
             REVOLUTION_SOURCE_SUPPORT_TOL_MM,
         )
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
         assert_eq!(segment.a, [1.0, 0.0]);
         assert_eq!(segment.b, [2.0, 1.0]);
         assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -3985,10 +4704,11 @@ mod tests {
             )
             .is_some()
         );
+        Ok(())
     }
 
     #[test]
-    fn cone_profile_uses_neighbor_constraint_plus_repeated_trim_circle() {
+    fn cone_profile_uses_neighbor_constraint_plus_repeated_trim_circle() -> anyhow::Result<()> {
         let bottom_pos = [1.5, 0.0, 0.5000005];
         let bottom_neg = [-1.5, 0.0, 0.5000005];
         let top_pos = [2.0000004, 0.0, 1.0000004];
@@ -4081,7 +4801,7 @@ mod tests {
             &context,
             1.0e-5,
         )
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
 
         // The cylinder constrains radius while preserving the repeated trim-circle
         // axial coordinate; the plane constrains axial position while preserving
@@ -4091,6 +4811,7 @@ mod tests {
         assert_eq!(segment.b, [2.0000004, 1.0]);
         assert!(residual > REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         assert!(residual < 1.0e-5);
+        Ok(())
     }
 
     fn split_hemisphere_faces(cylinder_radius_mm: f64) -> Vec<FaceInfo> {
@@ -4204,7 +4925,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_split_hemispherical_end_topology() {
+    fn recovers_split_hemispherical_end_topology() -> anyhow::Result<()> {
         let faces = split_hemisphere_faces(1.0);
         let edge_faces = edge_face_map(&faces);
         let entities = Vec::new();
@@ -4215,7 +4936,8 @@ mod tests {
             entities: &entities,
             index: &index,
         };
-        let recovered = detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &faces, &context).unwrap();
+        let recovered = detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &faces, &context)
+            .ok_or_else(|| anyhow::anyhow!("expected hemispherical recovery"))?;
 
         assert_eq!(recovered.profile_curves.len(), 4);
         assert!(recovered.max_residual_mm <= 1.0e-12);
@@ -4252,12 +4974,11 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered)?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
 
         let tampered = split_hemisphere_faces(1.01);
@@ -4269,10 +4990,11 @@ mod tests {
             index: &index,
         };
         assert!(detect_hemispherical_end(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none());
+        Ok(())
     }
 
     #[test]
-    fn mixed_curved_graph_recovers_split_sphere_arc() {
+    fn mixed_curved_graph_recovers_split_sphere_arc() -> anyhow::Result<()> {
         let faces = split_hemisphere_faces(1.0);
         let edge_faces = edge_face_map(&faces);
         let entities = Vec::new();
@@ -4283,8 +5005,8 @@ mod tests {
             entities: &entities,
             index: &index,
         };
-        let recovered =
-            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5], &faces, &context).unwrap();
+        let recovered = detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5], &faces, &context)
+            .ok_or_else(|| anyhow::anyhow!("expected mixed-curved recovery"))?;
         assert_eq!(recovered.profile_curves.len(), 4);
         assert!(recovered.profile_curves.iter().any(|curve| matches!(
             curve,
@@ -4312,6 +5034,7 @@ mod tests {
         assert!(
             detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5], &tampered, &context).is_none()
         );
+        Ok(())
     }
 
     fn quarter_fillet_profile() -> Vec<RecoveredProfileCurve> {
@@ -4347,7 +5070,7 @@ mod tests {
     }
 
     #[test]
-    fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() {
+    fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() -> anyhow::Result<()> {
         let profile = quarter_fillet_profile();
         let scrambled = vec![
             profile[2].reversed(),
@@ -4356,7 +5079,8 @@ mod tests {
             profile[3].reversed(),
             profile[0].clone(),
         ];
-        let ordered = closed_profile_from_curves(scrambled).unwrap();
+        let ordered = closed_profile_from_curves(scrambled)
+            .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
         assert_eq!(ordered.len(), 5);
         assert!(matches!(
             &ordered[2],
@@ -4380,10 +5104,11 @@ mod tests {
             &profile[2],
             false
         ));
+        Ok(())
     }
 
     #[test]
-    fn orders_two_arc_profile_and_rejects_arc_crossings() {
+    fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         let profile = vec![
             RecoveredProfileCurve::Line {
                 source_edge_ids: Vec::new(),
@@ -4428,7 +5153,8 @@ mod tests {
             profile[4].clone(),
             profile[1].clone(),
         ];
-        let ordered = closed_profile_from_curves(scrambled).unwrap();
+        let ordered = closed_profile_from_curves(scrambled)
+            .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
         assert_eq!(ordered.len(), 6);
         assert_eq!(
             ordered
@@ -4498,6 +5224,7 @@ mod tests {
             &coincident_overlap,
             true
         ));
+        Ok(())
     }
 
     fn split_quarter_torus_faces(
@@ -4645,7 +5372,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_split_quarter_torus_fillet_topology() {
+    fn recovers_split_quarter_torus_fillet_topology() -> anyhow::Result<()> {
         let faces = split_quarter_torus_faces(0.9, 0.1);
         let edge_faces = edge_face_map(&faces);
         let entities = Vec::new();
@@ -4656,8 +5383,8 @@ mod tests {
             entities: &entities,
             index: &index,
         };
-        let recovered =
-            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &faces, &context).unwrap();
+        let recovered = detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &faces, &context)
+            .ok_or_else(|| anyhow::anyhow!("expected torus-fillet recovery"))?;
         assert_eq!(recovered.profile_curves.len(), 5);
         assert!(recovered.profile_curves.iter().any(|curve| matches!(
             curve,
@@ -4679,8 +5406,8 @@ mod tests {
             entities: &entities,
             index: &index,
         };
-        let recovered =
-            detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context).unwrap();
+        let recovered = detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &spindle, &context)
+            .ok_or_else(|| anyhow::anyhow!("expected spindle-torus recovery"))?;
         assert!(recovered.profile_curves.iter().any(|curve| matches!(
             curve,
             RecoveredProfileCurve::CircleArc {
@@ -4699,7 +5426,7 @@ mod tests {
         let mut tampered = split_quarter_torus_faces(0.9, 0.1);
         for face in tampered.iter_mut().take(2) {
             let SurfaceSupport::Torus(mut torus) = face.surface else {
-                panic!("expected torus test face");
+                anyhow::bail!("expected torus test face");
             };
             torus.minor_radius_mm = 0.11;
             face.surface = SurfaceSupport::Torus(torus);
@@ -4714,17 +5441,19 @@ mod tests {
         assert!(
             detect_mixed_curved_revolution(99, &[1, 2, 3, 4, 5, 6], &tampered, &context).is_none()
         );
+        Ok(())
     }
 
     #[test]
-    fn solid_surface_signature_reports_native_spherical_cap() {
+    fn solid_surface_signature_reports_native_spherical_cap() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_spherical_cap.step");
-        let signatures = crate::detect_solid_surface_signatures_bytes(bytes).unwrap();
+        let signatures = crate::detect_solid_surface_signatures_bytes(bytes)?;
         assert_eq!(signatures.len(), 1);
         assert_eq!(signatures[0].face_count, 2);
         assert_eq!(signatures[0].support_counts.get("sphere"), Some(&1));
         assert_eq!(signatures[0].support_counts.get("plane"), Some(&1));
         assert!(signatures[0].closed_two_manifold);
+        Ok(())
     }
 
     #[test]
@@ -4742,7 +5471,7 @@ mod tests {
     }
 
     #[test]
-    fn closes_axis_touching_step_profile() {
+    fn closes_axis_touching_step_profile() -> anyhow::Result<()> {
         let profile = closed_profile_from_segments(vec![
             Segment2 {
                 a: [0.0, 0.0],
@@ -4757,15 +5486,16 @@ mod tests {
                 b: [2.0, 3.0],
             },
         ])
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
         assert_eq!(profile.len(), 4);
         assert!(profile.iter().any(|point| *point == [0.0, 0.0]));
         assert!(profile.iter().any(|point| *point == [0.0, 3.0]));
         assert!(signed_area(&profile) > 0.0);
+        Ok(())
     }
 
     #[test]
-    fn closes_sloped_frustum_profile() {
+    fn closes_sloped_frustum_profile() -> anyhow::Result<()> {
         let profile = closed_profile_from_segments(vec![
             Segment2 {
                 a: [0.0, -1.0],
@@ -4780,11 +5510,12 @@ mod tests {
                 b: [1.0, 1.0],
             },
         ])
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
         assert_eq!(profile.len(), 4);
         assert!(profile.iter().any(|point| *point == [2.0, -1.0]));
         assert!(profile.iter().any(|point| *point == [1.0, 1.0]));
         assert!(signed_area(&profile) > 0.0);
+        Ok(())
     }
 
     #[test]
@@ -4804,12 +5535,14 @@ mod tests {
     }
 
     #[test]
-    fn recovers_native_conical_frustum_fixture() {
+    fn recovers_native_conical_frustum_fixture() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_conical_frustum.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].polygon_points().unwrap(),
+            recovered[0]
+                .polygon_points()
+                .ok_or_else(|| anyhow::anyhow!("expected polygon profile"))?,
             vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -4824,7 +5557,7 @@ mod tests {
             1,
         );
         let recovered_with_declared_uncertainty =
-            crate::detect_solid_revolutions_bytes(declared_uncertainty.as_bytes()).unwrap();
+            crate::detect_solid_revolutions_bytes(declared_uncertainty.as_bytes())?;
         assert_eq!(recovered_with_declared_uncertainty.len(), 1);
         assert_eq!(
             recovered_with_declared_uncertainty[0].source_tolerance_mm,
@@ -4837,7 +5570,7 @@ mod tests {
             1,
         );
         let recovered_with_oversized_uncertainty =
-            crate::detect_solid_revolutions_bytes(oversized_uncertainty.as_bytes()).unwrap();
+            crate::detect_solid_revolutions_bytes(oversized_uncertainty.as_bytes())?;
         assert_eq!(recovered_with_oversized_uncertainty.len(), 1);
         assert_eq!(
             recovered_with_oversized_uncertainty[0].source_tolerance_mm,
@@ -4849,31 +5582,29 @@ mod tests {
             "CONICAL_SURFACE('',#32,2.25,0.463647609001)",
             1,
         );
-        assert!(
-            crate::detect_solid_revolutions_bytes(tampered.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::detect_solid_revolutions_bytes(tampered.as_bytes())?.is_empty());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn recovers_native_hollow_conical_frustum_fixture() {
+    fn recovers_native_hollow_conical_frustum_fixture() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_hollow_conical_frustum.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].polygon_points().unwrap(),
+            recovered[0]
+                .polygon_points()
+                .ok_or_else(|| anyhow::anyhow!("expected polygon profile"))?,
             vec![[0.5, 2.0], [1.0, 0.0], [3.0, 0.0], [2.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -4881,23 +5612,25 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn recovers_native_line_surface_of_revolution_fixture() {
+    fn recovers_native_line_surface_of_revolution_fixture() -> anyhow::Result<()> {
         let bytes =
             include_bytes!("../validation/fixtures/native_line_surface_of_revolution_frustum.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            recovered[0].polygon_points().unwrap(),
+            recovered[0]
+                .polygon_points()
+                .ok_or_else(|| anyhow::anyhow!("expected polygon profile"))?,
             vec![[0.0, 0.0], [2.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
         assert!(recovered[0].max_residual_mm < 1.0e-9);
@@ -4907,27 +5640,23 @@ mod tests {
             "CARTESIAN_POINT('',(2.,0.25,0.))",
             1,
         );
-        assert!(
-            crate::detect_solid_revolutions_bytes(skewed.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::detect_solid_revolutions_bytes(skewed.as_bytes())?.is_empty());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         }
+        Ok(())
     }
 
     #[test]
-    fn recovers_native_spherical_cap_fixture() {
+    fn recovers_native_spherical_cap_fixture() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_spherical_cap.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].face_ids.len(), 2);
         assert_eq!(recovered[0].profile_curves.len(), 3);
@@ -4938,7 +5667,7 @@ mod tests {
             ..
         } = &recovered[0].profile_curves[0]
         else {
-            panic!("expected planar radial segment");
+            anyhow::bail!("expected planar radial segment");
         };
         assert!(plane_axis[0].abs() < 1.0e-12);
         assert!((plane_axis[1] - 0.073).abs() < 1.0e-12);
@@ -4953,7 +5682,7 @@ mod tests {
             ..
         } = &recovered[0].profile_curves[1]
         else {
-            panic!("expected spherical meridian arc");
+            anyhow::bail!("expected spherical meridian arc");
         };
         assert!(center_mm[0].abs() < 1.0e-12);
         assert!(center_mm[1].abs() < 1.0e-12);
@@ -4967,7 +5696,7 @@ mod tests {
             ..
         } = &recovered[0].profile_curves[2]
         else {
-            panic!("expected axis closure");
+            anyhow::bail!("expected axis closure");
         };
         assert!(pole[0].abs() < 1.0e-12);
         assert!((pole[1] + 0.13).abs() < 1.0e-12);
@@ -4979,39 +5708,35 @@ mod tests {
             "CIRCLE('',#26,0.117568582774)",
             1,
         );
-        assert!(
-            crate::detect_solid_revolutions_bytes(malformed.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::detect_solid_revolutions_bytes(malformed.as_bytes())?.is_empty());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn recovers_positive_spherical_cap_fixture() {
+    fn recovers_positive_spherical_cap_fixture() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_spherical_cap_positive.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].profile_curves.len(), 3);
         let RecoveredProfileCurve::CircleArc { end_angle_rad, .. } =
             &recovered[0].profile_curves[1]
         else {
-            panic!("expected spherical meridian arc");
+            anyhow::bail!("expected spherical meridian arc");
         };
         assert!((*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
         let RecoveredProfileCurve::Line { start_mm: pole, .. } = &recovered[0].profile_curves[2]
         else {
-            panic!("expected axis closure");
+            anyhow::bail!("expected axis closure");
         };
         assert!((pole[1] - 0.13).abs() < 1.0e-12);
         assert!(recovered[0].max_residual_mm < 1.0e-10);
@@ -5019,19 +5744,19 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn recovers_native_ring_torus_fixture() {
+    fn recovers_native_ring_torus_fixture() -> anyhow::Result<()> {
         let bytes = include_bytes!("../validation/fixtures/native_torus.step");
-        let recovered = crate::detect_solid_revolutions_bytes(bytes).unwrap();
+        let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].face_ids.len(), 1);
         assert_eq!(recovered[0].profile_curves.len(), 1);
@@ -5043,7 +5768,7 @@ mod tests {
             ..
         } = &recovered[0].profile_curves[0]
         else {
-            panic!("expected full-circle torus meridian");
+            anyhow::bail!("expected full-circle torus meridian");
         };
         assert!((center_mm[0] - 1.2).abs() < 1.0e-12);
         assert!(center_mm[1].abs() < 1.0e-12);
@@ -5056,26 +5781,22 @@ mod tests {
             "CIRCLE('',#26,1.31)",
             1,
         );
-        assert!(
-            crate::detect_solid_revolutions_bytes(malformed.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::detect_solid_revolutions_bytes(malformed.as_bytes())?.is_empty());
 
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let fragment =
-                crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0]).unwrap();
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
             let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
-            let rebuilt = kernel.evaluate(&fragment.model, fragment.root).unwrap();
+            let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&rebuilt).geometrically_consistent);
-            ruststep::parser::parse(&kernel.to_step(&rebuilt).unwrap()).unwrap();
+            ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn closes_hollow_step_profile_and_deduplicates_patches() {
+    fn closes_hollow_step_profile_and_deduplicates_patches() -> anyhow::Result<()> {
         let mut segments = Vec::new();
         for _ in 0..4 {
             push_unique_segment(
@@ -5108,9 +5829,11 @@ mod tests {
             );
         }
         assert_eq!(segments.len(), 4);
-        let profile = closed_profile_from_segments(segments).unwrap();
+        let profile = closed_profile_from_segments(segments)
+            .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
         assert_eq!(profile.len(), 4);
         assert!(profile.iter().all(|point| point[0] >= 1.0));
+        Ok(())
     }
 
     #[test]

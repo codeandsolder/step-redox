@@ -12,7 +12,7 @@ const SCALAR_TOL_MM: f64 = 1.0e-5;
 const DIR_TOL: f64 = 1.0e-10;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct GeometricInternStats {
+pub struct GeometricInternStats {
     pub supports_merged: usize,
     pub entities_removed: usize,
     pub planes_merged: usize,
@@ -23,17 +23,15 @@ pub(crate) struct GeometricInternStats {
 /// Merge support geometry by geometric locus, not exporter-local placement
 /// frames.  This is deliberately narrower than ordinary value interning:
 ///
-/// * PLANE / CYLINDRICAL_SURFACE must be referenced only as ADVANCED_FACE
+/// * PLANE / `CYLINDRICAL_SURFACE` must be referenced only as `ADVANCED_FACE`
 ///   support geometry.
-/// * LINE must be referenced only by EDGE_CURVE.
+/// * LINE must be referenced only by `EDGE_CURVE`.
 ///
-/// That restriction keeps parameter-space consumers (PCURVE, TRIMMED_CURVE,
+/// That restriction keeps parameter-space consumers (PCURVE, `TRIMMED_CURVE`,
 /// etc.) out of the pass.  In those safe roles the topology already supplies
 /// the trimming endpoints/loops, so changing an arbitrary local origin or
 /// in-plane X axis does not change the represented 3-D locus.
-pub(crate) fn intern_geometric_supports(
-    entities: &mut Vec<EntityInstance>,
-) -> GeometricInternStats {
+pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> GeometricInternStats {
     let mut stats = GeometricInternStats::default();
     if entities.is_empty() {
         return stats;
@@ -266,7 +264,7 @@ fn q(v: f64, tol: f64) -> i64 {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {

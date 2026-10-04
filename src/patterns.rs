@@ -24,7 +24,7 @@ pub struct InstancePattern {
     pub max_residual_mm: f64,
 }
 
-fn default_pattern_tolerance_mm() -> f64 {
+const fn default_pattern_tolerance_mm() -> f64 {
     1.0e-7
 }
 
@@ -36,7 +36,7 @@ pub enum PatternAnchor {
     End,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatternResizeStats {
     pub old_count: usize,
     pub new_count: usize,
@@ -72,6 +72,7 @@ struct Fit {
     max_residual_mm: f64,
 }
 
+#[must_use]
 pub fn detect_instance_patterns(
     entities: &[EntityInstance],
     tolerance_mm: f64,
@@ -645,7 +646,7 @@ fn fit_grid(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
             let aa = dot(a, a);
             let ab = dot(a, b);
             let bb = dot(b, b);
-            let det = aa * bb - ab * ab;
+            let det = ab.mul_add(-ab, aa * bb);
             if det <= 1.0e-18 {
                 continue;
             }
@@ -658,8 +659,8 @@ fn fit_grid(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
                 let d = sub(point, base);
                 let ad = dot(a, d);
                 let bd = dot(b, d);
-                let u = (ad * bb - bd * ab) / det;
-                let v = (bd * aa - ad * ab) / det;
+                let u = bd.mul_add(-ab, ad * bb) / det;
+                let v = ad.mul_add(-ab, bd * aa) / det;
                 let iu = u.round();
                 let iv = v.round();
                 let reconstructed = add(base, add(scale(a, iu), scale(b, iv)));
@@ -907,31 +908,31 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn entity_ref(id: u64) -> Parameter {
+const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -1008,7 +1009,7 @@ fn push_simple(
     id
 }
 
-fn numeric_value(param: &Parameter) -> Option<f64> {
+const fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Integer(v) => Some(*v as f64),
         Parameter::Real(v) => Some(*v),
@@ -1036,14 +1037,14 @@ fn scale(v: [f64; 3], s: f64) -> [f64; 3] {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -1064,34 +1065,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_filled_line_pattern() {
+    fn finds_filled_line_pattern() -> anyhow::Result<()> {
         let points = [
             [0.0, 0.0, 0.0],
             [0.5, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [1.5, 0.0, 0.0],
         ];
-        let fit = fit_lattice(&points, 1.0e-9).unwrap();
+        let fit =
+            fit_lattice(&points, 1.0e-9).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(fit.dimension, 1);
         assert_eq!(fit.grid_shape, vec![4]);
         assert!((fit.pitch[0] - 0.5).abs() < 1.0e-12);
         assert!((fit.fill_ratio - 1.0).abs() < 1.0e-12);
+        Ok(())
     }
 
     #[test]
-    fn finds_filled_grid_pattern() {
+    fn finds_filled_grid_pattern() -> anyhow::Result<()> {
         let mut points = Vec::new();
         for x in 0..4 {
             for y in 0..3 {
                 points.push([x as f64 * 0.5, y as f64 * 0.8, 0.0]);
             }
         }
-        let fit = fit_lattice(&points, 1.0e-9).unwrap();
+        let fit =
+            fit_lattice(&points, 1.0e-9).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(fit.dimension, 2);
         assert_eq!(fit.occupancy.len(), 12);
         assert!((fit.fill_ratio - 1.0).abs() < 1.0e-12);
         let mut shape = fit.grid_shape.clone();
         shape.sort_unstable();
         assert_eq!(shape, vec![3, 4]);
+        Ok(())
     }
 }

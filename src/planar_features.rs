@@ -16,7 +16,7 @@ const MAX_FEATURE_FACES: usize = 128;
 const SIDE_TOLERANCE: f64 = 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct PlanarFeatureStats {
+pub struct PlanarFeatureStats {
     pub arrays: usize,
     pub families: usize,
     pub instances: usize,
@@ -60,9 +60,7 @@ struct PlaneFrame {
     outward: [f64; 3],
 }
 
-pub(crate) fn instance_planar_positive_features(
-    entities: &mut Vec<EntityInstance>,
-) -> PlanarFeatureStats {
+pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> PlanarFeatureStats {
     let mut stats = PlanarFeatureStats::default();
     if entities.is_empty() {
         return stats;
@@ -783,9 +781,9 @@ fn bbox_center(points: &[[f64; 3]]) -> Option<[f64; 3]> {
         }
     }
     Some([
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
+        f64::midpoint(min[0], max[0]),
+        f64::midpoint(min[1], max[1]),
+        f64::midpoint(min[2], max[2]),
     ])
 }
 
@@ -814,9 +812,12 @@ fn plane_frame(
     let direction_id = entity_ref_value(axis_params.get(2)?)?;
     let origin = cartesian_point(origin_id, entities, index)?;
     let direction = direction_components(direction_id, entities, index)?;
-    let length =
-        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
-            .sqrt();
+    let length = f64::mul_add(
+        direction[2],
+        direction[2],
+        f64::mul_add(direction[1], direction[1], direction[0] * direction[0]),
+    )
+    .sqrt();
     if !length.is_finite() || length <= 0.0 {
         return None;
     }
@@ -866,7 +867,7 @@ fn direction_components(
 fn numeric(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         _ => None,
     }
 }
@@ -879,8 +880,10 @@ fn positive_side(points: &[[f64; 3]], frame: &PlaneFrame) -> bool {
             point[1] - frame.origin[1],
             point[2] - frame.origin[2],
         ];
-        let projection =
-            delta[0] * frame.outward[0] + delta[1] * frame.outward[1] + delta[2] * frame.outward[2];
+        let projection = delta[2].mul_add(
+            frame.outward[2],
+            delta[1].mul_add(frame.outward[1], delta[0] * frame.outward[0]),
+        );
         if !projection.is_finite() || projection < -SIDE_TOLERANCE {
             return false;
         }
@@ -1053,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_edges_must_be_exactly_two_manifold_with_host() {
+    fn feature_edges_must_be_exactly_two_manifold_with_host() -> anyhow::Result<()> {
         let component = HashSet::from([1_u64, 2_u64]);
         let face_edges = HashMap::from([
             (1_u64, HashSet::from([10_u64, 11_u64])),
@@ -1072,12 +1075,16 @@ mod tests {
             &edge_faces,
         ));
 
-        edge_faces.get_mut(&11).unwrap().push(99);
+        edge_faces
+            .get_mut(&11)
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?
+            .push(99);
         assert!(!component_is_two_manifold_with_host(
             &component,
             9,
             &face_edges,
             &edge_faces,
         ));
+        Ok(())
     }
 }

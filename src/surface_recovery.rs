@@ -13,7 +13,7 @@ const WEIGHT_TOLERANCE: f64 = 1.0e-12;
 const PARAMETER_TOLERANCE: f64 = 1.0e-12;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct VExtrusionStats {
+pub struct VExtrusionStats {
     pub surfaces_recovered: usize,
     pub rational_surfaces_recovered: usize,
     pub profile_curves_created: usize,
@@ -21,7 +21,7 @@ pub(crate) struct VExtrusionStats {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct VExtrusionEvidence {
+pub struct VExtrusionEvidence {
     pub surface_id: u64,
     pub degree: usize,
     pub control_points_mm: Vec<[f64; 3]>,
@@ -32,7 +32,7 @@ pub(crate) struct VExtrusionEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PlanarSurfaceEvidence {
+pub struct PlanarSurfaceEvidence {
     pub origin_mm: [f64; 3],
     pub normal: [f64; 3],
     pub max_residual_mm: f64,
@@ -72,7 +72,7 @@ struct Candidate {
     old_points: Vec<u64>,
 }
 
-pub(crate) fn recover_v_extrusion_surfaces(entities: &mut Vec<EntityInstance>) -> VExtrusionStats {
+pub fn recover_v_extrusion_surfaces(entities: &mut Vec<EntityInstance>) -> VExtrusionStats {
     let mut stats = VExtrusionStats::default();
     if entities.is_empty() {
         return stats;
@@ -452,7 +452,7 @@ fn detect_v_extrusion(
     })
 }
 
-pub(crate) fn analyze_planar_surface(
+pub fn analyze_planar_surface(
     surface_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -503,7 +503,7 @@ pub(crate) fn analyze_planar_surface(
     })
 }
 
-pub(crate) fn analyze_v_extrusion_surface(
+pub fn analyze_v_extrusion_surface(
     surface_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -606,7 +606,10 @@ fn normalized_expanded_knots(
     Some(expanded)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP B-spline entity construction mirrors the schema fields directly"
+)]
 fn bspline_curve_with_knots(
     id: u64,
     degree: usize,
@@ -637,7 +640,10 @@ fn bspline_curve_with_knots(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "STEP B-spline entity construction mirrors the schema fields directly"
+)]
 fn rational_bspline_curve(
     id: u64,
     degree: usize,
@@ -774,7 +780,7 @@ fn canonical_unit_linear_v(multiplicities: &Parameter, knots: &Parameter) -> Opt
     )
 }
 
-fn integer(parameter: &Parameter) -> Option<i64> {
+const fn integer(parameter: &Parameter) -> Option<i64> {
     match parameter {
         Parameter::Integer(value) => Some(*value),
         _ => None,
@@ -790,14 +796,14 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -806,7 +812,7 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 fn norm(a: [f64; 3]) -> f64 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+    a[2].mul_add(a[2], a[1].mul_add(a[1], a[0] * a[0])).sqrt()
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -928,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn proves_planar_bspline_control_nets() {
+    fn proves_planar_bspline_control_nets() -> anyhow::Result<()> {
         let entities = vec![
             point(1, [0.0, 0.0, 3.0]),
             point(2, [0.0, 2.0, 3.0]),
@@ -940,7 +946,7 @@ mod tests {
         ];
         let index = build_index(&entities);
         let evidence = analyze_planar_surface(10, &entities, &index, 1.0e-7)
-            .expect("planar control net should prove a plane");
+            .ok_or_else(|| anyhow::anyhow!("planar control net should prove a plane"))?;
         assert!(evidence.max_residual_mm <= 1.0e-12);
         assert!((evidence.origin_mm[2] - 3.0).abs() <= 1.0e-12);
         assert!((evidence.normal[2].abs() - 1.0).abs() <= 1.0e-12);
@@ -959,9 +965,11 @@ mod tests {
             ),
         ];
         let index = build_index(&rational);
-        let evidence = analyze_planar_surface(10, &rational, &index, 1.0e-7)
-            .expect("positive rational planar control net should prove a plane");
+        let evidence = analyze_planar_surface(10, &rational, &index, 1.0e-7).ok_or_else(|| {
+            anyhow::anyhow!("positive rational planar control net should prove a plane")
+        })?;
         assert!(evidence.max_residual_mm <= 1.0e-12);
+        Ok(())
     }
 
     #[test]
@@ -980,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_parameter_order_preserving_non_rational_v_extrusion() {
+    fn recovers_parameter_order_preserving_non_rational_v_extrusion() -> anyhow::Result<()> {
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
             point(2, [0.0, 2.0, 0.0]),
@@ -997,17 +1005,31 @@ mod tests {
         assert_eq!(stats.profile_curves_created, 1);
 
         let index = build_index(&entities);
-        let surface = simple_record(&entities[index[&10]]).unwrap();
+        let surface = simple_record(&entities[index[&10]])
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(surface.name, "SURFACE_OF_LINEAR_EXTRUSION");
         assert!(entities.iter().any(|entity| matches!(
             entity,
             EntityInstance::Simple { record, .. }
                 if record.name == "B_SPLINE_CURVE_WITH_KNOTS"
         )));
+
+        // V-extrusion recovery creates the profile after the normal first
+        // Bezier pass. The generated non-rational profile is immediately
+        // eligible for exact Bezier canonicalization because its only surface
+        // consumer is the recovered extrusion and that surface is used only
+        // topologically by ADVANCED_FACE.
+        let bezier = crate::bezier_recovery::recover_exact_bezier_curves(&mut entities);
+        assert_eq!(bezier.curves_recovered, 1);
+        assert!(entities.iter().any(|entity| matches!(
+            entity,
+            EntityInstance::Simple { record, .. } if record.name == "BEZIER_CURVE"
+        )));
+        Ok(())
     }
 
     #[test]
-    fn recovers_parameter_order_preserving_rational_v_extrusion() {
+    fn recovers_parameter_order_preserving_rational_v_extrusion() -> anyhow::Result<()> {
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
             point(2, [0.0, 2.0, 0.0]),
@@ -1027,13 +1049,15 @@ mod tests {
         assert_eq!(stats.rational_surfaces_recovered, 1);
         assert_eq!(stats.profile_curves_created, 1);
         let index = build_index(&entities);
-        let surface = simple_record(&entities[index[&10]]).unwrap();
+        let surface = simple_record(&entities[index[&10]])
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(surface.name, "SURFACE_OF_LINEAR_EXTRUSION");
         assert!(entities.iter().any(|entity| matches!(
             entity,
             EntityInstance::Complex { subsuper, .. }
                 if subsuper.0.iter().any(|r| r.name == "RATIONAL_B_SPLINE_CURVE")
         )));
+        Ok(())
     }
 
     #[test]

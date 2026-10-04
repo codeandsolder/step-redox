@@ -2,11 +2,11 @@ use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct BezierRecoveryStats {
+pub struct BezierRecoveryStats {
     pub curves_recovered: usize,
 }
 
-pub(crate) fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRecoveryStats {
+pub fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRecoveryStats {
     let mut stats = BezierRecoveryStats::default();
     if entities.is_empty() {
         return stats;
@@ -85,11 +85,7 @@ fn is_single_span_bezier(record: &Record) -> bool {
     let Some(knots) = numeric_list(&params[7]) else {
         return false;
     };
-    if knots.len() != 2 || !knots.iter().all(|x| x.is_finite()) || knots[0] == knots[1] {
-        return false;
-    }
-
-    true
+    !(knots.len() != 2 || !knots.iter().all(|x| x.is_finite()) || knots[0] == knots[1])
 }
 
 fn parameter_usage_is_safe(
@@ -157,7 +153,7 @@ fn inbound_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
@@ -170,14 +166,14 @@ fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
     items.iter().map(entity_ref_value).collect()
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
     }
 }
 
-fn integer_value(param: &Parameter) -> Option<i64> {
+const fn integer_value(param: &Parameter) -> Option<i64> {
     match param {
         Parameter::Integer(value) => Some(*value),
         _ => None,
@@ -193,7 +189,7 @@ fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
 
 fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Real(value) => Some(*value),
         _ => None,
     }
@@ -267,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_exact_clamped_single_span() {
+    fn recovers_exact_clamped_single_span() -> anyhow::Result<()> {
         let mut e = vec![
             spline(1, vec![4, 4], vec![3.0, 4.0]),
             simple(
@@ -285,13 +281,14 @@ mod tests {
         let s = recover_exact_bezier_curves(&mut e);
         assert_eq!(s.curves_recovered, 1);
         let EntityInstance::Simple { record, .. } = &e[0] else {
-            panic!();
+            anyhow::bail!("unexpected test variant");
         };
         assert_eq!(record.name, "BEZIER_CURVE");
         let Parameter::List(p) = &record.parameter else {
-            panic!();
+            anyhow::bail!("unexpected test variant");
         };
         assert_eq!(p.len(), 6);
+        Ok(())
     }
 
     #[test]

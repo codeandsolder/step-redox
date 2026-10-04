@@ -13,7 +13,7 @@ const SURFACE_TYPES: &[&str] = &[
 ];
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct FaceCoalesceStats {
+pub struct FaceCoalesceStats {
     pub groups: usize,
     pub faces_merged: usize,
     pub faces_removed: usize,
@@ -41,18 +41,34 @@ struct MergePlan {
     style_delete: HashSet<u64>,
 }
 
-pub(crate) fn coalesce_same_support_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
-    let original = entities.clone();
-    match coalesce_inner(entities) {
-        Some(stats) => stats,
-        None => {
-            *entities = original;
-            FaceCoalesceStats::default()
-        }
-    }
+pub fn coalesce_same_support_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
+    coalesce_with_supports(entities, SURFACE_TYPES)
 }
 
-fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStats> {
+/// Production-safe subset of same-support coalescing.
+///
+/// A single closed loop on a plane has an unambiguous bounded patch. Closed or
+/// periodic supports can admit complementary patches with the same topological
+/// boundary, so those remain experimental.
+pub fn coalesce_same_support_planar_faces(entities: &mut Vec<EntityInstance>) -> FaceCoalesceStats {
+    coalesce_with_supports(entities, &["PLANE"])
+}
+
+fn coalesce_with_supports(
+    entities: &mut Vec<EntityInstance>,
+    allowed_supports: &[&str],
+) -> FaceCoalesceStats {
+    let original = entities.clone();
+    coalesce_inner(entities, allowed_supports).unwrap_or_else(|| {
+        *entities = original;
+        FaceCoalesceStats::default()
+    })
+}
+
+fn coalesce_inner(
+    entities: &mut Vec<EntityInstance>,
+    allowed_supports: &[&str],
+) -> Option<FaceCoalesceStats> {
     if entities.is_empty() {
         return Some(FaceCoalesceStats::default());
     }
@@ -70,7 +86,7 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
         if record.name != "ADVANCED_FACE" {
             continue;
         }
-        let Some(info) = parse_face_info(face, entities, &index) else {
+        let Some(info) = parse_face_info(face, entities, &index, allowed_supports) else {
             continue;
         };
         for &(_, edge) in &info.oes {
@@ -167,7 +183,7 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
                 }
             };
             match &style_signature {
-                None => style_signature = Some(current.clone()),
+                None => style_signature = Some(current),
                 Some(expected) if expected == &current => {}
                 Some(_) => {
                     style_ok = false;
@@ -256,7 +272,6 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
     let mut shell_maps: HashMap<u64, HashMap<u64, u64>> = HashMap::new();
     let mut style_delete = HashSet::new();
     let mut candidate = HashSet::new();
-    let mut delete_faces = HashSet::new();
     let mut stats = FaceCoalesceStats::default();
 
     // Candidate GC is restricted to old descendants of every face we rewrite
@@ -316,9 +331,6 @@ fn coalesce_inner(entities: &mut Vec<EntityInstance>) -> Option<FaceCoalesceStat
         let map = shell_maps.entry(plan.shell).or_default();
         for &face in &plan.faces {
             map.insert(face, plan.canonical);
-            if face != plan.canonical {
-                delete_faces.insert(face);
-            }
         }
         style_delete.extend(plan.style_delete.iter().copied());
 
@@ -386,6 +398,7 @@ fn parse_face_info(
     face: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
+    allowed_supports: &[&str],
 ) -> Option<FaceInfo> {
     let record = simple_record(entities.get(*index.get(&face)?)?)?;
     if record.name != "ADVANCED_FACE" {
@@ -400,7 +413,7 @@ fn parse_face_info(
 
     let support = entity_ref_value(params.get(2)?)?;
     let support_record = simple_record(entities.get(*index.get(&support)?)?)?;
-    if !SURFACE_TYPES.contains(&support_record.name.as_str()) {
+    if !allowed_supports.contains(&support_record.name.as_str()) {
         return None;
     }
     let sense = logical_bool(params.get(3)?)?;
@@ -679,31 +692,31 @@ fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
+const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
 }
 
-fn entity_ref(id: u64) -> Parameter {
+const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -810,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn traces_one_exact_topological_loop() {
+    fn traces_one_exact_topological_loop() -> anyhow::Result<()> {
         let entities = vec![
             edge(10, 1, 2),
             edge(11, 2, 3),
@@ -820,13 +833,122 @@ mod tests {
             oe(22, 12),
         ];
         let index = build_index(&entities);
-        let loop_oes =
-            trace_single_loop(&[(20, 10), (21, 11), (22, 12)], &entities, &index).unwrap();
+        let loop_oes = trace_single_loop(&[(20, 10), (21, 11), (22, 12)], &entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(loop_oes.len(), 3);
         assert_eq!(
             loop_oes.iter().copied().collect::<HashSet<_>>(),
             HashSet::from([20, 21, 22])
         );
+        Ok(())
+    }
+
+    fn two_face_fixture(support_name: &str) -> Vec<EntityInstance> {
+        vec![
+            simple(100, support_name, vec![]),
+            edge(10, 1, 2),
+            edge(11, 2, 3),
+            edge(12, 3, 1),
+            edge(13, 3, 4),
+            edge(14, 4, 1),
+            oe(20, 10),
+            oe(21, 11),
+            oe(22, 12),
+            simple(
+                23,
+                "ORIENTED_EDGE",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::Omitted,
+                    Parameter::Omitted,
+                    entity_ref(12),
+                    Parameter::Enumeration("F".to_string()),
+                ],
+            ),
+            oe(24, 13),
+            oe(25, 14),
+            simple(
+                30,
+                "EDGE_LOOP",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(20), entity_ref(21), entity_ref(22)]),
+                ],
+            ),
+            simple(
+                31,
+                "EDGE_LOOP",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(23), entity_ref(24), entity_ref(25)]),
+                ],
+            ),
+            simple(
+                40,
+                "FACE_OUTER_BOUND",
+                vec![
+                    Parameter::String(String::new()),
+                    entity_ref(30),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                41,
+                "FACE_OUTER_BOUND",
+                vec![
+                    Parameter::String(String::new()),
+                    entity_ref(31),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                50,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(40)]),
+                    entity_ref(100),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                51,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(41)]),
+                    entity_ref(100),
+                    Parameter::Enumeration("T".to_string()),
+                ],
+            ),
+            simple(
+                60,
+                "CLOSED_SHELL",
+                vec![
+                    Parameter::String(String::new()),
+                    Parameter::List(vec![entity_ref(50), entity_ref(51)]),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn planar_only_coalescer_rejects_curved_supports() {
+        let mut spherical = two_face_fixture("SPHERICAL_SURFACE");
+        let before = spherical.clone();
+        let stats = coalesce_same_support_planar_faces(&mut spherical);
+        assert_eq!(stats.faces_removed, 0);
+        assert_eq!(spherical, before);
+
+        let stats = coalesce_same_support_faces(&mut spherical);
+        assert_eq!(stats.faces_removed, 1);
+    }
+
+    #[test]
+    fn planar_only_coalescer_accepts_plane_supports() {
+        let mut planar = two_face_fixture("PLANE");
+        let stats = coalesce_same_support_planar_faces(&mut planar);
+        assert_eq!(stats.faces_removed, 1);
     }
 
     #[test]

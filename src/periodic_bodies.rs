@@ -60,6 +60,7 @@ struct FaceKey {
     local_points: Vec<[i64; 3]>,
 }
 
+#[must_use]
 pub fn detect_periodic_bodies(
     entities: &[EntityInstance],
     instance_patterns: &[InstancePattern],
@@ -129,7 +130,7 @@ pub fn detect_periodic_bodies(
                 let mut residual = 0.0f64;
                 let mut okay = true;
                 for (site, face) in group.iter().enumerate() {
-                    let expected = start + site as f64 * candidate.pitch;
+                    let expected = (site as f64).mul_add(candidate.pitch, start);
                     let err = (face.projected - expected).abs();
                     residual = residual.max(err);
                     if err > GEOM_TOL_MM {
@@ -175,7 +176,7 @@ pub fn detect_periodic_bodies(
             }
 
             let min_stretch =
-                (candidate.sites.saturating_sub(1)) as f64 * candidate.pitch - GEOM_TOL_MM;
+                ((candidate.sites.saturating_sub(1)) as f64).mul_add(candidate.pitch, -GEOM_TOL_MM);
             let mut stretch = Vec::new();
             let mut fixed = Vec::new();
             for face in all_face_ids {
@@ -350,9 +351,9 @@ fn analyze_planar_line_face(
         }
     }
     let center = [
-        (lo[0] + hi[0]) * 0.5,
-        (lo[1] + hi[1]) * 0.5,
-        (lo[2] + hi[2]) * 0.5,
+        f64::midpoint(lo[0], hi[0]),
+        f64::midpoint(lo[1], hi[1]),
+        f64::midpoint(lo[2], hi[2]),
     ];
     let projected_values = points
         .iter()
@@ -561,13 +562,13 @@ fn quantize_dir(v: [f64; 3]) -> Option<[i64; 3]> {
 
 fn numeric_value(param: &Parameter) -> Option<f64> {
     match param {
-        Parameter::Integer(value) => Some(*value as f64),
+        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         Parameter::Real(value) => Some(*value),
         _ => None,
     }
 }
 
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
+const fn entity_ref_value(param: &Parameter) -> Option<u64> {
     match param {
         Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
@@ -582,14 +583,14 @@ fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
         .collect()
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
+const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
     match entity {
         EntityInstance::Simple { record, .. } => Some(record),
         EntityInstance::Complex { .. } => None,
     }
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
+const fn entity_id(entity: &EntityInstance) -> u64 {
     match entity {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
@@ -615,14 +616,14 @@ fn scale(v: [f64; 3], s: f64) -> [f64; 3] {
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        a[2].mul_add(-b[1], a[1] * b[2]),
+        a[0].mul_add(-b[2], a[2] * b[0]),
+        a[1].mul_add(-b[0], a[0] * b[1]),
     ]
 }
 
@@ -650,11 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn orthogonal_basis_is_perpendicular() {
-        let axis = normalize([1.0, 2.0, 3.0]).unwrap();
-        let (v, w) = orthogonal_basis(axis).unwrap();
+    fn orthogonal_basis_is_perpendicular() -> anyhow::Result<()> {
+        let axis =
+            normalize([1.0, 2.0, 3.0]).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
+        let (v, w) =
+            orthogonal_basis(axis).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert!(dot(axis, v).abs() < 1e-12);
         assert!(dot(axis, w).abs() < 1e-12);
         assert!(dot(v, w).abs() < 1e-12);
+        Ok(())
     }
 }

@@ -1,14 +1,16 @@
 #[path = "../instances.rs"]
 mod instances;
+#[path = "../numeric.rs"]
+mod numeric;
 
 use anyhow::{Context, Result};
-use ruststep::ast::{EntityInstance, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-fn entity_id(e: &EntityInstance) -> u64 {
+const fn entity_id(e: &EntityInstance) -> u64 {
     match e {
         EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
     }
@@ -144,13 +146,11 @@ fn main() -> Result<()> {
         let hash = h.finish();
         let st = surface_type(e, &entities, &index).unwrap_or_else(|| "?".to_string());
         println!(
-            "{id}\t{hash:016x}\t{}\t{:.15}\t{:.15}\t{:.15}\t{}\t{}",
+            "{id}\t{hash:016x}\t{}\t{:.15}\t{:.15}\t{:.15}\t{st}\t{quarter}",
             sig.len(),
             center[0],
             center[1],
-            center[2],
-            st,
-            quarter
+            center[2]
         );
     }
     Ok(())
