@@ -46,6 +46,7 @@ pub struct Options {
     pub experimental_recover_v_extrusions: bool,
     pub experimental_intern_geometric_supports: bool,
     pub experimental_recover_partitioned_bodies: bool,
+    pub coalesce_same_support_planar_faces: bool,
     pub experimental_coalesce_same_support_faces: bool,
     pub experimental_instance_translated_bspline_curves: bool,
     pub experimental_instance_z90: bool,
@@ -66,6 +67,7 @@ impl Default for Options {
             experimental_recover_v_extrusions: false,
             experimental_intern_geometric_supports: false,
             experimental_recover_partitioned_bodies: false,
+            coalesce_same_support_planar_faces: false,
             experimental_coalesce_same_support_faces: false,
             experimental_instance_translated_bspline_curves: false,
             experimental_instance_z90: false,
@@ -87,6 +89,7 @@ impl Options {
             experimental_recover_v_extrusions: true,
             experimental_intern_geometric_supports: true,
             experimental_recover_partitioned_bodies: true,
+            coalesce_same_support_planar_faces: true,
             // Same-support face coalescing has a production repro where the
             // reconstructed boundary drops occupied volume. Keep it opt-in
             // until loop reconstruction is proven geometry-preserving.
@@ -1299,6 +1302,16 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             face_coalesce_styles_removed += pass.styles_removed;
             face_coalesce_entities_removed += pass.entities_removed;
         }
+    } else if options.coalesce_same_support_planar_faces {
+        for section in &mut exchange.data {
+            let pass = face_coalesce::coalesce_same_support_planar_faces(&mut section.entities);
+            face_coalesce_groups += pass.groups;
+            face_coalesce_faces_merged += pass.faces_merged;
+            face_coalesce_faces_removed += pass.faces_removed;
+            face_coalesce_internal_edges_removed += pass.internal_edges_removed;
+            face_coalesce_styles_removed += pass.styles_removed;
+            face_coalesce_entities_removed += pass.entities_removed;
+        }
     }
 
     let mut curve_replica_families = 0usize;
@@ -2184,6 +2197,7 @@ mod tests {
     fn production_profiles_keep_unvalidated_boundary_rewrites_opt_in() {
         for profile in [OutputProfile::Compat, OutputProfile::Compact] {
             let options = Options::for_profile(profile);
+            assert!(options.coalesce_same_support_planar_faces);
             assert!(!options.experimental_coalesce_same_support_faces);
             assert!(!options.experimental_instance_planar_positive_features);
             assert!(!options.experimental_instance_spherical_caps);
