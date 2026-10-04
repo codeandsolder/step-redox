@@ -25,6 +25,7 @@ mod partition_recovery;
 pub mod patterns;
 pub mod periodic_bodies;
 pub mod periodic_chains;
+pub mod periodic_decomposition;
 pub mod periodic_resize;
 mod planar_features;
 pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
