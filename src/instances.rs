@@ -138,6 +138,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     let mut duplicate_roots = HashSet::new();
     let mut old_styles_to_remove = HashSet::new();
     let mut new_style_ids = Vec::new();
+    let mut shape_rep_replacements = HashMap::new();
 
     for representation_id in representation_ids {
         let Some(rep_idx) = current_index_of(entities, representation_id) else {
@@ -211,12 +212,17 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
                 .push(info);
         }
 
-        for ((_shape_key, face_style), mut group) in groups {
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        for (_, group) in &mut groups {
+            group.sort_by_key(|info| info.root);
+        }
+        groups.sort_by_key(|(_, group)| group.first().map_or(u64::MAX, |info| info.root));
+
+        for ((_shape_key, face_style), group) in groups {
             if group.len() < 2 || face_style.is_empty() {
                 continue;
             }
 
-            group.sort_by_key(|info| info.root);
             let canonical = group[0].clone();
 
             // Do not infer the actual instance transform from the canonical-key
@@ -306,31 +312,33 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
             let mut group_new_styles = Vec::new();
 
             for (target, relative_quarter) in &mapped_group {
+                // Keep the canonical solid as the explicit parent-representation
+                // occurrence and use it as the representation-map geometry.
+                // Only noncanonical occurrences need mapped wrappers.
+                if target.root == canonical.root {
+                    continue;
+                }
                 let relative_quarter = *relative_quarter;
-                let axis = if target.root == canonical.root {
-                    origin_axis
-                } else {
-                    let translation =
-                        rigid_translation(canonical.center, target.center, relative_quarter);
-                    if std::env::var_os("STEP_REDOX_DEBUG_INSTANCES").is_some() {
-                        eprintln!(
-                            "emit instance source={} target={} quarter={relative_quarter} translation={translation:?}",
-                            canonical.root, target.root
-                        );
-                    }
-                    let point = push_point(entities, &mut next_id, translation);
-                    push_simple(
-                        entities,
-                        &mut next_id,
-                        "AXIS2_PLACEMENT_3D",
-                        vec![
-                            Parameter::String(String::new()),
-                            entity_ref(point),
-                            entity_ref(z_dir),
-                            entity_ref(x_dirs[relative_quarter as usize]),
-                        ],
-                    )
-                };
+                let translation =
+                    rigid_translation(canonical.center, target.center, relative_quarter);
+                if std::env::var_os("STEP_REDOX_DEBUG_INSTANCES").is_some() {
+                    eprintln!(
+                        "emit instance source={} target={} quarter={relative_quarter} translation={translation:?}",
+                        canonical.root, target.root
+                    );
+                }
+                let point = push_point(entities, &mut next_id, translation);
+                let axis = push_simple(
+                    entities,
+                    &mut next_id,
+                    "AXIS2_PLACEMENT_3D",
+                    vec![
+                        Parameter::String(String::new()),
+                        entity_ref(point),
+                        entity_ref(z_dir),
+                        entity_ref(x_dirs[relative_quarter as usize]),
+                    ],
+                );
                 let mapped = push_simple(
                     entities,
                     &mut next_id,
@@ -352,6 +360,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
                     ],
                 );
                 replacements.insert(target.root, mapped);
+                shape_rep_replacements.insert(target.root, mapped);
                 group_new_styles.push(styled);
             }
 
@@ -380,6 +389,14 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     if stats.groups == 0 {
         return stats;
     }
+
+    // Some exporters emit auxiliary SHAPE_REPRESENTATION records for
+    // per-solid validation/property data in addition to the primary B-rep
+    // representation. If those keep pointing at an expanded duplicate root,
+    // the duplicate stays reachable and OCCT imports it as an extra solid.
+    // Retarget only shape-representation item lists; arbitrary references are
+    // deliberately left untouched.
+    retarget_shape_representation_items(entities, &shape_rep_replacements);
 
     // Presentation lists are roots in the SolidWorks files. Remove deleted
     // styled items from them and register the new mapped-item styles.
@@ -645,9 +662,12 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         else {
             return false;
         };
-        let Some(pd_context) =
-            referenced_of_type(parent_pd, entities, &index, &["PRODUCT_DEFINITION_CONTEXT"])
-        else {
+        let Some(pd_context) = referenced_of_type(
+            parent_pd,
+            entities,
+            &index,
+            &["PRODUCT_DEFINITION_CONTEXT", "DESIGN_CONTEXT"],
+        ) else {
             return false;
         };
         let Some(formation) = referenced_of_type(
@@ -665,9 +685,12 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         else {
             return false;
         };
-        let Some(product_context) =
-            referenced_of_type(parent_product, entities, &index, &["PRODUCT_CONTEXT"])
-        else {
+        let Some(product_context) = referenced_of_type(
+            parent_product,
+            entities,
+            &index,
+            &["PRODUCT_CONTEXT", "MECHANICAL_CONTEXT"],
+        ) else {
             return false;
         };
 
@@ -796,6 +819,8 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             local_by_map.entry(map).or_default().push((*mapped, axis));
         }
 
+        let mut local_by_map: Vec<_> = local_by_map.into_iter().collect();
+        local_by_map.sort_by_key(|(map, _)| *map);
         for (family_ordinal, (map, mut occurrences)) in local_by_map.into_iter().enumerate() {
             occurrences.sort_by_key(|(mapped, _)| *mapped);
             used_maps.insert(map);
@@ -922,7 +947,7 @@ fn referenced_of_type(
     });
     found.sort_unstable();
     found.dedup();
-    (found.len() == 1).then_some(found[0])
+    (found.len() == 1).then(|| found[0])
 }
 
 fn set_representation_items(entity: &mut EntityInstance, items: &[u64]) {
@@ -2248,6 +2273,19 @@ fn replace_representation_items(entity: &mut EntityInstance, replacements: &Hash
     }
 }
 
+fn retarget_shape_representation_items(
+    entities: &mut [EntityInstance],
+    replacements: &HashMap<u64, u64>,
+) {
+    for entity in entities {
+        let is_shape_representation = simple_record(entity)
+            .is_some_and(|record| record.name.ends_with("SHAPE_REPRESENTATION"));
+        if is_shape_representation {
+            replace_representation_items(entity, replacements);
+        }
+    }
+}
+
 pub fn patch_presentation_lists(
     entities: &mut [EntityInstance],
     remove: &HashSet<u64>,
@@ -2394,6 +2432,127 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_shape_representations_are_retargeted_conservatively() {
+        let mut entities = vec![
+            EntityInstance::Simple {
+                id: 1,
+                record: Record {
+                    name: "SHAPE_REPRESENTATION".to_string(),
+                    parameter: Parameter::List(vec![
+                        Parameter::String(String::new()),
+                        Parameter::List(vec![entity_ref(10)]),
+                        entity_ref(20),
+                    ]),
+                },
+            },
+            EntityInstance::Simple {
+                id: 2,
+                record: Record {
+                    name: "REPRESENTATION".to_string(),
+                    parameter: Parameter::List(vec![
+                        Parameter::String("volume".to_string()),
+                        Parameter::List(vec![entity_ref(10)]),
+                        entity_ref(20),
+                    ]),
+                },
+            },
+        ];
+        let replacements = HashMap::from([(10, 30)]);
+        retarget_shape_representation_items(&mut entities, &replacements);
+
+        assert_eq!(
+            representation_items_and_context(&entities[0]),
+            Some((vec![30], 20))
+        );
+        assert_eq!(
+            representation_items_and_context(&entities[1]),
+            Some((vec![10], 20))
+        );
+    }
+
+    #[test]
+    fn referenced_of_type_accepts_ap214_context_subtypes() {
+        let entities = vec![
+            EntityInstance::Simple {
+                id: 1,
+                record: Record {
+                    name: "PRODUCT_DEFINITION".to_string(),
+                    parameter: Parameter::List(vec![entity_ref(2)]),
+                },
+            },
+            EntityInstance::Simple {
+                id: 2,
+                record: Record {
+                    name: "DESIGN_CONTEXT".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+            },
+            EntityInstance::Simple {
+                id: 3,
+                record: Record {
+                    name: "PRODUCT".to_string(),
+                    parameter: Parameter::List(vec![entity_ref(4)]),
+                },
+            },
+            EntityInstance::Simple {
+                id: 4,
+                record: Record {
+                    name: "MECHANICAL_CONTEXT".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+            },
+        ];
+        let index = build_index(&entities);
+        assert_eq!(
+            referenced_of_type(
+                1,
+                &entities,
+                &index,
+                &["PRODUCT_DEFINITION_CONTEXT", "DESIGN_CONTEXT"]
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            referenced_of_type(
+                3,
+                &entities,
+                &index,
+                &["PRODUCT_CONTEXT", "MECHANICAL_CONTEXT"]
+            ),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn referenced_of_type_returns_none_without_eager_indexing() {
+        let entities = vec![
+            EntityInstance::Simple {
+                id: 1,
+                record: Record {
+                    name: "PRODUCT_DEFINITION_SHAPE".to_string(),
+                    parameter: Parameter::List(vec![
+                        Parameter::String(String::new()),
+                        Parameter::String(String::new()),
+                        entity_ref(2),
+                    ]),
+                },
+            },
+            EntityInstance::Simple {
+                id: 2,
+                record: Record {
+                    name: "DIRECTION".to_string(),
+                    parameter: Parameter::List(Vec::new()),
+                },
+            },
+        ];
+        let index = build_index(&entities);
+        assert_eq!(
+            referenced_of_type(1, &entities, &index, &["PRODUCT_DEFINITION"]),
+            None
+        );
+    }
 
     #[test]
     fn z90_signature_ignores_quarter_turn_and_translation() {
