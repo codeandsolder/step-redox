@@ -961,7 +961,11 @@ fn referenced_of_type(
     });
     found.sort_unstable();
     found.dedup();
-    (found.len() == 1).then(|| found[0])
+    if found.len() == 1 {
+        found.first().copied()
+    } else {
+        None
+    }
 }
 
 fn set_representation_items(entity: &mut EntityInstance, items: &[u64]) {
