@@ -6,6 +6,8 @@ use std::fmt::Write as _;
 
 mod bezier_recovery;
 mod brep;
+mod compact_brep;
+pub use compact_brep::CompactBrepStats;
 pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
@@ -228,6 +230,43 @@ pub struct PeriodicChainEditOutput {
     pub resize: periodic_resize::PeriodicChainResizeStats,
     pub periodic_chains: Vec<periodic_chains::PeriodicChainPattern>,
     pub compatibility: compatibility::CompatibilityAudit,
+}
+
+/// Build the exact compact indexed B-rep fallback for one source solid and
+/// report its retained topology/geometry size.
+///
+/// This is a lossless IR compaction diagnostic, not constructive recovery.
+///
+/// # Errors
+/// Returns an error if the STEP exchange cannot be decoded/parsed, contains
+/// unsupported sections, or the requested solid cannot be packed.
+pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<CompactBrepStats> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+
+    for section in &exchange.data {
+        let index = instances::build_index(&section.entities);
+        if !index.contains_key(&solid_id) {
+            continue;
+        }
+        let compact = compact_brep::build_compact_brep(solid_id, &section.entities)?;
+        let closure = compact_brep::closure_entity_count(solid_id, &section.entities);
+        let mut stats = compact.stats(closure);
+        stats.serialized_json_bytes = serde_json::to_vec(&compact)?.len();
+        let packed = compact.into_packed()?;
+        stats.packed_actual_core_bytes = packed.core_payload_bytes();
+        stats.packed_actual_provenance_bytes = packed.provenance_payload_bytes();
+        stats.packed_actual_json_bytes = serde_json::to_vec(&packed)?.len();
+        stats.packed_self_contained = packed.self_contained();
+        return Ok(stats);
+    }
+    bail!("solid #{solid_id} not found")
 }
 
 /// Detect read-only formed-sheet geometric evidence in a STEP exchange.

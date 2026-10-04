@@ -73,12 +73,52 @@ pub fn recover_brep_fallback_fragment(
     }
 
     let mut model = CadModel::new();
-    let root = model.add_node(CadNode::BrepFallback(BrepFallback {
-        source_entity_ids: vec![solid_id],
+    let root = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
+        vec![solid_id],
         estimated_faces,
         estimated_edges,
         estimated_control_points,
-    }));
+    )));
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids: vec![solid_id],
+            proof: ProofStatus::Exact,
+            max_residual_mm: Some(0.0),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::BrepFallback { solid_id },
+        model,
+        root,
+    })
+}
+
+/// Build an exact compact fallback from the parsed source B-rep.
+///
+/// The packed payload carries indexed topology and geometry in the CAD IR itself.
+/// If every source geometry kind is supported, `BrepFallback::is_self_contained`
+/// is true and the fragment no longer depends on the original STEP entity graph.
+///
+/// # Errors
+/// Returns an error if the source solid id is invalid or its B-rep cannot be packed.
+pub fn recover_packed_brep_fallback_fragment(
+    solid_id: u64,
+    entities: &[ruststep::ast::EntityInstance],
+) -> Result<CadFragment> {
+    if solid_id == 0 {
+        bail!("B-rep fallback solid id must be nonzero");
+    }
+
+    let packed = crate::compact_brep::build_packed_brep(solid_id, entities)?;
+    let mut model = CadModel::new();
+    let root = model.add_node(CadNode::BrepFallback(BrepFallback::from_packed(
+        vec![solid_id],
+        packed,
+    )));
     model.set_provenance(
         root,
         Provenance {
@@ -965,12 +1005,12 @@ pub fn recover_instance_pattern_fragment(pattern: &InstancePattern) -> Result<Ca
 
     let first_item = pattern.item_ids[0];
     let mut model = CadModel::new();
-    let child = model.add_node(CadNode::BrepFallback(BrepFallback {
-        source_entity_ids: vec![first_item],
-        estimated_faces: 0,
-        estimated_edges: 0,
-        estimated_control_points: 0,
-    }));
+    let child = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
+        vec![first_item],
+        0,
+        0,
+        0,
+    )));
     model.set_provenance(
         child,
         Provenance {
@@ -1441,6 +1481,65 @@ mod tests {
         diagnostic.read_only_proven = false;
         let fragments = recover_periodic_chain_fragments(&[periodic_chain_fixture(), diagnostic])?;
         assert_eq!(fragments.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn packed_brep_fallback_is_self_contained() -> Result<()> {
+        let src = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('x'),'1');
+FILE_NAME('a','b',(''),(''),'x','y','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(1.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,1.,0.));
+#4=VERTEX_POINT('',#1);
+#5=VERTEX_POINT('',#2);
+#6=VERTEX_POINT('',#3);
+#7=DIRECTION('',(1.,0.,0.));
+#8=VECTOR('',#7,1.);
+#9=LINE('',#1,#8);
+#10=DIRECTION('',(-1.,1.,0.));
+#11=VECTOR('',#10,1.4142135623730951);
+#12=LINE('',#2,#11);
+#13=DIRECTION('',(0.,-1.,0.));
+#14=VECTOR('',#13,1.);
+#15=LINE('',#3,#14);
+#16=EDGE_CURVE('',#4,#5,#9,.T.);
+#17=EDGE_CURVE('',#5,#6,#12,.T.);
+#18=EDGE_CURVE('',#6,#4,#15,.T.);
+#19=ORIENTED_EDGE('',*,*,#16,.T.);
+#20=ORIENTED_EDGE('',*,*,#17,.T.);
+#21=ORIENTED_EDGE('',*,*,#18,.T.);
+#22=EDGE_LOOP('',(#19,#20,#21));
+#23=FACE_OUTER_BOUND('',#22,.T.);
+#24=DIRECTION('',(0.,0.,1.));
+#25=DIRECTION('',(1.,0.,0.));
+#26=AXIS2_PLACEMENT_3D('',#1,#24,#25);
+#27=PLANE('',#26);
+#28=ADVANCED_FACE('',(#23),#27,.T.);
+#29=CLOSED_SHELL('',(#28));
+#30=MANIFOLD_SOLID_BREP('',#29);
+ENDSEC;
+END-ISO-10303-21;
+";
+        let exchange = ruststep::parser::parse(std::str::from_utf8(src)?)?;
+        let fragment = recover_packed_brep_fallback_fragment(30, &exchange.data[0].entities)?;
+        let CadNode::BrepFallback(fallback) = fragment.model.node(fragment.root)? else {
+            panic!("expected B-rep fallback root");
+        };
+        assert!(fallback.is_self_contained());
+        assert_eq!(fallback.estimated_faces, 1);
+        assert_eq!(fallback.estimated_edges, 3);
+        assert!(fallback.packed_core_bytes().is_some_and(|bytes| bytes > 0));
+        assert!(
+            fallback
+                .packed_provenance_bytes()
+                .is_some_and(|bytes| bytes > 0)
+        );
         Ok(())
     }
 

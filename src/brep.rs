@@ -4,6 +4,7 @@ use crate::instances::{
 };
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 const DIRECTION_TOLERANCE: f64 = 1.0e-15;
@@ -56,7 +57,7 @@ pub struct RevolutionSurfaceSupport {
     pub swept_curve_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BSplineSupport {
     pub degree: usize,
     pub control_points_mm: Vec<[f64; 3]>,
@@ -505,6 +506,146 @@ fn curve_support_inner(
     CurveSupport::Other {
         entity_id: curve_id,
     }
+}
+
+pub(crate) fn exact_bspline_curve_support(
+    curve_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSupport> {
+    let entity = &entities[*index.get(&curve_id)?];
+    if let Some(record) = simple_record(entity) {
+        return parse_simple_bspline_storage(record, entities, index);
+    }
+    if let EntityInstance::Complex { subsuper, .. } = entity {
+        return parse_complex_rational_bspline_storage(subsuper, entities, index);
+    }
+    None
+}
+
+fn parse_simple_bspline_storage(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSupport> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    match record.name.as_str() {
+        "BEZIER_CURVE" => {
+            if params.len() != 6 {
+                return None;
+            }
+            let degree = positive_degree(params.get(1)?)?;
+            let order = degree.checked_add(1)?;
+            let control_points_mm = control_points_3d(params.get(2)?, entities, index)?;
+            if control_points_mm.len() != order {
+                return None;
+            }
+            let mut knots = vec![0.0; order];
+            knots.extend(std::iter::repeat_n(1.0, order));
+            Some(BSplineSupport {
+                degree,
+                control_points_mm,
+                knots,
+                weights: None,
+            })
+        }
+        "B_SPLINE_CURVE_WITH_KNOTS" => {
+            if params.len() != 9 {
+                return None;
+            }
+            let degree = positive_degree(params.get(1)?)?;
+            let control_points_mm = control_points_3d(params.get(2)?, entities, index)?;
+            let multiplicities = positive_integer_list(params.get(6)?)?;
+            let values = finite_numeric_list(params.get(7)?)?;
+            let knots = normalized_expanded_knots(
+                degree,
+                control_points_mm.len(),
+                &multiplicities,
+                &values,
+            )?;
+            Some(BSplineSupport {
+                degree,
+                control_points_mm,
+                knots,
+                weights: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_complex_rational_bspline_storage(
+    subsuper: &SubSuperRecord,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSupport> {
+    const REQUIRED: &[&str] = &[
+        "BOUNDED_CURVE",
+        "B_SPLINE_CURVE",
+        "B_SPLINE_CURVE_WITH_KNOTS",
+        "CURVE",
+        "GEOMETRIC_REPRESENTATION_ITEM",
+        "RATIONAL_B_SPLINE_CURVE",
+        "REPRESENTATION_ITEM",
+    ];
+    if subsuper.0.len() != REQUIRED.len()
+        || REQUIRED.iter().any(|name| {
+            subsuper
+                .0
+                .iter()
+                .filter(|record| record.name == *name)
+                .count()
+                != 1
+        })
+    {
+        return None;
+    }
+
+    let bspline = record_by_name(subsuper, "B_SPLINE_CURVE")?;
+    let Parameter::List(base) = &bspline.parameter else {
+        return None;
+    };
+    if base.len() != 5 {
+        return None;
+    }
+    let degree = positive_degree(base.first()?)?;
+    let control_points_mm = control_points_3d(base.get(1)?, entities, index)?;
+
+    let knot_record = record_by_name(subsuper, "B_SPLINE_CURVE_WITH_KNOTS")?;
+    let Parameter::List(knot_params) = &knot_record.parameter else {
+        return None;
+    };
+    if knot_params.len() != 3 {
+        return None;
+    }
+    let multiplicities = positive_integer_list(knot_params.first()?)?;
+    let values = finite_numeric_list(knot_params.get(1)?)?;
+    let knots =
+        normalized_expanded_knots(degree, control_points_mm.len(), &multiplicities, &values)?;
+
+    let rational = record_by_name(subsuper, "RATIONAL_B_SPLINE_CURVE")?;
+    let Parameter::List(rational_params) = &rational.parameter else {
+        return None;
+    };
+    let [Parameter::List(weight_params)] = rational_params.as_slice() else {
+        return None;
+    };
+    let raw_weights = weight_params
+        .iter()
+        .map(|parameter| number(parameter).filter(|weight| weight.is_finite() && *weight > 0.0))
+        .collect::<Option<Vec<_>>>()?;
+    if raw_weights.len() != control_points_mm.len() {
+        return None;
+    }
+
+    Some(BSplineSupport {
+        degree,
+        control_points_mm,
+        knots,
+        weights: Some(normalize_weights(raw_weights)?),
+    })
 }
 
 fn parse_simple_bspline(

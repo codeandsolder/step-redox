@@ -3,6 +3,7 @@ use crate::instances::{
     simple_record, visit_entity_refs,
 };
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 // Geometry below 10 nm is exporter noise for the ECAD/display corpus.  Do not
@@ -36,6 +37,16 @@ pub struct PlanarSurfaceEvidence {
     pub origin_mm: [f64; 3],
     pub normal: [f64; 3],
     pub max_residual_mm: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct BSplineSurfaceSupport {
+    pub u_degree: usize,
+    pub v_degree: usize,
+    pub control_points_mm: Vec<Vec<[f64; 3]>>,
+    pub u_knots: Vec<f64>,
+    pub v_knots: Vec<f64>,
+    pub weights: Option<Vec<Vec<f64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +460,81 @@ fn detect_v_extrusion(
         extrusion: shared_delta?,
         max_residual_mm,
         old_points,
+    })
+}
+
+pub(crate) fn bspline_surface_support(
+    surface_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<BSplineSurfaceSupport> {
+    let parsed = parse_surface(surface_id, entities, index)?;
+    if parsed.control_points.is_empty()
+        || parsed.control_points.first()?.is_empty()
+        || parsed
+            .control_points
+            .iter()
+            .any(|row| row.len() != parsed.control_points[0].len())
+    {
+        return None;
+    }
+
+    let control_points_mm = parsed
+        .control_points
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&id| cartesian_point(id, entities, index))
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let u_multiplicities = integer_parameter_list(&parsed.u_multiplicities)?;
+    let v_multiplicities = integer_parameter_list(&parsed.v_multiplicities)?;
+    let u_values = numeric_parameter_list(&parsed.u_knots)?;
+    let v_values = numeric_parameter_list(&parsed.v_knots)?;
+    let u_knots = normalized_expanded_knots(
+        parsed.u_degree,
+        control_points_mm.len(),
+        &u_multiplicities,
+        &u_values,
+    )?;
+    let v_knots = normalized_expanded_knots(
+        parsed.v_degree,
+        control_points_mm.first()?.len(),
+        &v_multiplicities,
+        &v_values,
+    )?;
+
+    let weights = match parsed.weights {
+        Some(rows) => Some(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|item| number(&item).filter(|value| value.is_finite() && *value > 0.0))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+    if weights.as_ref().is_some_and(|rows| {
+        rows.len() != control_points_mm.len()
+            || rows
+                .iter()
+                .zip(control_points_mm.iter())
+                .any(|(weights, points)| weights.len() != points.len())
+    }) {
+        return None;
+    }
+
+    Some(BSplineSurfaceSupport {
+        u_degree: parsed.u_degree,
+        v_degree: parsed.v_degree,
+        control_points_mm,
+        u_knots,
+        v_knots,
+        weights,
     })
 }
 

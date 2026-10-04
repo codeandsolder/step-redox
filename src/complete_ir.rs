@@ -1,6 +1,6 @@
 use crate::cad_recovery::{
-    CadFragment, CadFragmentSource, recover_brep_fallback_fragment,
-    recover_instance_pattern_fragments, recover_periodic_chain_fragments,
+    CadFragment, CadFragmentSource, recover_instance_pattern_fragments,
+    recover_packed_brep_fallback_fragment, recover_periodic_chain_fragments,
     recover_radial_slot_revolution_fragments, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragments,
 };
@@ -163,11 +163,26 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         if recovered_ids.contains(&solid.solid_id) {
             continue;
         }
-        brep_fallbacks.push(recover_brep_fallback_fragment(
+        let entities = exchange
+            .data
+            .iter()
+            .find_map(|section| {
+                section
+                    .entities
+                    .iter()
+                    .any(|entity| {
+                        crate::instances::entity_id(entity) == solid.solid_id
+                            && crate::instances::simple_record(entity)
+                                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+                    })
+                    .then_some(section.entities.as_slice())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("solid #{} has no owning DATA section", solid.solid_id)
+            })?;
+        brep_fallbacks.push(recover_packed_brep_fallback_fragment(
             solid.solid_id,
-            solid.faces,
-            solid.edges,
-            solid.closure_entities,
+            entities,
         )?);
     }
 
@@ -302,12 +317,12 @@ mod tests {
 
     fn fallback_fragment(solid_id: u64, faces: usize) -> CadFragment {
         let mut model = CadModel::new();
-        let root = model.add_node(CadNode::BrepFallback(BrepFallback {
-            source_entity_ids: vec![solid_id],
-            estimated_faces: faces,
-            estimated_edges: 0,
-            estimated_control_points: 0,
-        }));
+        let root = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
+            vec![solid_id],
+            faces,
+            0,
+            0,
+        )));
         model
             .set_provenance(
                 root,
