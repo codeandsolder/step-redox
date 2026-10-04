@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const ORIENTATION_Q: f64 = 1.0e-10;
 
@@ -58,6 +58,283 @@ struct GroupKey {
     representation_map: u64,
     orientation: [i64; 9],
     style_signature: Vec<Vec<u64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PointLattice {
+    pub dimension: u8,
+    pub origin: [f64; 3],
+    pub basis: Vec<[f64; 3]>,
+    pub pitch: Vec<f64>,
+    /// Integer lattice sites. For 1-D fits the second coordinate is zero.
+    pub occupancy: Vec<[i64; 2]>,
+    pub grid_shape: Vec<usize>,
+    pub fill_ratio: f64,
+    pub max_residual_mm: f64,
+}
+
+pub fn fit_point_lattice(points: &[[f64; 3]], tolerance_mm: f64) -> Option<PointLattice> {
+    if points.len() < 2 || !tolerance_mm.is_finite() || tolerance_mm <= 0.0 {
+        return None;
+    }
+    let fit = fit_lattice(points, tolerance_mm)?;
+    Some(PointLattice {
+        dimension: fit.dimension,
+        origin: fit.origin,
+        basis: fit.basis,
+        pitch: fit.pitch,
+        occupancy: fit.occupancy,
+        grid_shape: fit.grid_shape,
+        fill_ratio: fit.fill_ratio,
+        max_residual_mm: fit.max_residual_mm,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PointMotifPattern {
+    pub dimension: u8,
+    pub origin: [f64; 3],
+    pub repeat_basis: Vec<[f64; 3]>,
+    pub repeat_pitch: Vec<f64>,
+    pub grid_shape: Vec<usize>,
+    pub motif_offsets: Vec<[f64; 3]>,
+    pub repeat_count: usize,
+    pub max_residual_mm: f64,
+}
+
+/// Factor a finite point set into a small motif repeated over a full 2-D grid.
+///
+/// This is a second stage after primitive lattice fitting. A staggered array
+/// can be an exact subset of a finer Bravais lattice yet have a much simpler
+/// CAD description as (small motif) × (coarser full grid).
+pub fn factor_point_motif_pattern(
+    points: &[[f64; 3]],
+    tolerance_mm: f64,
+) -> Option<PointMotifPattern> {
+    if points.len() < 4 || !tolerance_mm.is_finite() || tolerance_mm <= 0.0 {
+        return None;
+    }
+
+    let candidates = motif_candidate_vectors(points, tolerance_mm, 48);
+    let mut best: Option<(usize, usize, f64, PointMotifPattern)> = None;
+    for left in 0..candidates.len() {
+        for right in (left + 1)..candidates.len() {
+            let a = candidates[left];
+            let b = candidates[right];
+            let Some(pattern) = factor_point_motif_with_basis(points, a, b, tolerance_mm) else {
+                continue;
+            };
+            let motif_size = pattern.motif_offsets.len();
+            let inverse_repeats = usize::MAX - pattern.repeat_count;
+            let basis_cost = norm(a) + norm(b);
+            match &best {
+                None => best = Some((motif_size, inverse_repeats, basis_cost, pattern)),
+                Some((best_motif, best_inverse_repeats, best_basis_cost, _))
+                    if motif_size < *best_motif
+                        || (motif_size == *best_motif
+                            && inverse_repeats < *best_inverse_repeats)
+                        || (motif_size == *best_motif
+                            && inverse_repeats == *best_inverse_repeats
+                            && basis_cost < *best_basis_cost - 1.0e-12) =>
+                {
+                    best = Some((motif_size, inverse_repeats, basis_cost, pattern));
+                }
+                _ => {}
+            }
+        }
+    }
+    best.map(|(_, _, _, pattern)| pattern)
+}
+
+fn motif_candidate_vectors(points: &[[f64; 3]], tolerance_mm: f64, limit: usize) -> Vec<[f64; 3]> {
+    let quant = tolerance_mm.max(1.0e-9);
+    let mut counts = HashMap::<[i64; 3], ([f64; 3], usize)>::new();
+    for left in 0..points.len() {
+        for right in (left + 1)..points.len() {
+            let mut vector = sub(points[right], points[left]);
+            if norm(vector) <= tolerance_mm {
+                continue;
+            }
+            canonicalize_vector(&mut vector);
+            let key = [
+                (vector[0] / quant).round() as i64,
+                (vector[1] / quant).round() as i64,
+                (vector[2] / quant).round() as i64,
+            ];
+            let entry = counts.entry(key).or_insert((vector, 0));
+            entry.1 += 1;
+        }
+    }
+
+    let mut ranked = counts.into_values().collect::<Vec<_>>();
+    ranked.sort_by(|(left_vector, left_count), (right_vector, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| norm(*left_vector).total_cmp(&norm(*right_vector)))
+            .then_with(|| {
+                left_vector[0]
+                    .total_cmp(&right_vector[0])
+                    .then_with(|| left_vector[1].total_cmp(&right_vector[1]))
+                    .then_with(|| left_vector[2].total_cmp(&right_vector[2]))
+            })
+    });
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(vector, _)| vector)
+        .collect()
+}
+
+fn factor_point_motif_with_basis(
+    points: &[[f64; 3]],
+    a: [f64; 3],
+    b: [f64; 3],
+    tolerance_mm: f64,
+) -> Option<PointMotifPattern> {
+    let aa = dot(a, a);
+    let ab = dot(a, b);
+    let bb = dot(b, b);
+    let det = aa * bb - ab * ab;
+    if det <= 1.0e-18 {
+        return None;
+    }
+    let base = *points.first()?;
+    let coordinate_tol = tolerance_mm / norm(a).min(norm(b)).max(1.0e-12);
+
+    #[derive(Clone)]
+    struct MotifPoint {
+        point: [f64; 3],
+        integer: [i64; 2],
+    }
+
+    let mut groups = BTreeMap::<[i64; 2], Vec<MotifPoint>>::new();
+    let mut max_residual = 0.0f64;
+    for &point in points {
+        let delta = sub(point, base);
+        let ad = dot(a, delta);
+        let bd = dot(b, delta);
+        let u = (ad * bb - bd * ab) / det;
+        let v = (bd * aa - ad * ab) / det;
+        let reconstructed = add(base, add(scale(a, u), scale(b, v)));
+        let residual = norm(sub(point, reconstructed));
+        if !residual.is_finite() || residual > tolerance_mm {
+            return None;
+        }
+        max_residual = max_residual.max(residual);
+
+        let (iu, fu) = split_lattice_coordinate(u, coordinate_tol);
+        let (iv, fv) = split_lattice_coordinate(v, coordinate_tol);
+        let frac_quant = coordinate_tol.max(1.0e-10);
+        let key = [
+            (fu / frac_quant).round() as i64,
+            (fv / frac_quant).round() as i64,
+        ];
+        groups.entry(key).or_default().push(MotifPoint {
+            point,
+            integer: [iu, iv],
+        });
+    }
+    if groups.is_empty() {
+        return None;
+    }
+
+    let mut expected_shape = None::<[usize; 2]>;
+    let mut motif_origins = Vec::<[f64; 3]>::new();
+    for members in groups.values() {
+        let min_u = members.iter().map(|member| member.integer[0]).min()?;
+        let max_u = members.iter().map(|member| member.integer[0]).max()?;
+        let min_v = members.iter().map(|member| member.integer[1]).min()?;
+        let max_v = members.iter().map(|member| member.integer[1]).max()?;
+        let nu = usize::try_from(max_u - min_u + 1).ok()?;
+        let nv = usize::try_from(max_v - min_v + 1).ok()?;
+        if nu <= 1 || nv <= 1 {
+            return None;
+        }
+        let shape = [nu, nv];
+        if expected_shape.is_some_and(|expected| expected != shape) {
+            return None;
+        }
+        expected_shape = Some(shape);
+
+        let occupancy = members
+            .iter()
+            .map(|member| [member.integer[0] - min_u, member.integer[1] - min_v])
+            .collect::<HashSet<_>>();
+        if occupancy.len() != nu.saturating_mul(nv) || occupancy.len() != members.len() {
+            return None;
+        }
+
+        let first = &members[0];
+        let normalized = [first.integer[0] - min_u, first.integer[1] - min_v];
+        let origin = sub(
+            first.point,
+            add(
+                scale(a, normalized[0] as f64),
+                scale(b, normalized[1] as f64),
+            ),
+        );
+        for member in members {
+            let normalized = [member.integer[0] - min_u, member.integer[1] - min_v];
+            let reconstructed = add(
+                origin,
+                add(
+                    scale(a, normalized[0] as f64),
+                    scale(b, normalized[1] as f64),
+                ),
+            );
+            let residual = norm(sub(member.point, reconstructed));
+            if residual > tolerance_mm {
+                return None;
+            }
+            max_residual = max_residual.max(residual);
+        }
+        motif_origins.push(origin);
+    }
+
+    let shape = expected_shape?;
+    let repeat_count = shape[0].saturating_mul(shape[1]);
+    if repeat_count.saturating_mul(motif_origins.len()) != points.len() {
+        return None;
+    }
+
+    motif_origins.sort_by(|left, right| {
+        left[0]
+            .total_cmp(&right[0])
+            .then_with(|| left[1].total_cmp(&right[1]))
+            .then_with(|| left[2].total_cmp(&right[2]))
+    });
+    let origin = motif_origins[0];
+    let motif_offsets = motif_origins
+        .iter()
+        .map(|&motif_origin| sub(motif_origin, origin))
+        .collect::<Vec<_>>();
+
+    Some(PointMotifPattern {
+        dimension: 2,
+        origin,
+        repeat_basis: vec![a, b],
+        repeat_pitch: vec![norm(a), norm(b)],
+        grid_shape: vec![shape[0], shape[1]],
+        motif_offsets,
+        repeat_count,
+        max_residual_mm: max_residual,
+    })
+}
+
+fn split_lattice_coordinate(value: f64, tolerance: f64) -> (i64, f64) {
+    let nearest = value.round();
+    if (value - nearest).abs() <= tolerance {
+        return (nearest as i64, 0.0);
+    }
+    let floor = value.floor();
+    let mut fraction = value - floor;
+    if fraction >= 1.0 - tolerance {
+        return (floor as i64 + 1, 0.0);
+    }
+    if fraction <= tolerance {
+        fraction = 0.0;
+    }
+    (floor as i64, fraction)
 }
 
 #[derive(Debug, Clone)]
@@ -549,13 +826,34 @@ fn pair_differences(points: &[[f64; 3]]) -> Vec<([f64; 3], f64)> {
     diffs
 }
 
+fn lattice_candidate_vectors(points: &[[f64; 3]], tol: f64, limit: usize) -> Vec<[f64; 3]> {
+    let quant = tol.max(1.0e-9);
+    let mut seen = std::collections::HashSet::<[i64; 3]>::new();
+    let mut out = Vec::new();
+    for (mut vector, _) in pair_differences(points) {
+        canonicalize_vector(&mut vector);
+        let key = [
+            (vector[0] / quant).round() as i64,
+            (vector[1] / quant).round() as i64,
+            (vector[2] / quant).round() as i64,
+        ];
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(vector);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
 fn fit_line(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
-    let diffs = pair_differences(points);
+    let candidates = lattice_candidate_vectors(points, tol, 64);
     let base = *points.first()?;
     let mut best: Option<(f64, f64, Fit)> = None;
 
-    for &(mut basis, _) in diffs.iter().take(64) {
-        canonicalize_vector(&mut basis);
+    for basis in candidates {
         let pitch = norm(basis);
         if pitch <= 1.0e-12 {
             continue;
@@ -631,9 +929,8 @@ fn fit_line(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
 }
 
 fn fit_grid(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
-    let diffs = pair_differences(points);
     let base = *points.first()?;
-    let candidates = diffs.iter().take(48).map(|x| x.0).collect::<Vec<_>>();
+    let candidates = lattice_candidate_vectors(points, tol, 64);
     let mut best: Option<(f64, f64, Fit)> = None;
 
     for ia in 0..candidates.len() {
@@ -1098,5 +1395,53 @@ mod tests {
         shape.sort_unstable();
         assert_eq!(shape, vec![3, 4]);
         Ok(())
+    }
+
+    #[test]
+    fn point_lattice_prefers_dense_staggered_grid_basis() {
+        let mut points = Vec::new();
+        for row in 0..8 {
+            for column in 0..35 {
+                points.push([
+                    6.412_556 + column as f64 * 1.6 + row as f64 * 0.8,
+                    82.505_705 - row as f64 * 1.35,
+                    1.4,
+                ]);
+            }
+        }
+
+        let fit = fit_point_lattice(&points, 1.0e-7).expect("staggered grid");
+        assert_eq!(fit.dimension, 2);
+        let mut shape = fit.grid_shape.clone();
+        shape.sort_unstable();
+        assert_eq!(shape, vec![8, 35]);
+        assert_eq!(fit.occupancy.len(), 280);
+        assert!((fit.fill_ratio - 1.0).abs() <= 1.0e-12);
+        assert!(fit.max_residual_mm <= 1.0e-9);
+    }
+    #[test]
+    fn factors_alternating_stagger_into_two_point_motif() {
+        let mut points = Vec::new();
+        for row in 0..8 {
+            for column in 0..35 {
+                points.push([
+                    6.412_556 + column as f64 * 1.6 + (row % 2) as f64 * 0.8,
+                    82.505_705 - row as f64 * 1.35,
+                    1.4,
+                ]);
+            }
+        }
+
+        let pattern = factor_point_motif_pattern(&points, 1.0e-7).expect("motif pattern");
+        assert_eq!(pattern.motif_offsets.len(), 2);
+        assert_eq!(pattern.repeat_count, 140);
+        let mut shape = pattern.grid_shape.clone();
+        shape.sort_unstable();
+        assert_eq!(shape, vec![4, 35]);
+        let mut pitch = pattern.repeat_pitch.clone();
+        pitch.sort_by(f64::total_cmp);
+        assert!((pitch[0] - 1.6).abs() <= 1.0e-9);
+        assert!((pitch[1] - 2.7).abs() <= 1.0e-9);
+        assert!(pattern.max_residual_mm <= 1.0e-9);
     }
 }
