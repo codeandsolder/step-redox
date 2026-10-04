@@ -30,6 +30,7 @@ pub mod solid_extrusions;
 pub mod solid_revolutions;
 mod spherical_caps;
 mod surface_recovery;
+mod surface_replicas;
 mod units;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub struct Options {
     pub coalesce_same_support_planar_faces: bool,
     pub experimental_coalesce_same_support_faces: bool,
     pub experimental_instance_translated_bspline_curves: bool,
+    pub experimental_instance_translated_analytic_surfaces: bool,
     pub experimental_instance_z90: bool,
     pub experimental_instance_z90_assembly: bool,
     pub experimental_instance_planar_positive_features: bool,
@@ -71,6 +73,7 @@ impl Default for Options {
             coalesce_same_support_planar_faces: false,
             experimental_coalesce_same_support_faces: false,
             experimental_instance_translated_bspline_curves: false,
+            experimental_instance_translated_analytic_surfaces: false,
             experimental_instance_z90: false,
             experimental_instance_z90_assembly: false,
             experimental_instance_planar_positive_features: false,
@@ -157,6 +160,13 @@ pub struct Stats {
     pub curve_replica_transforms: usize,
     pub curve_replica_entities_removed: usize,
     pub curve_replica_max_residual_mm: f64,
+    pub surface_replica_families: usize,
+    pub surface_replicas: usize,
+    pub surface_replica_planes: usize,
+    pub surface_replica_cylinders: usize,
+    pub surface_replica_transforms: usize,
+    pub surface_replica_entities_removed: usize,
+    pub surface_replica_max_transform_residual_mm: f64,
     pub instance_groups: usize,
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
@@ -1334,6 +1344,13 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let mut curve_replica_transforms = 0usize;
     let mut curve_replica_entities_removed = 0usize;
     let mut curve_replica_max_residual_mm = 0.0f64;
+    let mut surface_replica_families = 0usize;
+    let mut surface_replicas = 0usize;
+    let mut surface_replica_planes = 0usize;
+    let mut surface_replica_cylinders = 0usize;
+    let mut surface_replica_transforms = 0usize;
+    let mut surface_replica_entities_removed = 0usize;
+    let mut surface_replica_max_transform_residual_mm = 0.0f64;
 
     let mut instance_groups = 0usize;
     let mut instanced_solids = 0usize;
@@ -1387,6 +1404,24 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
         }
     }
 
+    // Low-level translated support factoring also comes after whole-body and
+    // feature recognition. It preserves face/topology entities and only shares
+    // exact-parameterization PLANE/CYLINDRICAL_SURFACE supports by translation.
+    if options.experimental_instance_translated_analytic_surfaces {
+        for section in &mut exchange.data {
+            let pass =
+                surface_replicas::instance_translated_analytic_surfaces(&mut section.entities);
+            surface_replica_families += pass.families;
+            surface_replicas += pass.replicas;
+            surface_replica_planes += pass.plane_replicas;
+            surface_replica_cylinders += pass.cylinder_replicas;
+            surface_replica_transforms += pass.transforms;
+            surface_replica_entities_removed += pass.entities_removed;
+            surface_replica_max_transform_residual_mm =
+                surface_replica_max_transform_residual_mm.max(pass.max_transform_residual_mm);
+        }
+    }
+
     // Low-level curve factoring comes last. Higher-level body/feature repetition
     // must be recognized against the actual geometry first; otherwise a
     // CURVE_REPLICA decomposition can leak global source coordinates into a
@@ -1414,7 +1449,8 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             || planar_feature_arrays > 0
             || spherical_cap_arrays > 0
             || curve_replicas > 0
-            || curve_replica_direct_aliases > 0)
+            || curve_replica_direct_aliases > 0
+            || surface_replicas > 0)
     {
         for section in &mut exchange.data {
             let pass = geometric_intern::intern_geometric_supports(&mut section.entities);
@@ -1522,6 +1558,13 @@ pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
             curve_replica_transforms,
             curve_replica_entities_removed,
             curve_replica_max_residual_mm,
+            surface_replica_families,
+            surface_replicas,
+            surface_replica_planes,
+            surface_replica_cylinders,
+            surface_replica_transforms,
+            surface_replica_entities_removed,
+            surface_replica_max_transform_residual_mm,
             instance_groups,
             instanced_solids,
             instance_entities_removed,

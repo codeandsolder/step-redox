@@ -85,6 +85,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Experimental: factor translated PLANE/CYLINDRICAL_SURFACE supports as SURFACE_REPLICA"
+    )]
+    experimental_instance_translated_analytic_surfaces: bool,
+
+    #[arg(
+        long,
         help = "Experimental: instance congruent top-level solids under Z quarter-turns"
     )]
     experimental_instance_z90: bool,
@@ -204,6 +210,8 @@ fn main() -> Result<()> {
         cli.experimental_coalesce_same_support_faces;
     options.experimental_instance_translated_bspline_curves |=
         cli.experimental_instance_translated_bspline_curves;
+    options.experimental_instance_translated_analytic_surfaces |=
+        cli.experimental_instance_translated_analytic_surfaces;
     options.experimental_instance_z90 |= cli.experimental_instance_z90;
     options.experimental_instance_z90_assembly |= cli.experimental_instance_z90_assembly;
     options.experimental_instance_planar_positive_features |=
