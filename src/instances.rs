@@ -46,8 +46,8 @@ pub fn solid_shape_key(
     let mut vertex_points = Vec::new();
     let mut edge_count = 0usize;
     let mut oriented_edge_count = 0usize;
-    let mut face_geometry = Vec::new();
-    let mut edge_geometry = Vec::new();
+    let mut face_geometry_ids = Vec::new();
+    let mut edge_geometry_ids = Vec::new();
 
     for &id in &closure {
         let &idx = index.get(&id)?;
@@ -58,12 +58,12 @@ pub fn solid_shape_key(
             "ADVANCED_FACE" => {
                 face_count += 1;
                 let geometry = nth_entity_ref(&record.parameter, 2)?;
-                face_geometry.push(geometry_signature(geometry, entities, index)?);
+                face_geometry_ids.push(geometry);
             }
             "EDGE_CURVE" => {
                 edge_count += 1;
                 let geometry = nth_entity_ref(&record.parameter, 3)?;
-                edge_geometry.push(geometry_signature(geometry, entities, index)?);
+                edge_geometry_ids.push(geometry);
             }
             "EDGE_LOOP" => {
                 let Parameter::List(params) = &record.parameter else {
@@ -89,6 +89,20 @@ pub fn solid_shape_key(
     let center = centroid(&vertex_points);
     let (points, topology, canonical_quarter) =
         canonical_z90_solid_signature(root, &vertex_points, entities, index, center)?;
+    let mut face_geometry = resolved_geometry_signatures(
+        &face_geometry_ids,
+        entities,
+        index,
+        center,
+        canonical_quarter,
+    )?;
+    let mut edge_geometry = resolved_geometry_signatures(
+        &edge_geometry_ids,
+        entities,
+        index,
+        center,
+        canonical_quarter,
+    )?;
 
     face_geometry.sort();
     edge_geometry.sort();
@@ -1188,8 +1202,8 @@ fn analyze_solid(
     let mut vertex_points = Vec::new();
     let mut edge_count = 0usize;
     let mut oriented_edge_count = 0usize;
-    let mut face_geometry = Vec::new();
-    let mut edge_geometry = Vec::new();
+    let mut face_geometry_ids = Vec::new();
+    let mut edge_geometry_ids = Vec::new();
 
     for &id in &closure {
         let &idx = index.get(&id)?;
@@ -1200,12 +1214,12 @@ fn analyze_solid(
             "ADVANCED_FACE" => {
                 faces.push(id);
                 let geometry = nth_entity_ref(&record.parameter, 2)?;
-                face_geometry.push(geometry_signature(geometry, entities, index)?);
+                face_geometry_ids.push(geometry);
             }
             "EDGE_CURVE" => {
                 edge_count += 1;
                 let geometry = nth_entity_ref(&record.parameter, 3)?;
-                edge_geometry.push(geometry_signature(geometry, entities, index)?);
+                edge_geometry_ids.push(geometry);
             }
             "ORIENTED_EDGE" => oriented_edge_count += 1,
             "VERTEX_POINT" => {
@@ -1239,8 +1253,22 @@ fn analyze_solid(
     }
 
     let center = centroid(&vertex_points);
-    let (points, topology, _canonical_rotation) =
+    let (points, topology, canonical_quarter) =
         canonical_z90_solid_signature(root, &vertex_points, entities, index, center)?;
+    let mut face_geometry = resolved_geometry_signatures(
+        &face_geometry_ids,
+        entities,
+        index,
+        center,
+        canonical_quarter,
+    )?;
+    let mut edge_geometry = resolved_geometry_signatures(
+        &edge_geometry_ids,
+        entities,
+        index,
+        center,
+        canonical_quarter,
+    )?;
 
     face_geometry.sort();
     edge_geometry.sort();
@@ -1574,10 +1602,20 @@ fn support_entity_signature(
                 Some(format!("DIR({},{},{})", q[0], q[1], q[2]))
             }
             "LINE" => line_support_signature(record, entities, index, center, quarter),
+            "CIRCLE" => circle_support_signature(record, entities, index, center, quarter),
             "PLANE" => plane_support_signature(record, entities, index, center, quarter),
             "CYLINDRICAL_SURFACE" => {
                 cylindrical_surface_signature(record, entities, index, center, quarter)
             }
+            "CURVE_REPLICA" => curve_replica_support_signature(
+                record,
+                entities,
+                index,
+                center,
+                quarter,
+                visiting,
+                depth + 1,
+            ),
             _ if is_topology_type(&record.name) => None,
             _ => support_record_signature(
                 record,
@@ -1610,6 +1648,65 @@ fn support_entity_signature(
     };
     visiting.remove(&id);
     result
+}
+
+fn curve_replica_support_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+    visiting: &mut HashSet<u64>,
+    depth: usize,
+) -> Option<String> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    if params.len() != 3 {
+        return None;
+    }
+    let parent = entity_ref_value(params.get(1)?)?;
+    let transform_id = entity_ref_value(params.get(2)?)?;
+    let transform = simple_record(&entities[*index.get(&transform_id)?])?;
+    if transform.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+        return None;
+    }
+    let Parameter::List(transform_params) = &transform.parameter else {
+        return None;
+    };
+    if transform_params.len() != 8
+        || [3usize, 4, 6, 7].iter().any(|&slot| {
+            !matches!(
+                transform_params.get(slot),
+                Some(Parameter::NotProvided | Parameter::Omitted)
+            )
+        })
+    {
+        return None;
+    }
+    let origin = cartesian_point(entity_ref_value(transform_params.get(5)?)?, entities, index)?;
+    if origin.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    // CURVE_REPLICA applies the transformation local_origin as the parent ->
+    // replica translation.  Evaluating the parent relative to (center - delta)
+    // is exactly equivalent to translating every parent point by delta first,
+    // while leaving all direction vectors unchanged.
+    let shifted_center = [
+        center[0] - origin[0],
+        center[1] - origin[1],
+        center[2] - origin[2],
+    ];
+    support_entity_signature(
+        parent,
+        entities,
+        index,
+        shifted_center,
+        quarter,
+        visiting,
+        depth,
+    )
 }
 
 fn line_support_signature(
@@ -1652,6 +1749,43 @@ fn line_support_signature(
     ))
 }
 
+fn circle_support_signature(
+    record: &Record,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<String> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let placement_id = entity_ref_value(params.get(1)?)?;
+    let radius = number(params.get(2)?)?;
+    let placement = simple_record(&entities[*index.get(&placement_id)?])?;
+    if placement.name != "AXIS2_PLACEMENT_3D" {
+        return None;
+    }
+    let Parameter::List(place_params) = &placement.parameter else {
+        return None;
+    };
+    let point = cartesian_point(entity_ref_value(place_params.get(1)?)?, entities, index)?;
+    let axis_id = entity_ref_value(place_params.get(2)?)?;
+    let axis_record = simple_record(&entities[*index.get(&axis_id)?])?;
+    let axis = direction_components(axis_record)?;
+    let q_center = transform_point(point, center, quarter);
+    let q_axis = transform_direction(axis, quarter);
+    Some(format!(
+        "CIRCLE_LOCUS(C({},{},{});AXIS({},{},{});R{})",
+        q_center[0],
+        q_center[1],
+        q_center[2],
+        q_axis[0],
+        q_axis[1],
+        q_axis[2],
+        (radius * 1.0e9).round() as i64,
+    ))
+}
+
 fn cylindrical_surface_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -1673,31 +1807,24 @@ fn cylindrical_surface_signature(
     };
     let point_id = entity_ref_value(place_params.get(1)?)?;
     let axis_id = entity_ref_value(place_params.get(2)?)?;
-    let ref_direction_id = entity_ref_value(place_params.get(3)?)?;
     let point = cartesian_point(point_id, entities, index)?;
     let axis_record = simple_record(&entities[*index.get(&axis_id)?])?;
-    let ref_record = simple_record(&entities[*index.get(&ref_direction_id)?])?;
     let axis = direction_components(axis_record)?;
-    let ref_direction = direction_components(ref_record)?;
 
     // Sliding the placement origin along the cylinder axis changes only the
-    // parameter-space V origin, not the 3-D cylindrical locus.  Keep axis and
-    // reference-direction orientation strict, but compare the perpendicular
-    // axis-line offset instead of the exporter's arbitrary point on that line.
+    // parameter-space V origin. Rotating AXIS2_PLACEMENT_3D.ref_direction
+    // around that axis only changes the U=0 seam. Neither changes the 3-D
+    // cylindrical locus, so compare axis line + oriented axis + radius only.
     let offset = canonical_axis_offset(point, axis, center, quarter)?;
     let q_axis = transform_direction(axis, quarter);
-    let q_ref = transform_direction(ref_direction, quarter);
     Some(format!(
-        "CYLINDER_LOCUS(P({},{},{});AXIS({},{},{});REF({},{},{});R{})",
+        "CYLINDER_LOCUS(P({},{},{});AXIS({},{},{});R{})",
         offset[0],
         offset[1],
         offset[2],
         q_axis[0],
         q_axis[1],
         q_axis[2],
-        q_ref[0],
-        q_ref[1],
-        q_ref[2],
         (radius * 1.0e9).round() as i64,
     ))
 }
@@ -2012,55 +2139,20 @@ fn canonical_cycle(items: &[String]) -> Vec<String> {
     best
 }
 
-fn geometry_signature(
-    id: u64,
+fn resolved_geometry_signatures(
+    ids: &[u64],
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-) -> Option<(String, Vec<i64>)> {
-    let &idx = index.get(&id)?;
-    match &entities[idx] {
-        EntityInstance::Simple { record, .. } => {
-            let mut scalars = Vec::new();
-            collect_nonref_scalars(&record.parameter, &mut scalars);
-            Some((record.name.clone(), scalars))
-        }
-        EntityInstance::Complex { subsuper, .. } => {
-            // Complex rational B-spline curves/surfaces are normal geometry,
-            // not a reason to reject an otherwise instanceable solid.  Keep
-            // the same shallow safeguard as for simple supports: entity class
-            // plus non-reference scalar parameters.  The full recursive
-            // support geometry is proved independently by topology_signature.
-            let mut scalars = Vec::new();
-            let mut names = String::from("COMPLEX[");
-            for (idx, record) in subsuper.0.iter().enumerate() {
-                if idx != 0 {
-                    names.push('+');
-                }
-                names.push_str(&record.name);
-                collect_nonref_scalars(&record.parameter, &mut scalars);
-            }
-            names.push(']');
-            Some((names, scalars))
-        }
+    center: [f64; 3],
+    quarter: u8,
+) -> Option<Vec<(String, Vec<i64>)>> {
+    let mut out = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let signature =
+            support_entity_signature(id, entities, index, center, quarter, &mut HashSet::new(), 0)?;
+        out.push((signature, Vec::new()));
     }
-}
-
-fn collect_nonref_scalars(param: &Parameter, out: &mut Vec<i64>) {
-    match param {
-        Parameter::Real(value) => out.push((value * 1.0e9).round() as i64),
-        Parameter::Integer(value) => out.push(*value),
-        Parameter::List(items) => {
-            for item in items {
-                collect_nonref_scalars(item, out);
-            }
-        }
-        Parameter::Typed { parameter, .. } => collect_nonref_scalars(parameter, out),
-        Parameter::Ref(_)
-        | Parameter::String(_)
-        | Parameter::Enumeration(_)
-        | Parameter::NotProvided
-        | Parameter::Omitted => {}
-    }
+    Some(out)
 }
 
 fn canonical_z90_solid_signature(
@@ -2802,6 +2894,196 @@ END-ISO-10303-21;
         let a = canonical_axis_offset([2.0, 1.0, 9.0], axis, center, 1)
             .ok_or_else(|| anyhow::anyhow!("axis offset unavailable"))?;
         assert_eq!(a, [-100_000, 200_000, 0]);
+        Ok(())
+    }
+    #[test]
+    fn cylindrical_locus_ignores_parameter_seam_direction() -> anyhow::Result<()> {
+        fn signature(ref_direction: [f64; 3], radius: f64) -> anyhow::Result<String> {
+            let entities = vec![
+                EntityInstance::Simple {
+                    id: 1,
+                    record: Record {
+                        name: "CARTESIAN_POINT".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(vec![
+                                Parameter::Real(1.0),
+                                Parameter::Real(2.0),
+                                Parameter::Real(3.0),
+                            ]),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 2,
+                    record: Record {
+                        name: "DIRECTION".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(vec![
+                                Parameter::Real(0.0),
+                                Parameter::Real(0.0),
+                                Parameter::Real(1.0),
+                            ]),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 3,
+                    record: Record {
+                        name: "DIRECTION".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(
+                                ref_direction.into_iter().map(Parameter::Real).collect(),
+                            ),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 4,
+                    record: Record {
+                        name: "AXIS2_PLACEMENT_3D".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            entity_ref(1),
+                            entity_ref(2),
+                            entity_ref(3),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 5,
+                    record: Record {
+                        name: "CYLINDRICAL_SURFACE".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            entity_ref(4),
+                            Parameter::Real(radius),
+                        ]),
+                    },
+                },
+            ];
+            let index = build_index(&entities);
+            cylindrical_surface_signature(
+                simple_record(&entities[index[&5]])
+                    .ok_or_else(|| anyhow::anyhow!("cylinder is complex"))?,
+                &entities,
+                &index,
+                [0.0; 3],
+                0,
+            )
+            .ok_or_else(|| anyhow::anyhow!("cylinder signature unavailable"))
+        }
+
+        assert_eq!(
+            signature([1.0, 0.0, 0.0], 2.5)?,
+            signature([0.0, 1.0, 0.0], 2.5)?
+        );
+        assert_ne!(
+            signature([1.0, 0.0, 0.0], 2.5)?,
+            signature([1.0, 0.0, 0.0], 2.6)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn circle_locus_ignores_parameter_seam_direction() -> anyhow::Result<()> {
+        fn signature(ref_direction: [f64; 3]) -> anyhow::Result<String> {
+            let entities = vec![
+                EntityInstance::Simple {
+                    id: 1,
+                    record: Record {
+                        name: "CARTESIAN_POINT".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(vec![
+                                Parameter::Real(1.0),
+                                Parameter::Real(2.0),
+                                Parameter::Real(3.0),
+                            ]),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 2,
+                    record: Record {
+                        name: "DIRECTION".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(vec![
+                                Parameter::Real(0.0),
+                                Parameter::Real(0.0),
+                                Parameter::Real(1.0),
+                            ]),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 3,
+                    record: Record {
+                        name: "DIRECTION".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            Parameter::List(
+                                ref_direction.into_iter().map(Parameter::Real).collect(),
+                            ),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 4,
+                    record: Record {
+                        name: "AXIS2_PLACEMENT_3D".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            entity_ref(1),
+                            entity_ref(2),
+                            entity_ref(3),
+                        ]),
+                    },
+                },
+                EntityInstance::Simple {
+                    id: 5,
+                    record: Record {
+                        name: "CIRCLE".to_string(),
+                        parameter: Parameter::List(vec![
+                            Parameter::String(String::new()),
+                            entity_ref(4),
+                            Parameter::Real(2.5),
+                        ]),
+                    },
+                },
+            ];
+            let index = build_index(&entities);
+            circle_support_signature(
+                simple_record(&entities[index[&5]])
+                    .ok_or_else(|| anyhow::anyhow!("circle is complex"))?,
+                &entities,
+                &index,
+                [0.0; 3],
+                0,
+            )
+            .ok_or_else(|| anyhow::anyhow!("circle signature unavailable"))
+        }
+
+        assert_eq!(signature([1.0, 0.0, 0.0])?, signature([0.0, 1.0, 0.0])?);
+        Ok(())
+    }
+    #[test]
+    fn curve_replica_signature_matches_explicit_translated_curve() -> anyhow::Result<()> {
+        let text = "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\n#2=CARTESIAN_POINT('',(1.,0.,0.));\n#3=CARTESIAN_POINT('',(3.,0.,0.));\n#4=CARTESIAN_POINT('',(4.,0.,0.));\n#5=CARTESIAN_POINT('',(3.,0.,0.));\n#10=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);\n#20=B_SPLINE_CURVE_WITH_KNOTS('',1,(#3,#4),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);\n#30=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','','',$,$,#5,$,$);\n#40=CURVE_REPLICA('',#10,#30);\nENDSEC;\nEND-ISO-10303-21;\n";
+        let exchange = ruststep::parser::parse(text)?;
+        let entities = &exchange.data[0].entities;
+        let index = build_index(entities);
+        let center = [3.5, 0.0, 0.0];
+        let explicit =
+            support_entity_signature(20, entities, &index, center, 0, &mut HashSet::new(), 0)
+                .ok_or_else(|| anyhow::anyhow!("explicit curve signature unavailable"))?;
+        let replica =
+            support_entity_signature(40, entities, &index, center, 0, &mut HashSet::new(), 0)
+                .ok_or_else(|| anyhow::anyhow!("replica curve signature unavailable"))?;
+        assert_eq!(explicit, replica);
         Ok(())
     }
 }
