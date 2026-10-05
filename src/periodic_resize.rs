@@ -1057,6 +1057,288 @@ impl ChainStretchRewrite<'_> {
     }
 }
 
+struct ChainWeldPlan {
+    seam_pairs: Vec<(u64, u64)>,
+    vertex_map: HashMap<u64, u64>,
+    edge_map: HashMap<u64, u64>,
+}
+
+impl ChainWeldPlan {
+    fn from_pairs(graph: &GraphEditor<'_>, seam_pairs: Vec<(u64, u64)>) -> Result<Self> {
+        let (vertex_map, edge_map) = chain_build_weld_maps(graph, &seam_pairs)?;
+        Ok(Self {
+            seam_pairs,
+            vertex_map,
+            edge_map,
+        })
+    }
+
+    fn seed_prune_roots(&self, prune_roots: &mut HashSet<u64>) {
+        prune_roots.extend(self.seam_pairs.iter().map(|&(_, duplicate)| duplicate));
+        // Welding rewrites duplicate EDGE_CURVE endpoints to canonical vertices.
+        // Seed detached duplicate vertices explicitly: after the rewrite they
+        // are no longer descendants of duplicate seam-edge roots.
+        prune_roots.extend(self.vertex_map.keys().copied());
+    }
+}
+
+fn mapped_seam_edges(mapping: &HashMap<u64, u64>, edges: &[u64], label: &str) -> Result<Vec<u64>> {
+    edges
+        .iter()
+        .map(|edge| {
+            mapping
+                .get(edge)
+                .copied()
+                .ok_or_else(|| anyhow!("{label} missing seam edge #{edge}"))
+        })
+        .collect()
+}
+
+fn plan_chain_expansion_welds(
+    graph: &GraphEditor<'_>,
+    chain: &PeriodicChainPattern,
+    source_edge_faces: &HashMap<u64, Vec<u64>>,
+    unit_maps: &[HashMap<u64, u64>],
+    tail_map: &HashMap<u64, u64>,
+) -> Result<ChainWeldPlan> {
+    let old_sites = chain.sites;
+    let unit_gap_index = old_sites - 4;
+    let unit_site_index = old_sites - 3;
+    let tail_gap0 = old_sites - 3;
+    let tail_site0 = old_sites - 2;
+
+    let left_site = chain.site_face_ids[unit_gap_index]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let unit_gap = chain.gap_face_ids[unit_gap_index]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let unit_site = chain.site_face_ids[unit_site_index]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_tail_gap = chain.gap_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let overlay_left_site = chain.site_face_ids[unit_site_index - 1]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let overlay_tail_site = chain.site_face_ids[tail_site0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let source_unit_left = chain_interface_edges(source_edge_faces, &unit_gap, &left_site);
+    let source_unit_right = chain_interface_edges(source_edge_faces, &unit_site, &first_tail_gap);
+    if source_unit_left.is_empty() || source_unit_right.is_empty() {
+        bail!(
+            "periodic-chain site/gap seam is empty: left={} right={}",
+            source_unit_left.len(),
+            source_unit_right.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        graph,
+        source_unit_left
+            .iter()
+            .chain(source_unit_right.iter())
+            .copied(),
+    )?;
+
+    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
+    let source_overlay_left =
+        chain_interface_edges(source_edge_faces, &overlay_left_site, &unit_site);
+    let source_overlay_right =
+        chain_interface_edges(source_edge_faces, &unit_site, &overlay_tail_site);
+    if source_overlay_left.len() != overlay_edges_per_boundary
+        || source_overlay_right.len() != overlay_edges_per_boundary
+    {
+        bail!(
+            "periodic-chain adjacent-site overlay seam differs from proof: expected={overlay_edges_per_boundary} left={} right={}",
+            source_overlay_left.len(),
+            source_overlay_right.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        graph,
+        source_overlay_left
+            .iter()
+            .chain(source_overlay_right.iter())
+            .copied(),
+    )?;
+
+    let first_unit = unit_maps
+        .first()
+        .ok_or_else(|| anyhow!("periodic-chain expansion has no inserted unit map"))?;
+    let last_unit = unit_maps
+        .last()
+        .ok_or_else(|| anyhow!("periodic-chain expansion has no inserted unit map"))?;
+    let mut seam_pairs = Vec::new();
+
+    let first_left = mapped_seam_edges(first_unit, &source_unit_left, "first inserted unit")?;
+    seam_pairs.extend(chain_pair_edges_by_geometry(
+        graph,
+        &source_unit_right,
+        &first_left,
+    )?);
+
+    for pair in unit_maps.windows(2) {
+        let left = mapped_seam_edges(&pair[0], &source_unit_right, "inserted unit right")?;
+        let right = mapped_seam_edges(&pair[1], &source_unit_left, "inserted unit left")?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(graph, &left, &right)?);
+    }
+
+    let final_right = mapped_seam_edges(last_unit, &source_unit_right, "last inserted unit")?;
+    let tail_left = mapped_seam_edges(tail_map, &source_unit_right, "translated tail")?;
+    seam_pairs.extend(chain_pair_edges_by_geometry(
+        graph,
+        &final_right,
+        &tail_left,
+    )?);
+
+    if overlay_edges_per_boundary > 0 {
+        let first_overlay_left = mapped_seam_edges(
+            first_unit,
+            &source_overlay_left,
+            "first inserted unit overlay-left",
+        )?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            graph,
+            &source_overlay_right,
+            &first_overlay_left,
+        )?);
+
+        for pair in unit_maps.windows(2) {
+            let left = mapped_seam_edges(
+                &pair[0],
+                &source_overlay_right,
+                "inserted unit overlay-right",
+            )?;
+            let right =
+                mapped_seam_edges(&pair[1], &source_overlay_left, "inserted unit overlay-left")?;
+            seam_pairs.extend(chain_pair_edges_by_geometry(graph, &left, &right)?);
+        }
+
+        let final_overlay_right = mapped_seam_edges(
+            last_unit,
+            &source_overlay_right,
+            "last inserted unit overlay-right",
+        )?;
+        let tail_overlay_left = mapped_seam_edges(
+            tail_map,
+            &source_overlay_right,
+            "translated tail overlay-left",
+        )?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            graph,
+            &final_overlay_right,
+            &tail_overlay_left,
+        )?);
+    }
+
+    ChainWeldPlan::from_pairs(graph, seam_pairs)
+}
+
+fn plan_chain_shrink_welds(
+    graph: &GraphEditor<'_>,
+    chain: &PeriodicChainPattern,
+    source_edge_faces: &HashMap<u64, Vec<u64>>,
+    tail_map: &HashMap<u64, u64>,
+    new_sites: usize,
+) -> Result<ChainWeldPlan> {
+    let old_sites = chain.sites;
+    let kept_last_site = new_sites - 3;
+    let remove_site_start = new_sites - 2;
+    let remove_gap_start = new_sites - 3;
+    let tail_gap0 = old_sites - 3;
+    let tail_site0 = old_sites - 2;
+
+    let kept_site = chain.site_face_ids[kept_last_site]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_removed_site = chain.site_face_ids[remove_site_start]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_removed_gap = chain.gap_face_ids[remove_gap_start]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let last_removed_site = chain.site_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let first_tail_gap = chain.gap_face_ids[tail_gap0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let tail_site = chain.site_face_ids[tail_site0]
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    let source_kept_right =
+        chain_interface_edges(source_edge_faces, &kept_site, &first_removed_gap);
+    let source_tail_left =
+        chain_interface_edges(source_edge_faces, &last_removed_site, &first_tail_gap);
+    if source_kept_right.is_empty() || source_tail_left.is_empty() {
+        bail!(
+            "periodic-chain shrink seam is empty: kept={} tail={}",
+            source_kept_right.len(),
+            source_tail_left.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        graph,
+        source_kept_right
+            .iter()
+            .chain(source_tail_left.iter())
+            .copied(),
+    )?;
+
+    let mapped_tail_left = mapped_seam_edges(tail_map, &source_tail_left, "translated tail")?;
+    let mut seam_pairs =
+        chain_pair_edges_by_geometry(graph, &source_kept_right, &mapped_tail_left)?;
+
+    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
+    let source_kept_overlay =
+        chain_interface_edges(source_edge_faces, &kept_site, &first_removed_site);
+    let source_tail_overlay =
+        chain_interface_edges(source_edge_faces, &last_removed_site, &tail_site);
+    if source_kept_overlay.len() != overlay_edges_per_boundary
+        || source_tail_overlay.len() != overlay_edges_per_boundary
+    {
+        bail!(
+            "periodic-chain shrink overlay seam differs from proof: expected={overlay_edges_per_boundary} kept={} tail={}",
+            source_kept_overlay.len(),
+            source_tail_overlay.len()
+        );
+    }
+    chain_require_supported_seam_edges(
+        graph,
+        source_kept_overlay
+            .iter()
+            .chain(source_tail_overlay.iter())
+            .copied(),
+    )?;
+    if overlay_edges_per_boundary > 0 {
+        let mapped_tail_overlay =
+            mapped_seam_edges(tail_map, &source_tail_overlay, "translated tail overlay")?;
+        seam_pairs.extend(chain_pair_edges_by_geometry(
+            graph,
+            &source_kept_overlay,
+            &mapped_tail_overlay,
+        )?);
+    }
+
+    ChainWeldPlan::from_pairs(graph, seam_pairs)
+}
+
 /// Expand a proven fused-solid periodic chain at its positive-axis end.
 ///
 /// The chain detector has already proved a complete manifold partition into
@@ -1180,204 +1462,12 @@ pub fn expand_periodic_chain_positive(
         })
         .collect::<Result<HashSet<_>>>()?;
 
-    let left_site = chain.site_face_ids[unit_gap_index]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let unit_gap = chain.gap_face_ids[unit_gap_index]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let unit_site = chain.site_face_ids[unit_site_index]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let first_tail_gap = chain.gap_face_ids[tail_gap0]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let overlay_left_site = chain.site_face_ids[unit_site_index - 1]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let overlay_tail_site = chain.site_face_ids[tail_site0]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-
-    let source_unit_left = chain_interface_edges(&source_edge_faces, &unit_gap, &left_site);
-    let source_unit_right = chain_interface_edges(&source_edge_faces, &unit_site, &first_tail_gap);
-    if source_unit_left.is_empty() || source_unit_right.is_empty() {
-        bail!(
-            "periodic-chain site/gap seam is empty: left={} right={}",
-            source_unit_left.len(),
-            source_unit_right.len()
-        );
-    }
-    chain_require_supported_seam_edges(
-        &graph,
-        source_unit_left
-            .iter()
-            .chain(source_unit_right.iter())
-            .copied(),
-    )?;
-
-    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
-    let source_overlay_left =
-        chain_interface_edges(&source_edge_faces, &overlay_left_site, &unit_site);
-    let source_overlay_right =
-        chain_interface_edges(&source_edge_faces, &unit_site, &overlay_tail_site);
-    let overlay_left_len = source_overlay_left.len();
-    let overlay_right_len = source_overlay_right.len();
-    if overlay_left_len != overlay_edges_per_boundary
-        || overlay_right_len != overlay_edges_per_boundary
-    {
-        bail!(
-            "periodic-chain adjacent-site overlay seam differs from proof: expected={overlay_edges_per_boundary} left={overlay_left_len} right={overlay_right_len}"
-        );
-    }
-    chain_require_supported_seam_edges(
-        &graph,
-        source_overlay_left
-            .iter()
-            .chain(source_overlay_right.iter())
-            .copied(),
-    )?;
-
-    let mut seam_pairs = Vec::<(u64, u64)>::new();
-    let first_left = source_unit_left
-        .iter()
-        .map(|edge| {
-            unit_maps[0]
-                .get(edge)
-                .copied()
-                .ok_or_else(|| anyhow!("first inserted unit missing left seam edge #{edge}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    seam_pairs.extend(chain_pair_edges_by_geometry(
-        &graph,
-        &source_unit_right,
-        &first_left,
-    )?);
-
-    for index in 0..extra.saturating_sub(1) {
-        let left = source_unit_right
-            .iter()
-            .map(|edge| {
-                unit_maps[index]
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("inserted unit missing right seam edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let right = source_unit_left
-            .iter()
-            .map(|edge| {
-                unit_maps[index + 1]
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("inserted unit missing left seam edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        seam_pairs.extend(chain_pair_edges_by_geometry(&graph, &left, &right)?);
-    }
-
-    let final_right = source_unit_right
-        .iter()
-        .map(|edge| {
-            unit_maps[extra - 1]
-                .get(edge)
-                .copied()
-                .ok_or_else(|| anyhow!("last inserted unit missing right seam edge #{edge}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let tail_left = source_unit_right
-        .iter()
-        .map(|edge| {
-            tail_map
-                .get(edge)
-                .copied()
-                .ok_or_else(|| anyhow!("translated tail missing left seam edge #{edge}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    seam_pairs.extend(chain_pair_edges_by_geometry(
-        &graph,
-        &final_right,
-        &tail_left,
-    )?);
-
-    if overlay_edges_per_boundary > 0 {
-        let first_overlay_left = source_overlay_left
-            .iter()
-            .map(|edge| {
-                unit_maps[0]
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("first inserted unit missing overlay-left edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        seam_pairs.extend(chain_pair_edges_by_geometry(
-            &graph,
-            &source_overlay_right,
-            &first_overlay_left,
-        )?);
-
-        for index in 0..extra.saturating_sub(1) {
-            let left = source_overlay_right
-                .iter()
-                .map(|edge| {
-                    unit_maps[index]
-                        .get(edge)
-                        .copied()
-                        .ok_or_else(|| anyhow!("inserted unit missing overlay-right edge #{edge}"))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let right = source_overlay_left
-                .iter()
-                .map(|edge| {
-                    unit_maps[index + 1]
-                        .get(edge)
-                        .copied()
-                        .ok_or_else(|| anyhow!("inserted unit missing overlay-left edge #{edge}"))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            seam_pairs.extend(chain_pair_edges_by_geometry(&graph, &left, &right)?);
-        }
-
-        let final_overlay_right = source_overlay_right
-            .iter()
-            .map(|edge| {
-                unit_maps[extra - 1]
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("last inserted unit missing overlay-right edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let tail_overlay_left = source_overlay_right
-            .iter()
-            .map(|edge| {
-                tail_map
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("translated tail missing overlay-left edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        seam_pairs.extend(chain_pair_edges_by_geometry(
-            &graph,
-            &final_overlay_right,
-            &tail_overlay_left,
-        )?);
-    }
-
-    for &(_, duplicate) in &seam_pairs {
-        prune_roots.insert(duplicate);
-    }
-    let (vertex_map, edge_map) = chain_build_weld_maps(&graph, &seam_pairs)?;
-    // Welding rewrites duplicate EDGE_CURVE endpoints to canonical vertices.
-    // Seed the detached duplicate vertices explicitly: after the rewrite they
-    // are no longer descendants of the duplicate seam-edge roots, so a
-    // post-rewrite descendant walk alone cannot discover them.
-    prune_roots.extend(vertex_map.keys().copied());
+    let weld_plan =
+        plan_chain_expansion_welds(&graph, chain, &source_edge_faces, &unit_maps, &tail_map)?;
+    weld_plan.seed_prune_roots(&mut prune_roots);
+    let seam_edge_pairs = weld_plan.seam_pairs.len();
+    let vertex_map = &weld_plan.vertex_map;
+    let edge_map = &weld_plan.edge_map;
 
     let kept_source_faces = prefix_faces
         .iter()
@@ -1415,8 +1505,8 @@ pub fn expand_periodic_chain_positive(
         source_loops: &source_loops,
         target_nonstretch: &target_nonstretch,
         interfaces,
-        vertex_map: &vertex_map,
-        edge_map: &edge_map,
+        vertex_map,
+        edge_map,
     }
     .run(&mut graph, &mut prune_roots)?;
 
@@ -1460,7 +1550,7 @@ pub fn expand_periodic_chain_positive(
         removed_units: 0,
         unit_faces: unit_faces.len(),
         tail_faces: tail_faces.len(),
-        seam_edge_pairs: seam_pairs.len(),
+        seam_edge_pairs,
         welded_vertices: vertex_map.len(),
         welded_edges: edge_map.len(),
         rebuilt_stretch_faces: stretch_faces.len(),
@@ -1584,107 +1674,14 @@ pub fn shrink_periodic_chain_positive(
         })
         .collect::<Result<HashSet<_>>>()?;
 
-    let kept_site = chain.site_face_ids[kept_last_site]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let first_removed_site = chain.site_face_ids[remove_site_start]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let first_removed_gap = chain.gap_face_ids[remove_gap_start]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let last_removed_site = chain.site_face_ids[tail_gap0]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let first_tail_gap = chain.gap_face_ids[tail_gap0]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let tail_site = chain.site_face_ids[tail_site0]
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-
-    let source_kept_right =
-        chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_gap);
-    let source_tail_left =
-        chain_interface_edges(&source_edge_faces, &last_removed_site, &first_tail_gap);
-    if source_kept_right.is_empty() || source_tail_left.is_empty() {
-        bail!(
-            "periodic-chain shrink seam is empty: kept={} tail={}",
-            source_kept_right.len(),
-            source_tail_left.len()
-        );
-    }
-    chain_require_supported_seam_edges(
-        &graph,
-        source_kept_right
-            .iter()
-            .chain(source_tail_left.iter())
-            .copied(),
-    )?;
-
-    let mapped_tail_left = source_tail_left
-        .iter()
-        .map(|edge| {
-            tail_map
-                .get(edge)
-                .copied()
-                .ok_or_else(|| anyhow!("translated tail missing left seam edge #{edge}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut seam_pairs =
-        chain_pair_edges_by_geometry(&graph, &source_kept_right, &mapped_tail_left)?;
-
-    let overlay_edges_per_boundary = chain.adjacent_site_edge_counts[0];
-    let source_kept_overlay =
-        chain_interface_edges(&source_edge_faces, &kept_site, &first_removed_site);
-    let source_tail_overlay =
-        chain_interface_edges(&source_edge_faces, &last_removed_site, &tail_site);
-    let kept_overlay_len = source_kept_overlay.len();
-    let tail_overlay_len = source_tail_overlay.len();
-    if kept_overlay_len != overlay_edges_per_boundary
-        || tail_overlay_len != overlay_edges_per_boundary
-    {
-        bail!(
-            "periodic-chain shrink overlay seam differs from proof: expected={overlay_edges_per_boundary} kept={kept_overlay_len} tail={tail_overlay_len}"
-        );
-    }
-    chain_require_supported_seam_edges(
-        &graph,
-        source_kept_overlay
-            .iter()
-            .chain(source_tail_overlay.iter())
-            .copied(),
-    )?;
-    if overlay_edges_per_boundary > 0 {
-        let mapped_tail_overlay = source_tail_overlay
-            .iter()
-            .map(|edge| {
-                tail_map
-                    .get(edge)
-                    .copied()
-                    .ok_or_else(|| anyhow!("translated tail missing overlay seam edge #{edge}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        seam_pairs.extend(chain_pair_edges_by_geometry(
-            &graph,
-            &source_kept_overlay,
-            &mapped_tail_overlay,
-        )?);
-    }
-
+    let weld_plan =
+        plan_chain_shrink_welds(&graph, chain, &source_edge_faces, &tail_map, new_sites)?;
     let mut prune_roots = remove_faces.clone();
     prune_roots.extend(tail_faces.iter().copied());
-    for &(_, duplicate) in &seam_pairs {
-        prune_roots.insert(duplicate);
-    }
-    let (vertex_map, edge_map) = chain_build_weld_maps(&graph, &seam_pairs)?;
-    prune_roots.extend(vertex_map.keys().copied());
+    weld_plan.seed_prune_roots(&mut prune_roots);
+    let seam_edge_pairs = weld_plan.seam_pairs.len();
+    let vertex_map = &weld_plan.vertex_map;
+    let edge_map = &weld_plan.edge_map;
 
     let mut target_nonstretch = kept_faces.clone();
     target_nonstretch.extend(target_tail.iter().copied());
@@ -1709,8 +1706,8 @@ pub fn shrink_periodic_chain_positive(
         source_loops: &source_loops,
         target_nonstretch: &target_nonstretch,
         interfaces,
-        vertex_map: &vertex_map,
-        edge_map: &edge_map,
+        vertex_map,
+        edge_map,
     }
     .run(&mut graph, &mut prune_roots)?;
 
@@ -1749,7 +1746,7 @@ pub fn shrink_periodic_chain_positive(
         removed_units,
         unit_faces,
         tail_faces: tail_faces.len(),
-        seam_edge_pairs: seam_pairs.len(),
+        seam_edge_pairs,
         welded_vertices: vertex_map.len(),
         welded_edges: edge_map.len(),
         rebuilt_stretch_faces: stretch_faces.len(),
