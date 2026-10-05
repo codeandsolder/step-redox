@@ -241,18 +241,18 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
                 continue;
             }
 
-            let canonical = group[0].clone();
+            let canonical = &group[0];
 
             // Do not infer the actual instance transform from the canonical-key
             // rotation. Symmetric envelopes can have several equivalent
             // canonical rotations. Prove each source -> target transform
             // directly against its transformed vertex and B-rep signatures.
-            let mut mapped_group = vec![(canonical.clone(), 0u8)];
+            let mut mapped_group = vec![(canonical, 0u8)];
             for target in group.iter().skip(1) {
                 if let Some(quarter) =
                     unique_relative_quarter(&canonical, target, entities, &initial_index)
                 {
-                    mapped_group.push((target.clone(), quarter));
+                    mapped_group.push((target, quarter));
                 }
             }
             if mapped_group.len() < 2 {
@@ -470,7 +470,41 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     stats
 }
 
+fn has_z90_candidate_representation(entities: &[EntityInstance]) -> bool {
+    let solid_ids = entities
+        .iter()
+        .filter_map(|entity| {
+            let record = simple_record(entity)?;
+            (record.name == "MANIFOLD_SOLID_BREP").then_some(entity_id(entity))
+        })
+        .collect::<HashSet<_>>();
+    if solid_ids.len() < 3 {
+        return false;
+    }
+
+    entities.iter().any(|entity| {
+        let Some(record) = simple_record(entity) else {
+            return false;
+        };
+        if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+            return false;
+        }
+        representation_items_and_context(entity).is_some_and(|(items, _)| {
+            items
+                .into_iter()
+                .filter(|id| solid_ids.contains(id))
+                .take(3)
+                .count()
+                == 3
+        })
+    })
+}
+
 pub fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> InstanceStats {
+    if !has_z90_candidate_representation(entities) {
+        return InstanceStats::default();
+    }
+
     // Reuse the mature geometric proof + guarded GC from the MAPPED_ITEM pass,
     // then replace only its representation layer with the assembly structure
     // emitted by OpenCascade itself. Keep a rollback copy because assembly
