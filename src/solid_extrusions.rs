@@ -2,7 +2,7 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
-use crate::math3::{add, cross, distance, dot, mul, norm, sub};
+use crate::math3::{add, cross, distance, dot, mul, norm, normalize as normalize3, sub};
 pub use crate::profile_curves::RecoveredProfileCurve;
 use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
@@ -1566,11 +1566,7 @@ fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = norm(vector);
-    if !length.is_finite() || length <= DIR_TOL {
-        return None;
-    }
-    Some(mul(vector, 1.0 / length))
+    normalize3(vector, DIR_TOL)
 }
 
 fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {

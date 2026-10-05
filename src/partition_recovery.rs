@@ -1,3 +1,4 @@
+use crate::math3::{dot, normalize_by_division as normalize3};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
     visit_entity_refs,
@@ -1048,16 +1049,8 @@ fn quantize(v: f64, q: f64) -> Option<i64> {
     Some(x as i64)
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = dot(v, v).sqrt();
-    if !n.is_finite() || n <= 1.0e-15 {
-        return None;
-    }
-    Some([v[0] / n, v[1] / n, v[2] / n])
+    normalize3(v, 1.0e-15)
 }
 
 fn canonical_axis(v: [f64; 3]) -> Option<[f64; 3]> {

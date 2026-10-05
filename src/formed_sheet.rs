@@ -1,4 +1,6 @@
-use crate::math3::{add, cross, distance, dot, mul, norm, sub};
+use crate::math3::{
+    add, cross, distance, dot, mul, norm, normalize_by_division as normalize3, sub,
+};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -1647,11 +1649,7 @@ fn canonical_line_origin(origin: [f64; 3], axis: [f64; 3]) -> [f64; 3] {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = norm(vector);
-    if !length.is_finite() || length <= DIR_TOL {
-        return None;
-    }
-    Some([vector[0] / length, vector[1] / length, vector[2] / length])
+    normalize3(vector, DIR_TOL)
 }
 
 fn quantize_mm(value: f64) -> i64 {

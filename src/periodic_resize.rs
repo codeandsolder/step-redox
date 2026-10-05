@@ -1,4 +1,4 @@
-use crate::math3::{add, dot, norm, scale};
+use crate::math3::{add, dot, normalize as normalize3, scale};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
@@ -2239,12 +2239,7 @@ fn quantize_coord(point: [f64; 3]) -> [i64; 3] {
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = norm(v);
-    if !n.is_finite() || n <= 1.0e-15 {
-        None
-    } else {
-        Some(scale(v, 1.0 / n))
-    }
+    normalize3(v, 1.0e-15)
 }
 
 #[cfg(test)]

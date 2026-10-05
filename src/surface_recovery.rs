@@ -1,4 +1,4 @@
-use crate::math3::{cross, distance, dot, norm, sub};
+use crate::math3::{cross, distance, dot, norm, normalize_by_division as normalize3, sub};
 use crate::step_entities::{cartesian_point, entity_ref, number, push_simple};
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
@@ -875,11 +875,7 @@ const fn integer(parameter: &Parameter) -> Option<i64> {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = norm(vector);
-    if !length.is_finite() || length <= 0.0 {
-        return None;
-    }
-    Some([vector[0] / length, vector[1] / length, vector[2] / length])
+    normalize3(vector, 0.0)
 }
 
 #[cfg(test)]

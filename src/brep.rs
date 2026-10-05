@@ -1,4 +1,4 @@
-use crate::math3::{dot, mul, sub};
+use crate::math3::{dot, mul, normalize as normalize3, sub};
 use crate::shape_identity::{manifold_solid_face_ids, resolve_edge_curve_use};
 use crate::step_entities::{cartesian_point, entity_ref, number};
 use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
@@ -1006,11 +1006,7 @@ fn default_ref_direction(axis: [f64; 3]) -> [f64; 3] {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = dot(vector, vector).sqrt();
-    if !length.is_finite() || length <= DIRECTION_TOLERANCE {
-        return None;
-    }
-    Some(mul(vector, 1.0 / length))
+    normalize3(vector, DIRECTION_TOLERANCE)
 }
 
 pub fn manifold_shell(

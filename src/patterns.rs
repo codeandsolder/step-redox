@@ -1,4 +1,4 @@
-use crate::math3::{add, cross, dot, norm, scale, sub};
+use crate::math3::{add, cross, dot, norm, normalize as normalize3, scale, sub};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
@@ -1253,11 +1253,7 @@ fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = norm(v);
-    if !n.is_finite() || n <= 1.0e-15 {
-        return None;
-    }
-    Some(scale(v, 1.0 / n))
+    normalize3(v, 1.0e-15)
 }
 
 #[cfg(test)]
