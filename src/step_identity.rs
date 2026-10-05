@@ -2,6 +2,32 @@ use ruststep::ast::{Name, Parameter};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+#[derive(Debug)]
+pub(crate) enum IndexBucket {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl IndexBucket {
+    pub(crate) const fn one(index: usize) -> Self {
+        Self::One(index)
+    }
+
+    pub(crate) fn find(&self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+        match self {
+            Self::One(index) => predicate(*index).then_some(*index),
+            Self::Many(indices) => indices.iter().copied().find(|&index| predicate(index)),
+        }
+    }
+
+    pub(crate) fn push(&mut self, index: usize) {
+        match self {
+            Self::One(first) => *self = Self::Many(vec![*first, index]),
+            Self::Many(indices) => indices.push(index),
+        }
+    }
+}
+
 pub(crate) fn hash_parameter(param: &Parameter, hasher: &mut impl Hasher) {
     hash_parameter_impl(param, None, hasher);
 }
@@ -154,6 +180,15 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         hash_parameter(param, &mut hasher);
         hasher.finish()
+    }
+
+    #[test]
+    fn index_bucket_allocates_only_after_a_second_candidate() {
+        let mut bucket = IndexBucket::one(4);
+        assert_eq!(bucket.find(|index| index == 4), Some(4));
+        assert_eq!(bucket.find(|index| index == 9), None);
+        bucket.push(9);
+        assert_eq!(bucket.find(|index| index == 9), Some(9));
     }
 
     #[test]

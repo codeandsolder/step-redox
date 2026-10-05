@@ -1,6 +1,6 @@
 use crate::step_graph::visit_entity_refs;
 use crate::step_identity::{
-    hash_parameter_with_alias, parameters_equivalent_with_alias, resolve_alias,
+    IndexBucket, hash_parameter_with_alias, parameters_equivalent_with_alias, resolve_alias,
 };
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, HashMap};
@@ -27,7 +27,7 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
         ty: &'static str,
     }
 
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<u64, IndexBucket> = HashMap::new();
     let mut merges = Vec::new();
 
     for (idx, entity) in entities.iter().enumerate() {
@@ -73,7 +73,7 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
         };
 
         let matching = groups.get(&key_hash).and_then(|candidates| {
-            candidates.iter().copied().find(|&candidate_idx| {
+            candidates.find(|candidate_idx| {
                 presentation_keys_equal(&entities[candidate_idx], entity, key_param_indices)
             })
         });
@@ -85,7 +85,12 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
                 ty,
             });
         } else {
-            groups.entry(key_hash).or_default().push(idx);
+            match groups.entry(key_hash) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(IndexBucket::one(idx));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(idx),
+            }
         }
     }
 
@@ -217,7 +222,7 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
             }
         }
 
-        let mut seen = HashMap::<u64, HashCanonicals>::new();
+        let mut seen = HashMap::<u64, IndexBucket>::new();
         let mut pending = Vec::<(u64, u64)>::new();
         for (index, entity) in entities.iter().enumerate() {
             if !internable[index] {
@@ -230,10 +235,12 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
             let hash = hashes[index].expect("internable entity must have a cached structural hash");
             match seen.entry(hash) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(HashCanonicals::One(index));
+                    entry.insert(IndexBucket::one(index));
                 }
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if let Some(canonical_index) = entry.get().matching(entity, entities, &alias) {
+                    if let Some(canonical_index) = entry.get().find(|candidate_index| {
+                        entities_equivalent(entity, &entities[candidate_index], &alias)
+                    }) {
                         let canonical =
                             resolve_alias(&alias, entity_id(&entities[canonical_index]));
                         if canonical != id {
@@ -309,34 +316,6 @@ fn compress_aliases(alias: &mut HashMap<u64, u64>) -> Vec<u64> {
         }
     }
     changed
-}
-
-#[derive(Debug)]
-enum HashCanonicals {
-    One(usize),
-    Many(Vec<usize>),
-}
-
-impl HashCanonicals {
-    fn matching(
-        &self,
-        entity: &EntityInstance,
-        entities: &[EntityInstance],
-        alias: &HashMap<u64, u64>,
-    ) -> Option<usize> {
-        let matches = |index: usize| entities_equivalent(entity, &entities[index], alias);
-        match self {
-            Self::One(index) => matches(*index).then_some(*index),
-            Self::Many(indices) => indices.iter().copied().find(|&index| matches(index)),
-        }
-    }
-
-    fn push(&mut self, index: usize) {
-        match self {
-            Self::One(first) => *self = Self::Many(vec![*first, index]),
-            Self::Many(indices) => indices.push(index),
-        }
-    }
 }
 
 fn entity_structural_hash(entity: &EntityInstance, alias: &HashMap<u64, u64>) -> u64 {

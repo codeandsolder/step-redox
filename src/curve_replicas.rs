@@ -1,7 +1,7 @@
 use crate::math3::{add, distance, norm, sub};
 use crate::step_entities::{cartesian_point, entity_ref, push_simple};
 use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
-use crate::step_identity::{hash_parameter, parameters_equivalent};
+use crate::step_identity::{IndexBucket, hash_parameter, parameters_equivalent};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -41,14 +41,14 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
 
     let index = build_index(entities);
     let mut groups = Vec::<Vec<CurveInfo>>::new();
-    let mut groups_by_hash = HashMap::<u64, Vec<usize>>::new();
+    let mut groups_by_hash = HashMap::<u64, IndexBucket>::new();
 
     for entity in entities.iter() {
         let Some((key_hash, info)) = parse_curve(entity, entities, &index) else {
             continue;
         };
         let matching_group = groups_by_hash.get(&key_hash).and_then(|candidates| {
-            candidates.iter().copied().find(|&group_index| {
+            candidates.find(|group_index| {
                 curve_keys_equal(&info, &groups[group_index][0], entities, &index)
             })
         });
@@ -56,10 +56,14 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
             groups[group_index].push(info);
         } else {
             let group_index = groups.len();
-            groups_by_hash
-                .entry(key_hash)
-                .or_default()
-                .push(group_index);
+            match groups_by_hash.entry(key_hash) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(IndexBucket::one(group_index));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().push(group_index);
+                }
+            }
             groups.push(vec![info]);
         }
     }
