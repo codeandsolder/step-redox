@@ -1,3 +1,4 @@
+use crate::step_graph::visit_entity_refs;
 use anyhow::{Context, Result, bail};
 use ruststep::ast::{EntityInstance, Exchange, Name, Parameter, Record};
 use serde::Serialize;
@@ -2041,30 +2042,6 @@ fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateSt
         keep
     });
     stats
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
 }
 
 fn standalone_param_key(param: &Parameter) -> String {

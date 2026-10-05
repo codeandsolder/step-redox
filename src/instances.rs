@@ -1,3 +1,4 @@
+pub(crate) use crate::step_graph::visit_entity_refs;
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
@@ -2470,30 +2471,6 @@ pub fn push_simple(
 
 pub const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
-}
-
-pub fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
 }
 
 #[cfg(test)]

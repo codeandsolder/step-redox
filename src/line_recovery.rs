@@ -1,5 +1,7 @@
 use crate::math3::{add, dot, norm, scale, sub};
-use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use crate::step_graph::{
+    build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
+};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -514,30 +516,6 @@ fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
 
 fn is_false_logical(param: &Parameter) -> bool {
     matches!(param, Parameter::Enumeration(value) if value == "F")
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
 }
 
 fn push_simple(

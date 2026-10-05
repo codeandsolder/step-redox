@@ -5,13 +5,13 @@ use crate::brep::{
 use crate::instances::{
     StyleRef, cartesian_point, collect_styles_by_target, entity_ref, entity_ref_map,
     face_topology_signature, inbound_map, oriented_edge_signature, patch_presentation_lists,
-    push_point, push_simple, representation_items_and_context, visit_entity_refs,
+    push_point, push_simple, representation_items_and_context,
 };
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
 };
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
 };
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Parameter};

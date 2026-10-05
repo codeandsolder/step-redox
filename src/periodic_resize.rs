@@ -1,6 +1,6 @@
 use crate::math3::{add, cross, dot, norm, scale};
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
 };
 use anyhow::{Result, anyhow, bail};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
@@ -3307,30 +3307,6 @@ fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
         out.insert(id, refs);
     }
     out
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
 }
 
 fn list_params(record: &Record) -> Option<&[Parameter]> {

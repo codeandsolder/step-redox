@@ -1,3 +1,4 @@
+use crate::step_graph::visit_entity_refs;
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::HashMap;
 
@@ -200,30 +201,6 @@ fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
         return None;
     };
     items.iter().map(numeric_value).collect()
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
 }
 
 #[cfg(test)]
