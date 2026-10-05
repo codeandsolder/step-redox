@@ -1,5 +1,5 @@
-use crate::instances::{cartesian_point, closure_from, entity_ref, number, push_simple};
 use crate::math3::{distance, norm, sub};
+use crate::step_entities::{cartesian_point, closure_from, entity_ref, number, push_simple};
 use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};

@@ -37,6 +37,7 @@ pub mod profile_curves;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
 mod spherical_caps;
+mod step_entities;
 mod step_graph;
 mod step_io;
 pub use step_io::write_exchange;

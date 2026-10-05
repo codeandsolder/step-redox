@@ -2710,7 +2710,7 @@ fn vec_key(v: [f64; 3]) -> String {
 
 pub fn closure_entity_count(solid_id: u64, entities: &[EntityInstance]) -> usize {
     let index = build_index(entities);
-    crate::instances::closure_from(solid_id, entities, &index).len()
+    crate::step_entities::closure_from(solid_id, entities, &index).len()
 }
 
 #[cfg(test)]

@@ -3,12 +3,14 @@ use crate::brep::{
     face_surface, manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{
-    StyleRef, cartesian_point, collect_styles_by_target, entity_ref, face_topology_signature,
-    oriented_edge_signature, patch_presentation_lists, push_point, push_simple,
-    representation_items_and_context,
+    StyleRef, collect_styles_by_target, face_topology_signature, oriented_edge_signature,
 };
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
+};
+use crate::step_entities::{
+    cartesian_point, entity_ref, patch_presentation_lists, push_point, push_simple,
+    representation_items_and_context,
 };
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,

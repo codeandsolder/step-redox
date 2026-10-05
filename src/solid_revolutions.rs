@@ -1,6 +1,6 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
-use crate::instances::representation_items_and_context;
 use crate::profile_curves::RecoveredProfileCurve;
+use crate::step_entities::representation_items_and_context;
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;

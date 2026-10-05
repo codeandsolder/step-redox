@@ -2,9 +2,10 @@ use crate::brep::{
     append_refs_to_list_param, face_edge_curves, face_sense, face_surface, manifold_shell,
     matching_plane_bound, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
-use crate::instances::{
-    cartesian_point, collect_styles_by_target, entity_ref, face_topology_signature, number,
-    patch_presentation_lists, push_point, push_simple, representation_items_and_context,
+use crate::instances::{collect_styles_by_target, face_topology_signature};
+use crate::step_entities::{
+    cartesian_point, entity_ref, number, patch_presentation_lists, push_point, push_simple,
+    representation_items_and_context,
 };
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,

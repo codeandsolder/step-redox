@@ -1,4 +1,4 @@
-use crate::{instances, step_graph, units};
+use crate::{instances, step_entities, step_graph, units};
 use anyhow::{Context, Result, bail};
 use encoding_rs::GBK;
 use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter, Record};
@@ -138,7 +138,8 @@ fn representation_ownership(entities: &[EntityInstance]) -> HashMap<u64, (u64, u
         {
             continue;
         }
-        let Some((items, context_id)) = instances::representation_items_and_context(entity) else {
+        let Some((items, context_id)) = step_entities::representation_items_and_context(entity)
+        else {
             continue;
         };
         let representation_id = step_graph::entity_id(entity);
@@ -218,7 +219,7 @@ fn solid_basic_stats(
     index: &HashMap<u64, usize>,
 ) -> BasicSolidStats {
     let closure = instances::semantic_solid_closure(root, entities, index)
-        .unwrap_or_else(|| instances::closure_from(root, entities, index));
+        .unwrap_or_else(|| step_entities::closure_from(root, entities, index));
     let mut stats = BasicSolidStats {
         closure_entities: closure.len(),
         vertices: 0,
@@ -368,7 +369,7 @@ fn set_shell_faces(entity: &mut EntityInstance, face_ids: &[u64]) -> Result<()> 
         face_ids
             .iter()
             .copied()
-            .map(instances::entity_ref)
+            .map(step_entities::entity_ref)
             .collect(),
     );
     Ok(())
@@ -382,7 +383,7 @@ fn set_representation_single_item(entity: &mut EntityInstance, solid_id: u64) ->
     let Some(items) = params.get_mut(1) else {
         bail!("representation has no item list");
     };
-    *items = Parameter::List(vec![instances::entity_ref(solid_id)]);
+    *items = Parameter::List(vec![step_entities::entity_ref(solid_id)]);
     Ok(())
 }
 
@@ -408,13 +409,13 @@ fn extract_one(
         bail!("#{solid_id} is {}, not MANIFOLD_SOLID_BREP", record.name);
     }
 
-    let shell_id =
-        instances::nth_entity_ref(&record.parameter, 1).context("solid has no shell reference")?;
+    let shell_id = step_entities::nth_entity_ref(&record.parameter, 1)
+        .context("solid has no shell reference")?;
     let face_ids = instances::manifold_solid_face_ids(solid_id, &section.entities, index)
         .context("solid has no semantic face list")?;
     let mut keep = instances::semantic_solid_closure(solid_id, &section.entities, index)
         .context("cannot build semantic solid closure")?;
-    keep.extend(instances::closure_from(
+    keep.extend(step_entities::closure_from(
         context_id,
         &section.entities,
         index,
@@ -429,7 +430,7 @@ fn extract_one(
         shape_definition_root_for_representation(representation_id, &section.entities)
     {
         keep.insert(shape_definition_id);
-        keep.extend(instances::closure_from(
+        keep.extend(step_entities::closure_from(
             product_shape_id,
             &section.entities,
             index,

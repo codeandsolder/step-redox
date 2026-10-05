@@ -1,7 +1,6 @@
-use crate::instances::{
-    cartesian_point, entity_ref, manifold_solid_face_ids, number, resolve_edge_curve_use,
-};
+use crate::instances::{manifold_solid_face_ids, resolve_edge_curve_use};
 use crate::math3::{dot, mul, sub};
+use crate::step_entities::{cartesian_point, entity_ref, number};
 use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
