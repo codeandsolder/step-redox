@@ -810,12 +810,13 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             ],
         );
 
-        let residual_items: Vec<u64> = top_items
+        let residual_items = top_items
             .iter()
             .copied()
             .filter(|item| !mapped_ids.contains(item))
-            .collect();
-        let mut patched_residual_items = residual_items.clone();
+            .collect::<Vec<_>>();
+        let has_residual_items = !residual_items.is_empty();
+        let mut patched_residual_items = residual_items;
         patched_residual_items.push(residual_origin);
         let Some(top_representation) = entities.get_mut(top_idx) else {
             return false;
@@ -823,7 +824,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
         set_representation_items(top_representation, &patched_residual_items);
 
         let mut root_items = vec![root_origin];
-        if !residual_items.is_empty() {
+        if has_residual_items {
             root_items.push(residual_origin);
         }
         for mapped in &local_mapped {
@@ -854,7 +855,7 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             return false;
         }
 
-        if !residual_items.is_empty() {
+        if has_residual_items {
             let residual_pd = push_child_product(
                 entities,
                 &mut next_id,
@@ -924,12 +925,12 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             if mapped_styles.len() != 1 || mapped_styles[0].assignments.is_empty() {
                 return false;
             }
-            let inherited_style = mapped_styles[0].assignments.clone();
+            let inherited_style = &mapped_styles[0].assignments;
             for (mapped, _) in &occurrences {
                 let Some(styles) = styles_by_target.get(mapped) else {
                     return false;
                 };
-                if styles.len() != 1 || styles[0].assignments != inherited_style {
+                if styles.len() != 1 || styles[0].assignments != *inherited_style {
                     return false;
                 }
             }
