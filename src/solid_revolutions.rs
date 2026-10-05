@@ -894,9 +894,11 @@ fn detect_one_radial_slot(
         push_unique_segment(&mut segments, segment);
         base_face_ids.push(face_ids[face_index]);
     }
-    let Some(profile_points_mm) = closed_profile_from_segments(segments.clone()) else {
+    #[cfg(test)]
+    let debug_segments = segments.clone();
+    let Some(profile_points_mm) = closed_profile_from_segments(segments) else {
         #[cfg(test)]
-        eprintln!("radial-slot base profile failed closure: {segments:?}");
+        eprintln!("radial-slot base profile failed closure: {debug_segments:?}");
         return None;
     };
     let profile_curves = line_profile_curves(&profile_points_mm);
