@@ -15,7 +15,6 @@ use crate::step_entities::{
 };
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
-    visit_entity_refs,
 };
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Parameter};
@@ -37,7 +36,7 @@ pub struct PlanarFeatureStats {
     pub styles_replaced: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellContext {
     representation_id: u64,
     context_id: u64,
@@ -123,16 +122,31 @@ enum StyleKey {
 }
 
 #[derive(Debug)]
-struct Feature {
-    faces: Vec<u64>,
-    interface_bound: u64,
-    interface_loop: u64,
-    bound_orientation: String,
-    center: [f64; 3],
-    normalized_quarter: u8,
-    signature: String,
+struct MappedFeatureMember {
+    candidate: BoundaryFeatureCandidate,
     style_key: StyleKey,
     old_style_ids: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct MappedFeatureFamilyPlan {
+    members: Vec<MappedFeatureMember>,
+}
+
+#[derive(Debug)]
+struct MappedFeatureHostPlan {
+    context: ShellContext,
+    host_face_id: u64,
+    frame: PlaneFrame,
+    container_styles: Vec<StyleRef>,
+    families: Vec<MappedFeatureFamilyPlan>,
+}
+
+#[derive(Debug, Default)]
+struct BoundaryFeatureInstancePlan {
+    index: HashMap<u64, usize>,
+    next_id: u64,
+    hosts: Vec<MappedFeatureHostPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,15 +239,34 @@ pub struct BoundaryFeatureDiagnostics {
     pub families: Vec<BoundaryFeatureFamilyEvidence>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FeatureInterface {
+    host_face_id: u64,
+    bound_id: u64,
+    loop_id: u64,
+    bound_orientation: String,
+}
+
 #[derive(Debug, Clone)]
 struct BoundaryFeatureCandidate {
-    shell_id: u64,
+    context: ShellContext,
     polarity: FeaturePolarity,
-    host_face_ids: Vec<u64>,
+    interfaces: Vec<FeatureInterface>,
     face_ids: Vec<u64>,
-    interface_bound_ids: Vec<u64>,
     center: [f64; 3],
+    normalized_quarter: u8,
     signature: String,
+}
+
+impl BoundaryFeatureCandidate {
+    fn same_hosts(&self, other: &Self) -> bool {
+        self.interfaces.len() == other.interfaces.len()
+            && self
+                .interfaces
+                .iter()
+                .zip(&other.interfaces)
+                .all(|(a, b)| a.host_face_id == b.host_face_id)
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -908,9 +941,71 @@ fn diagnose_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> BoundaryFeatureDiagnostics {
+    let (mut report, grouped) = grouped_boundary_features_with_index(entities, index);
+    let mut families = grouped
+        .into_iter()
+        .map(|members| {
+            let first = &members[0];
+            let shell_id = first.context.shell_id;
+            let polarity = first.polarity;
+            let faces_per_instance = first.face_ids.len();
+            let host_face_ids = first
+                .interfaces
+                .iter()
+                .map(|interface| interface.host_face_id)
+                .collect();
+            let signature = first.signature.clone();
+            let centers = members
+                .iter()
+                .map(|member| member.center)
+                .collect::<Vec<_>>();
+            let lattice = fit_point_lattice(&centers, 1.0e-7);
+            let motif_pattern = factor_point_motif_pattern(&centers, 1.0e-7);
+            BoundaryFeatureFamilyEvidence {
+                shell_id,
+                polarity,
+                host_face_ids,
+                faces_per_instance,
+                instances: members.len(),
+                signature,
+                members: members
+                    .into_iter()
+                    .map(|member| BoundaryFeatureInstanceEvidence {
+                        face_ids: member.face_ids,
+                        center_mm: member.center,
+                        interface_bound_ids: member
+                            .interfaces
+                            .into_iter()
+                            .map(|interface| interface.bound_id)
+                            .collect(),
+                    })
+                    .collect(),
+                lattice,
+                motif_pattern,
+            }
+        })
+        .collect::<Vec<_>>();
+    families.sort_by(|a, b| {
+        b.instances
+            .cmp(&a.instances)
+            .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+            .then_with(|| a.signature.cmp(&b.signature))
+    });
+    report.families = families;
+    report
+}
+
+fn grouped_boundary_features_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> (
+    BoundaryFeatureDiagnostics,
+    Vec<Vec<BoundaryFeatureCandidate>>,
+) {
     let mut report = BoundaryFeatureDiagnostics::default();
     if entities.is_empty() {
-        return report;
+        return (report, Vec::new());
     }
 
     let contexts = collect_shell_contexts(entities, index);
@@ -939,23 +1034,13 @@ fn diagnose_boundary_features_with_index(
             .collect::<Vec<_>>();
         report.planar_hosts += hosts.len();
 
-        // Single-host leaves cover both protrusions and blind pockets.  The
-        // topology peel is identical for the two; only the reconstruction
-        // operator (union vs difference) changes.
         for (host_face, frame, bounds) in &hosts {
             let host_set = HashSet::from([*host_face]);
             let frames = HashMap::from([(*host_face, frame.clone())]);
             let lookups = HashMap::from([(*host_face, host_bound_lookup(bounds, entities, index))]);
             for component in topology.components_without_hosts(&host_set) {
                 let Some(candidate) = boundary_feature_candidate(
-                    context.shell_id,
-                    component,
-                    &host_set,
-                    &frames,
-                    &lookups,
-                    &topology,
-                    entities,
-                    &index,
+                    &context, component, &host_set, &frames, &lookups, &topology, entities, index,
                 ) else {
                     continue;
                 };
@@ -963,12 +1048,9 @@ fn diagnose_boundary_features_with_index(
             }
         }
 
-        // Multi-interface features are graph separators, not a special
-        // "two-host hole" case. Remove every currently-qualified carrier face
-        // as a barrier, flood the remaining dual graph once, and classify each
-        // small component by the host bounds it actually touches. This exposes
-        // through-cuts, edge cuts, and other features with two or more planar
-        // interfaces without combinatorial host-pair enumeration.
+        // Treat all qualified host faces as graph separators in one pass. A
+        // surviving component records the interfaces it actually touches, so
+        // two-host holes and N-host edge/tunnel features use the same model.
         if hosts.len() >= 2 {
             let host_set = hosts
                 .iter()
@@ -985,37 +1067,31 @@ fn diagnose_boundary_features_with_index(
 
             for component in topology.components_without_hosts(&host_set) {
                 let Some(candidate) = boundary_feature_candidate(
-                    context.shell_id,
-                    component,
-                    &host_set,
-                    &frames,
-                    &lookups,
-                    &topology,
-                    entities,
-                    &index,
+                    &context, component, &host_set, &frames, &lookups, &topology, entities, index,
                 ) else {
                     continue;
                 };
-                if candidate.host_face_ids.len() >= 2 {
+                if candidate.interfaces.len() >= 2 {
                     candidates.push(candidate);
                 }
             }
         }
     }
 
-    // Prefer the candidate with the richer interface set when an identical
-    // face patch was rediscovered from more than one host selection.
+    // Prefer the richer interface proof when the same face patch is discovered
+    // through both a single-host and an all-host graph cut.
     candidates.sort_by(|a, b| {
-        a.face_ids
-            .cmp(&b.face_ids)
-            .then_with(|| b.host_face_ids.len().cmp(&a.host_face_ids.len()))
+        a.context
+            .shell_id
+            .cmp(&b.context.shell_id)
+            .then_with(|| a.face_ids.cmp(&b.face_ids))
+            .then_with(|| b.interfaces.len().cmp(&a.interfaces.len()))
     });
     let mut deduped = Vec::<BoundaryFeatureCandidate>::new();
     for candidate in candidates {
-        if deduped
-            .last()
-            .is_none_or(|previous| previous.face_ids != candidate.face_ids)
-        {
+        if deduped.last().is_none_or(|previous| {
+            previous.context != candidate.context || previous.face_ids != candidate.face_ids
+        }) {
             deduped.push(candidate);
         }
     }
@@ -1031,27 +1107,35 @@ fn diagnose_boundary_features_with_index(
         .count();
     report.single_host_candidates = deduped
         .iter()
-        .filter(|candidate| candidate.host_face_ids.len() == 1)
+        .filter(|candidate| candidate.interfaces.len() == 1)
         .count();
     report.multi_host_candidates = deduped
         .iter()
-        .filter(|candidate| candidate.host_face_ids.len() > 1)
+        .filter(|candidate| candidate.interfaces.len() > 1)
         .count();
 
     deduped.sort_by(|a, b| {
-        a.shell_id
-            .cmp(&b.shell_id)
+        a.context
+            .representation_id
+            .cmp(&b.context.representation_id)
+            .then_with(|| a.context.container_id.cmp(&b.context.container_id))
+            .then_with(|| a.context.shell_id.cmp(&b.context.shell_id))
             .then_with(|| a.polarity.cmp(&b.polarity))
-            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+            .then_with(|| {
+                a.interfaces
+                    .iter()
+                    .map(|interface| interface.host_face_id)
+                    .cmp(b.interfaces.iter().map(|interface| interface.host_face_id))
+            })
             .then_with(|| a.signature.cmp(&b.signature))
             .then_with(|| a.face_ids.cmp(&b.face_ids))
     });
     let mut grouped = Vec::<Vec<BoundaryFeatureCandidate>>::new();
     for candidate in deduped {
         if let Some(group) = grouped.last_mut()
-            && group[0].shell_id == candidate.shell_id
+            && group[0].context == candidate.context
             && group[0].polarity == candidate.polarity
-            && group[0].host_face_ids == candidate.host_face_ids
+            && group[0].same_hosts(&candidate)
             && group[0].signature == candidate.signature
         {
             group.push(candidate);
@@ -1060,53 +1144,11 @@ fn diagnose_boundary_features_with_index(
         }
     }
 
-    let mut families = grouped
-        .into_iter()
-        .map(|mut members| {
-            let shell_id = members[0].shell_id;
-            let polarity = members[0].polarity;
-            let faces_per_instance = members[0].face_ids.len();
-            let host_face_ids = std::mem::take(&mut members[0].host_face_ids);
-            let signature = std::mem::take(&mut members[0].signature);
-            let centers = members
-                .iter()
-                .map(|member| member.center)
-                .collect::<Vec<_>>();
-            let lattice = fit_point_lattice(&centers, 1.0e-7);
-            let motif_pattern = factor_point_motif_pattern(&centers, 1.0e-7);
-            BoundaryFeatureFamilyEvidence {
-                shell_id,
-                polarity,
-                host_face_ids,
-                faces_per_instance,
-                instances: members.len(),
-                signature,
-                members: members
-                    .into_iter()
-                    .map(|member| BoundaryFeatureInstanceEvidence {
-                        face_ids: member.face_ids,
-                        center_mm: member.center,
-                        interface_bound_ids: member.interface_bound_ids,
-                    })
-                    .collect(),
-                lattice,
-                motif_pattern,
-            }
-        })
-        .collect::<Vec<_>>();
-    families.sort_by(|a, b| {
-        b.instances
-            .cmp(&a.instances)
-            .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
-            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
-            .then_with(|| a.signature.cmp(&b.signature))
-    });
-    report.families = families;
-    report
+    (report, grouped)
 }
 
 fn boundary_feature_candidate(
-    shell_id: u64,
+    context: &ShellContext,
     component: HashSet<u64>,
     requested_hosts: &HashSet<u64>,
     frames: &HashMap<u64, PlaneFrame>,
@@ -1122,8 +1164,7 @@ fn boundary_feature_candidate(
         return None;
     }
 
-    let mut host_face_ids = Vec::new();
-    let mut interface_bound_ids = Vec::new();
+    let mut interfaces = Vec::new();
     let mut sides = Vec::new();
     let vertices = component_vertex_points(&component, &topology.face_edges, entities, index)?;
     for &host in requested_hosts {
@@ -1137,11 +1178,16 @@ fn boundary_feature_candidate(
         if matches.len() != 1 {
             return None;
         }
-        host_face_ids.push(host);
-        interface_bound_ids.push(matches[0].0);
+        let (bound_id, loop_id, bound_orientation) = &matches[0];
+        interfaces.push(FeatureInterface {
+            host_face_id: host,
+            bound_id: *bound_id,
+            loop_id: *loop_id,
+            bound_orientation: bound_orientation.clone(),
+        });
         sides.push(plane_side(&vertices, frames.get(&host)?));
     }
-    if host_face_ids.is_empty() {
+    if interfaces.is_empty() {
         return None;
     }
 
@@ -1153,20 +1199,19 @@ fn boundary_feature_candidate(
         return None;
     };
 
-    host_face_ids.sort_unstable();
-    interface_bound_ids.sort_unstable();
+    interfaces.sort_by_key(|interface| interface.host_face_id);
     let center = bbox_center(&vertices)?;
-    let (signature, _) = component_signature(&component, center, entities, index)?;
+    let (signature, normalized_quarter) = component_signature(&component, center, entities, index)?;
     let mut face_ids = component.into_iter().collect::<Vec<_>>();
     face_ids.sort_unstable();
 
     Some(BoundaryFeatureCandidate {
-        shell_id,
+        context: context.clone(),
         polarity,
-        host_face_ids,
+        interfaces,
         face_ids,
-        interface_bound_ids,
         center,
+        normalized_quarter,
         signature,
     })
 }
@@ -1355,298 +1400,337 @@ pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDia
     report
 }
 
-pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> PlanarFeatureStats {
-    let mut stats = PlanarFeatureStats::default();
-    if entities.is_empty() {
-        return stats;
-    }
+pub fn instance_boundary_features(
+    entities: &mut Vec<EntityInstance>,
+) -> Result<PlanarFeatureStats> {
+    let plan = plan_additive_mapped_features(entities)?;
+    apply_mapped_feature_plan(entities, plan)
+}
 
+fn plan_additive_mapped_features(
+    entities: &[EntityInstance],
+) -> Result<BoundaryFeatureInstancePlan> {
     let index = build_index(entities);
-    let styles_by_target = collect_styles_by_target(entities);
-    let contexts = collect_shell_contexts(entities, &index);
-    if contexts.is_empty() {
-        return stats;
+    if entities.is_empty() {
+        return Ok(BoundaryFeatureInstancePlan {
+            index,
+            ..BoundaryFeatureInstancePlan::default()
+        });
     }
 
-    let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
-    let mut candidate_roots = HashSet::new();
-    let mut delete_seed = HashSet::new();
-    let mut claimed_faces = HashSet::new();
-    let mut claimed_bounds = HashSet::new();
+    let styles_by_target = collect_styles_by_target(entities);
+    let (_, groups) = grouped_boundary_features_with_index(entities, &index);
+    let mut hosts = Vec::<MappedFeatureHostPlan>::new();
+    let mut host_positions = HashMap::<(u64, u64, u64, u64, u64), usize>::new();
+    let mut claimed_faces = HashSet::<u64>::new();
+    let mut claimed_bounds = HashSet::<u64>::new();
 
-    for context in contexts {
-        let Some(topology) = ShellTopology::new(context.shell_id, entities, &index) else {
+    for group in groups {
+        let first = &group[0];
+        if group.len() < MIN_GROUP
+            || first.polarity != FeaturePolarity::Additive
+            || first.interfaces.len() != 1
+        {
             continue;
+        }
+
+        let context = first.context.clone();
+        let host_face_id = first.interfaces[0].host_face_id;
+        let Some(frame) = plane_frame(host_face_id, entities, &index) else {
+            bail!("proven feature host face #{host_face_id} is no longer a readable plane");
         };
-        let shell_faces = &topology.faces;
-        if shell_faces.len() < MIN_GROUP + 2 {
-            continue;
+        if ref_list_param(context.shell_id, 1, entities, &index).is_none() {
+            bail!(
+                "feature shell #{} has no editable face list",
+                context.shell_id
+            );
+        }
+        if ref_list_param(host_face_id, 1, entities, &index).is_none() {
+            bail!("feature host face #{host_face_id} has no editable bound list");
+        }
+        let Some(&representation_index) = index.get(&context.representation_id) else {
+            bail!(
+                "feature representation #{} is missing",
+                context.representation_id
+            );
+        };
+        if representation_items_and_context(&entities[representation_index]).is_none() {
+            bail!(
+                "feature representation #{} has no editable item list",
+                context.representation_id
+            );
         }
 
         let container_styles = styles_by_target
             .get(&context.container_id)
             .cloned()
             .unwrap_or_default();
-
-        let host_faces: Vec<u64> = shell_faces
-            .iter()
-            .copied()
-            .filter(|face| {
-                face_surface(*face, entities, &index)
-                    .and_then(|surface| index.get(&surface).copied())
-                    .and_then(|idx| simple_record(&entities[idx]))
-                    .is_some_and(|record| record.name == "PLANE")
-                    && ref_list_param(*face, 1, entities, &index)
-                        .is_some_and(|bounds| bounds.len() > MIN_GROUP)
-            })
-            .collect();
-
-        for host_face in host_faces {
-            let Some(frame) = plane_frame(host_face, entities, &index) else {
+        let mut styled = Vec::<MappedFeatureMember>::new();
+        for candidate in group {
+            let Some((style_key, old_style_ids)) =
+                feature_style(&candidate.face_ids, &styles_by_target, &container_styles)
+            else {
                 continue;
             };
-            let Some(host_bounds) = ref_list_param(host_face, 1, entities, &index) else {
-                continue;
-            };
-            let bound_lookup = host_bound_lookup(&host_bounds, entities, &index);
-            let host_set = HashSet::from([host_face]);
-            let components = topology.components_without_hosts(&host_set);
-            let mut features = Vec::new();
+            styled.push(MappedFeatureMember {
+                candidate,
+                style_key,
+                old_style_ids,
+            });
+        }
+        styled.sort_by(|a, b| {
+            a.candidate.interfaces[0]
+                .bound_orientation
+                .cmp(&b.candidate.interfaces[0].bound_orientation)
+                .then_with(|| a.style_key.cmp(&b.style_key))
+                .then_with(|| a.candidate.face_ids.cmp(&b.candidate.face_ids))
+        });
 
-            for component in components {
-                if component.is_empty()
-                    || component.len() > MAX_FEATURE_FACES
-                    || component.iter().any(|face| claimed_faces.contains(face))
-                {
-                    continue;
-                }
-
-                if !topology.component_is_two_manifold_with_hosts(&component, &host_set) {
-                    continue;
-                }
-                let interface_edges = topology.interface_edges(&component, host_face);
-                if interface_edges.is_empty() {
-                    continue;
-                }
-                let Some(matches) = bound_lookup.get(&edge_set_key(&interface_edges)) else {
-                    continue;
-                };
-                if matches.len() != 1 {
-                    continue;
-                }
-                let (interface_bound, interface_loop, bound_orientation) = matches[0].clone();
-                if claimed_bounds.contains(&interface_bound) {
-                    continue;
-                }
-
-                let Some(vertices) =
-                    component_vertex_points(&component, &topology.face_edges, entities, &index)
-                else {
-                    continue;
-                };
-                if !positive_side(&vertices, &frame) {
-                    continue;
-                }
-                let Some(center) = bbox_center(&vertices) else {
-                    continue;
-                };
-                let Some((signature, normalized_quarter)) =
-                    component_signature(&component, center, entities, &index)
-                else {
-                    continue;
-                };
-                let Some((style_key, old_style_ids)) =
-                    feature_style(&component, &styles_by_target, &container_styles)
-                else {
-                    continue;
-                };
-
-                let mut faces: Vec<u64> = component.into_iter().collect();
-                faces.sort_unstable();
-                features.push(Feature {
-                    faces,
-                    interface_bound,
-                    interface_loop,
-                    bound_orientation,
-                    center,
-                    normalized_quarter,
-                    signature,
-                    style_key,
-                    old_style_ids,
+        let mut families = Vec::<MappedFeatureFamilyPlan>::new();
+        for member in styled {
+            if let Some(family) = families.last_mut()
+                && family.members[0].candidate.interfaces[0].bound_orientation
+                    == member.candidate.interfaces[0].bound_orientation
+                && family.members[0].style_key == member.style_key
+            {
+                family.members.push(member);
+            } else {
+                families.push(MappedFeatureFamilyPlan {
+                    members: vec![member],
                 });
             }
+        }
+        families.retain(|family| family.members.len() >= MIN_GROUP);
+        if families.is_empty() {
+            continue;
+        }
 
-            if features.len() < MIN_GROUP {
-                continue;
-            }
-
-            features.sort_by(|a, b| {
-                a.signature
-                    .cmp(&b.signature)
-                    .then_with(|| a.bound_orientation.cmp(&b.bound_orientation))
-                    .then_with(|| a.style_key.cmp(&b.style_key))
-                    .then_with(|| a.faces.cmp(&b.faces))
-            });
-            let mut grouped = Vec::<Vec<Feature>>::new();
-            for feature in features {
-                if let Some(group) = grouped.last_mut()
-                    && group[0].signature == feature.signature
-                    && group[0].bound_orientation == feature.bound_orientation
-                    && group[0].style_key == feature.style_key
+        for family in &families {
+            for member in &family.members {
+                if member
+                    .candidate
+                    .face_ids
+                    .iter()
+                    .any(|face| !claimed_faces.insert(*face))
                 {
-                    group.push(feature);
-                } else {
-                    grouped.push(vec![feature]);
+                    bail!("boundary feature analysis produced overlapping accepted face patches");
+                }
+                let bound_id = member.candidate.interfaces[0].bound_id;
+                if !claimed_bounds.insert(bound_id) {
+                    bail!("boundary feature analysis reused interface bound #{bound_id}");
                 }
             }
+        }
 
-            let mut accepted: Vec<Vec<Feature>> = grouped
-                .into_iter()
-                .filter(|group| group.len() >= MIN_GROUP)
-                .collect();
-            if accepted.is_empty() {
-                continue;
-            }
-            accepted.sort_by_key(|group| {
-                group
-                    .iter()
-                    .map(|feature| feature.faces[0])
-                    .min()
-                    .unwrap_or(u64::MAX)
+        let key = (
+            context.representation_id,
+            context.context_id,
+            context.container_id,
+            context.shell_id,
+            host_face_id,
+        );
+        if let Some(&position) = host_positions.get(&key) {
+            hosts[position].families.extend(families);
+        } else {
+            let position = hosts.len();
+            host_positions.insert(key, position);
+            hosts.push(MappedFeatureHostPlan {
+                context,
+                host_face_id,
+                frame,
+                container_styles,
+                families,
             });
+        }
+    }
 
-            let Some(&rep_idx) = index.get(&context.representation_id) else {
-                continue;
-            };
+    Ok(BoundaryFeatureInstancePlan {
+        index,
+        next_id: entities
+            .iter()
+            .map(entity_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+        hosts,
+    })
+}
 
-            let z_dir = push_direction(entities, &mut next_id, [0.0, 0.0, 1.0]);
-            let x_dirs = [
-                push_direction(entities, &mut next_id, [1.0, 0.0, 0.0]),
-                push_direction(entities, &mut next_id, [0.0, 1.0, 0.0]),
-                push_direction(entities, &mut next_id, [-1.0, 0.0, 0.0]),
-                push_direction(entities, &mut next_id, [0.0, -1.0, 0.0]),
-            ];
-            let origin_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
-            let origin_axis = push_simple(
+fn apply_mapped_feature_plan(
+    entities: &mut Vec<EntityInstance>,
+    plan: BoundaryFeatureInstancePlan,
+) -> Result<PlanarFeatureStats> {
+    let BoundaryFeatureInstancePlan {
+        index,
+        mut next_id,
+        hosts,
+    } = plan;
+    let mut stats = PlanarFeatureStats::default();
+    if hosts.is_empty() {
+        return Ok(stats);
+    }
+
+    let mut candidate_roots = HashSet::new();
+    let mut delete_seed = HashSet::new();
+
+    for host in hosts {
+        let Some(&representation_index) = index.get(&host.context.representation_id) else {
+            bail!("planned feature representation disappeared before apply");
+        };
+        let Some(&shell_index) = index.get(&host.context.shell_id) else {
+            bail!("planned feature shell disappeared before apply");
+        };
+        let Some(&host_index) = index.get(&host.host_face_id) else {
+            bail!("planned feature host disappeared before apply");
+        };
+
+        let z_dir = push_direction(entities, &mut next_id, [0.0, 0.0, 1.0]);
+        let x_dirs = [
+            push_direction(entities, &mut next_id, [1.0, 0.0, 0.0]),
+            push_direction(entities, &mut next_id, [0.0, 1.0, 0.0]),
+            push_direction(entities, &mut next_id, [-1.0, 0.0, 0.0]),
+            push_direction(entities, &mut next_id, [0.0, -1.0, 0.0]),
+        ];
+        let origin_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
+        let origin_axis = push_simple(
+            entities,
+            &mut next_id,
+            "AXIS2_PLACEMENT_3D",
+            vec![
+                Parameter::String(String::new()),
+                entity_ref(origin_point),
+                entity_ref(z_dir),
+                entity_ref(x_dirs[0]),
+            ],
+        );
+
+        let mut mapped_ids = Vec::new();
+        let mut remove_faces = HashSet::new();
+        let mut remove_bounds = HashSet::new();
+
+        for family in host.families {
+            let canonical = &family.members[0];
+            let canonical_interface = &canonical.candidate.interfaces[0];
+            let cap_bound = push_simple(
                 entities,
                 &mut next_id,
-                "AXIS2_PLACEMENT_3D",
+                "FACE_OUTER_BOUND",
                 vec![
-                    Parameter::String(String::new()),
-                    entity_ref(origin_point),
-                    entity_ref(z_dir),
-                    entity_ref(x_dirs[0]),
+                    Parameter::String("NONE".to_string()),
+                    entity_ref(canonical_interface.loop_id),
+                    Parameter::Enumeration(toggle_tf(&canonical_interface.bound_orientation)),
                 ],
             );
+            let cap_face = push_simple(
+                entities,
+                &mut next_id,
+                "ADVANCED_FACE",
+                vec![
+                    Parameter::String("NONE".to_string()),
+                    Parameter::List(vec![entity_ref(cap_bound)]),
+                    entity_ref(host.frame.surface_id),
+                    Parameter::Enumeration(toggle_tf(&host.frame.sense)),
+                ],
+            );
+            let mut closed_faces = canonical
+                .candidate
+                .face_ids
+                .iter()
+                .copied()
+                .map(entity_ref)
+                .collect::<Vec<_>>();
+            closed_faces.push(entity_ref(cap_face));
+            let feature_shell = push_simple(
+                entities,
+                &mut next_id,
+                "CLOSED_SHELL",
+                vec![
+                    Parameter::String("NONE".to_string()),
+                    Parameter::List(closed_faces),
+                ],
+            );
+            let feature_solid = push_simple(
+                entities,
+                &mut next_id,
+                "MANIFOLD_SOLID_BREP",
+                vec![
+                    Parameter::String("step-redox canonical boundary feature".to_string()),
+                    entity_ref(feature_shell),
+                ],
+            );
+            let source_rep = push_simple(
+                entities,
+                &mut next_id,
+                "ADVANCED_BREP_SHAPE_REPRESENTATION",
+                vec![
+                    Parameter::String("step-redox boundary feature source".to_string()),
+                    Parameter::List(vec![entity_ref(feature_solid), entity_ref(origin_axis)]),
+                    entity_ref(host.context.context_id),
+                ],
+            );
+            let rep_map = push_simple(
+                entities,
+                &mut next_id,
+                "REPRESENTATION_MAP",
+                vec![entity_ref(origin_axis), entity_ref(source_rep)],
+            );
 
-            let mut host_mapped_ids = Vec::new();
-            let mut host_remove_faces = HashSet::new();
-            let mut host_remove_bounds = HashSet::new();
-            let mut host_family_count = 0usize;
-
-            for group in &accepted {
-                let canonical = &group[0];
-
-                let disk_bound = push_simple(
+            let mut new_style_ids = Vec::new();
+            let mut old_style_ids = HashSet::new();
+            for member in &family.members {
+                let quarter = (canonical.candidate.normalized_quarter + 4
+                    - member.candidate.normalized_quarter)
+                    % 4;
+                let translation =
+                    rigid_translation(canonical.candidate.center, member.candidate.center, quarter);
+                let target_axis =
+                    if quarter == 0 && translation.iter().all(|value| value.abs() <= 1.0e-12) {
+                        origin_axis
+                    } else {
+                        let point = push_point(entities, &mut next_id, translation);
+                        push_simple(
+                            entities,
+                            &mut next_id,
+                            "AXIS2_PLACEMENT_3D",
+                            vec![
+                                Parameter::String(String::new()),
+                                entity_ref(point),
+                                entity_ref(z_dir),
+                                entity_ref(x_dirs[quarter as usize]),
+                            ],
+                        )
+                    };
+                let mapped = push_simple(
                     entities,
                     &mut next_id,
-                    "FACE_OUTER_BOUND",
+                    "MAPPED_ITEM",
                     vec![
-                        Parameter::String("NONE".to_string()),
-                        entity_ref(canonical.interface_loop),
-                        Parameter::Enumeration(toggle_tf(&canonical.bound_orientation)),
+                        Parameter::String(String::new()),
+                        entity_ref(rep_map),
+                        entity_ref(target_axis),
                     ],
                 );
-                let disk_face = push_simple(
-                    entities,
-                    &mut next_id,
-                    "ADVANCED_FACE",
-                    vec![
-                        Parameter::String("NONE".to_string()),
-                        Parameter::List(vec![entity_ref(disk_bound)]),
-                        entity_ref(frame.surface_id),
-                        Parameter::Enumeration(toggle_tf(&frame.sense)),
-                    ],
-                );
+                mapped_ids.push(mapped);
 
-                let mut closed_faces: Vec<Parameter> =
-                    canonical.faces.iter().copied().map(entity_ref).collect();
-                closed_faces.push(entity_ref(disk_face));
-                let feature_shell = push_simple(
-                    entities,
-                    &mut next_id,
-                    "CLOSED_SHELL",
-                    vec![
-                        Parameter::String("NONE".to_string()),
-                        Parameter::List(closed_faces),
-                    ],
-                );
-                let feature_solid = push_simple(
-                    entities,
-                    &mut next_id,
-                    "MANIFOLD_SOLID_BREP",
-                    vec![
-                        Parameter::String(
-                            "step-redox canonical planar positive feature".to_string(),
-                        ),
-                        entity_ref(feature_shell),
-                    ],
-                );
-                let source_rep = push_simple(
-                    entities,
-                    &mut next_id,
-                    "ADVANCED_BREP_SHAPE_REPRESENTATION",
-                    vec![
-                        Parameter::String("step-redox planar positive feature source".to_string()),
-                        Parameter::List(vec![entity_ref(feature_solid), entity_ref(origin_axis)]),
-                        entity_ref(context.context_id),
-                    ],
-                );
-                let rep_map = push_simple(
-                    entities,
-                    &mut next_id,
-                    "REPRESENTATION_MAP",
-                    vec![entity_ref(origin_axis), entity_ref(source_rep)],
-                );
-
-                let mut new_style_ids = Vec::new();
-                let mut old_style_ids = HashSet::new();
-
-                for feature in group.iter() {
-                    let quarter =
-                        (canonical.normalized_quarter + 4 - feature.normalized_quarter) % 4;
-                    let translation = rigid_translation(canonical.center, feature.center, quarter);
-                    let target_axis =
-                        if quarter == 0 && translation.iter().all(|value| value.abs() <= 1.0e-12) {
-                            origin_axis
-                        } else {
-                            let point = push_point(entities, &mut next_id, translation);
-                            push_simple(
-                                entities,
-                                &mut next_id,
-                                "AXIS2_PLACEMENT_3D",
-                                vec![
-                                    Parameter::String(String::new()),
-                                    entity_ref(point),
-                                    entity_ref(z_dir),
-                                    entity_ref(x_dirs[quarter as usize]),
-                                ],
-                            )
-                        };
-                    let mapped = push_simple(
-                        entities,
-                        &mut next_id,
-                        "MAPPED_ITEM",
-                        vec![
-                            Parameter::String(String::new()),
-                            entity_ref(rep_map),
-                            entity_ref(target_axis),
-                        ],
-                    );
-                    host_mapped_ids.push(mapped);
-
-                    match &feature.style_key {
-                        StyleKey::Face(assignments) => {
+                match &member.style_key {
+                    StyleKey::Face(assignments) => {
+                        let styled = push_simple(
+                            entities,
+                            &mut next_id,
+                            "STYLED_ITEM",
+                            vec![
+                                Parameter::String("NONE".to_string()),
+                                Parameter::List(
+                                    assignments.iter().copied().map(entity_ref).collect(),
+                                ),
+                                entity_ref(mapped),
+                            ],
+                        );
+                        new_style_ids.push(styled);
+                        old_style_ids.extend(member.old_style_ids.iter().copied());
+                    }
+                    StyleKey::Container => {
+                        for style in &host.container_styles {
                             let styled = push_simple(
                                 entities,
                                 &mut next_id,
@@ -1654,151 +1738,65 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                                 vec![
                                     Parameter::String("NONE".to_string()),
                                     Parameter::List(
-                                        assignments.iter().copied().map(entity_ref).collect(),
+                                        style.assignments.iter().copied().map(entity_ref).collect(),
                                     ),
                                     entity_ref(mapped),
                                 ],
                             );
                             new_style_ids.push(styled);
-                            old_style_ids.extend(feature.old_style_ids.iter().copied());
                         }
-                        StyleKey::Container => {
-                            for style in &container_styles {
-                                let styled = push_simple(
-                                    entities,
-                                    &mut next_id,
-                                    "STYLED_ITEM",
-                                    vec![
-                                        Parameter::String("NONE".to_string()),
-                                        Parameter::List(
-                                            style
-                                                .assignments
-                                                .iter()
-                                                .copied()
-                                                .map(entity_ref)
-                                                .collect(),
-                                        ),
-                                        entity_ref(mapped),
-                                    ],
-                                );
-                                new_style_ids.push(styled);
-                            }
-                        }
-                        StyleKey::None => {}
                     }
-
-                    for &face in &feature.faces {
-                        host_remove_faces.insert(face);
-                        candidate_roots.insert(face);
-                    }
-                    host_remove_bounds.insert(feature.interface_bound);
-                    candidate_roots.insert(feature.interface_bound);
-                    delete_seed.insert(feature.interface_bound);
-                    claimed_faces.extend(feature.faces.iter().copied());
-                    claimed_bounds.insert(feature.interface_bound);
+                    StyleKey::None => {}
                 }
 
-                for feature in group.iter().skip(1) {
-                    delete_seed.extend(feature.faces.iter().copied());
+                for &face in &member.candidate.face_ids {
+                    remove_faces.insert(face);
+                    candidate_roots.insert(face);
                 }
+                let bound_id = member.candidate.interfaces[0].bound_id;
+                remove_bounds.insert(bound_id);
+                candidate_roots.insert(bound_id);
+                delete_seed.insert(bound_id);
+            }
+            for member in family.members.iter().skip(1) {
+                delete_seed.extend(member.candidate.face_ids.iter().copied());
+            }
 
-                if !old_style_ids.is_empty() {
-                    for &style in &old_style_ids {
-                        candidate_roots.insert(style);
-                        delete_seed.insert(style);
-                    }
-                    patch_presentation_lists(entities, &old_style_ids, &new_style_ids);
-                } else if matches!(&canonical.style_key, StyleKey::Container)
-                    && !new_style_ids.is_empty()
-                {
-                    let anchors: HashSet<u64> =
-                        container_styles.iter().map(|style| style.id).collect();
-                    append_presentation_items_with_anchors(entities, &anchors, &new_style_ids);
+            if !old_style_ids.is_empty() {
+                for &style in &old_style_ids {
+                    candidate_roots.insert(style);
+                    delete_seed.insert(style);
                 }
-
-                host_family_count += 1;
-                stats.instances += group.len();
+                patch_presentation_lists(entities, &old_style_ids, &new_style_ids);
+            } else if matches!(&canonical.style_key, StyleKey::Container)
+                && !new_style_ids.is_empty()
+            {
+                let anchors = host
+                    .container_styles
+                    .iter()
+                    .map(|style| style.id)
+                    .collect::<HashSet<_>>();
+                append_presentation_items_with_anchors(entities, &anchors, &new_style_ids);
             }
 
-            if host_remove_faces.is_empty() {
-                continue;
-            }
-
-            let Some(&shell_idx) = index.get(&context.shell_id) else {
-                continue;
-            };
-            let Some(&host_idx) = index.get(&host_face) else {
-                continue;
-            };
-            if !remove_refs_from_list_param(&mut entities[shell_idx], 1, &host_remove_faces) {
-                continue;
-            }
-            if !remove_refs_from_list_param(&mut entities[host_idx], 1, &host_remove_bounds) {
-                continue;
-            }
-            if !append_refs_to_list_param(&mut entities[rep_idx], 1, &host_mapped_ids) {
-                continue;
-            }
-
-            stats.arrays += 1;
-            stats.families += host_family_count;
+            stats.families += 1;
+            stats.instances += family.members.len();
         }
+
+        if !remove_refs_from_list_param(&mut entities[shell_index], 1, &remove_faces) {
+            bail!("planned feature shell edit became invalid during apply");
+        }
+        if !remove_refs_from_list_param(&mut entities[host_index], 1, &remove_bounds) {
+            bail!("planned feature host edit became invalid during apply");
+        }
+        if !append_refs_to_list_param(&mut entities[representation_index], 1, &mapped_ids) {
+            bail!("planned feature representation edit became invalid during apply");
+        }
+        stats.arrays += 1;
     }
 
-    if stats.arrays == 0 {
-        return stats;
-    }
-
+    let delete = collect_detached_feature_entities(entities, &candidate_roots, delete_seed);
     let index_after = build_index(entities);
-    let mut candidate = HashSet::new();
-    let mut stack: Vec<u64> = candidate_roots.iter().copied().collect();
-    while let Some(id) = stack.pop() {
-        if !candidate.insert(id) {
-            continue;
-        }
-        let Some(&idx) = index_after.get(&id) else {
-            continue;
-        };
-        visit_entity_refs(&entities[idx], &mut |child| {
-            if index_after.contains_key(&child) && !candidate.contains(&child) {
-                stack.push(child);
-            }
-        });
-    }
-
-    let references = ReferenceGraph::new(entities);
-    let inbound = references.inbound();
-    let mut delete = delete_seed;
-
-    loop {
-        let mut changed = false;
-        for &id in &candidate {
-            if delete.contains(&id) {
-                continue;
-            }
-            let parents = inbound.get(&id);
-            let all_dead =
-                parents.is_none_or(|parents| parents.iter().all(|parent| delete.contains(parent)));
-            let child_of_dead = parents.is_some_and(|parents| {
-                !parents.is_empty() && parents.iter().all(|parent| delete.contains(parent))
-            });
-            if all_dead && (child_of_dead || !inbound.contains_key(&id)) {
-                delete.insert(id);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for (id, children) in references.forward() {
-        if delete.contains(id) {
-            continue;
-        }
-        debug_assert!(children.iter().all(|child| !delete.contains(child)));
-    }
-
     stats.styles_replaced = candidate_roots
         .iter()
         .filter(|id| {
@@ -1811,7 +1809,16 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
         .count();
     stats.entities_removed = delete.len();
     entities.retain(|entity| !delete.contains(&entity_id(entity)));
-    stats
+    Ok(stats)
+}
+
+fn collect_detached_feature_entities(
+    entities: &[EntityInstance],
+    candidate_roots: &HashSet<u64>,
+    delete_seed: HashSet<u64>,
+) -> HashSet<u64> {
+    let index = build_index(entities);
+    ReferenceGraph::new(entities).detached_descendant_closure(&index, candidate_roots, delete_seed)
 }
 
 fn collect_shell_contexts(
@@ -2127,10 +2134,6 @@ fn plane_side(points: &[[f64; 3]], frame: &PlaneFrame) -> PlaneSide {
     }
 }
 
-fn positive_side(points: &[[f64; 3]], frame: &PlaneFrame) -> bool {
-    plane_side(points, frame) == PlaneSide::Positive
-}
-
 fn component_signature(
     component: &HashSet<u64>,
     center: [f64; 3],
@@ -2158,7 +2161,7 @@ fn component_signature(
 }
 
 fn feature_style(
-    component: &HashSet<u64>,
+    face_ids: &[u64],
     styles_by_target: &HashMap<u64, Vec<StyleRef>>,
     container_styles: &[StyleRef],
 ) -> Option<(StyleKey, Vec<u64>)> {
@@ -2166,7 +2169,7 @@ fn feature_style(
     let mut assignments: Option<Vec<u64>> = None;
     let mut style_ids = Vec::new();
 
-    for face in component {
+    for face in face_ids {
         match styles_by_target.get(face) {
             None => {}
             Some(styles) if styles.is_empty() => {}
@@ -2186,7 +2189,7 @@ fn feature_style(
     }
 
     if any_face_style {
-        if style_ids.len() != component.len() {
+        if style_ids.len() != face_ids.len() {
             return None;
         }
         Some((StyleKey::Face(assignments?), style_ids))
@@ -2294,8 +2297,8 @@ mod tests {
         let recess = [[0.0, 0.0, 0.0], [0.0, 0.0, -2.0]];
         assert_eq!(plane_side(&protrusion, &frame), PlaneSide::Positive);
         assert_eq!(plane_side(&recess, &frame), PlaneSide::Negative);
-        assert!(positive_side(&protrusion, &frame));
-        assert!(!positive_side(&recess, &frame));
+        assert_eq!(plane_side(&protrusion, &frame), PlaneSide::Positive);
+        assert_eq!(plane_side(&recess, &frame), PlaneSide::Negative);
     }
 
     #[test]

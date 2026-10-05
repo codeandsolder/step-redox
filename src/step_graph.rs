@@ -1,5 +1,5 @@
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
     entities
@@ -106,5 +106,55 @@ impl ReferenceGraph {
 
     pub(super) const fn inbound(&self) -> &HashMap<u64, Vec<u64>> {
         &self.inbound
+    }
+
+    pub(super) fn detached_descendant_closure(
+        &self,
+        present: &HashMap<u64, usize>,
+        roots: &HashSet<u64>,
+        mut delete: HashSet<u64>,
+    ) -> HashSet<u64> {
+        let mut candidates = HashSet::new();
+        let mut stack = roots.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = stack.pop() {
+            if !candidates.insert(id) {
+                continue;
+            }
+            if let Some(children) = self.forward.get(&id) {
+                stack.extend(
+                    children
+                        .iter()
+                        .copied()
+                        .filter(|child| present.contains_key(child) && !candidates.contains(child)),
+                );
+            }
+        }
+
+        loop {
+            let mut changed = false;
+            for &id in &candidates {
+                if delete.contains(&id) {
+                    continue;
+                }
+                let parents = self.inbound.get(&id);
+                let all_dead = parents
+                    .is_none_or(|parents| parents.iter().all(|parent| delete.contains(parent)));
+                let child_of_dead = parents.is_some_and(|parents| {
+                    !parents.is_empty() && parents.iter().all(|parent| delete.contains(parent))
+                });
+                if all_dead && (child_of_dead || !self.inbound.contains_key(&id)) {
+                    delete.insert(id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        debug_assert!(self.forward.iter().all(|(id, children)| {
+            delete.contains(id) || children.iter().all(|child| !delete.contains(child))
+        }));
+        delete
     }
 }

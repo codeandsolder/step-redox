@@ -28,7 +28,7 @@ pub(super) fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput
 
     run_geometry_recovery(&mut exchange, options, &mut stats);
 
-    run_instancing(&mut exchange, options, &mut stats);
+    run_instancing(&mut exchange, options, &mut stats)?;
 
     stabilize_output(&mut exchange, options, &mut stats);
 
@@ -170,7 +170,7 @@ fn run_geometry_recovery(exchange: &mut Exchange, options: &Options, stats: &mut
     }
 }
 
-fn run_instancing(exchange: &mut Exchange, options: &Options, stats: &mut Stats) {
+fn run_instancing(exchange: &mut Exchange, options: &Options, stats: &mut Stats) -> Result<()> {
     if options.experimental_instance_z90_assembly {
         for section in &mut exchange.data {
             let pass = instances::instance_z90_solids_assembly(&mut section.entities);
@@ -191,7 +191,7 @@ fn run_instancing(exchange: &mut Exchange, options: &Options, stats: &mut Stats)
 
     if options.experimental_instance_planar_positive_features {
         for section in &mut exchange.data {
-            let pass = planar_features::instance_planar_positive_features(&mut section.entities);
+            let pass = planar_features::instance_boundary_features(&mut section.entities)?;
             stats.planar_feature_arrays += pass.arrays;
             stats.planar_feature_families += pass.families;
             stats.planar_feature_instances += pass.instances;
@@ -246,6 +246,7 @@ fn run_instancing(exchange: &mut Exchange, options: &Options, stats: &mut Stats)
                 .max(pass.max_residual_mm);
         }
     }
+    Ok(())
 }
 
 fn stabilize_output(exchange: &mut Exchange, options: &Options, stats: &mut Stats) {

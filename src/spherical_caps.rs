@@ -7,9 +7,7 @@ use crate::step_entities::{
     cartesian_point, entity_ref, number, patch_presentation_lists, push_point, push_simple,
     representation_items_and_context,
 };
-use crate::step_graph::{
-    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
-};
+use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
 
@@ -623,52 +621,11 @@ fn register_replaced_cap_roots(
 
 fn collect_replaced_cap_geometry(entities: &mut Vec<EntityInstance>, state: &mut CapRewriteState) {
     let index = build_index(entities);
-    let mut candidate = HashSet::new();
-    let mut stack = state.candidate_roots.iter().copied().collect::<Vec<_>>();
-    while let Some(id) = stack.pop() {
-        if !candidate.insert(id) {
-            continue;
-        }
-        let Some(&idx) = index.get(&id) else {
-            continue;
-        };
-        visit_entity_refs(&entities[idx], &mut |child| {
-            if index.contains_key(&child) && !candidate.contains(&child) {
-                stack.push(child);
-            }
-        });
-    }
-
-    let references = ReferenceGraph::new(entities);
-    let inbound = references.inbound();
-    let mut delete = std::mem::take(&mut state.delete_seed);
-    loop {
-        let mut changed = false;
-        for &id in &candidate {
-            if delete.contains(&id) {
-                continue;
-            }
-            let parents = inbound.get(&id);
-            let all_dead =
-                parents.is_none_or(|parents| parents.iter().all(|parent| delete.contains(parent)));
-            let child_of_dead = parents.is_some_and(|parents| {
-                !parents.is_empty() && parents.iter().all(|parent| delete.contains(parent))
-            });
-            if all_dead && (child_of_dead || !inbound.contains_key(&id)) {
-                delete.insert(id);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for (id, children) in references.forward() {
-        if !delete.contains(id) {
-            debug_assert!(children.iter().all(|child| !delete.contains(child)));
-        }
-    }
+    let delete = ReferenceGraph::new(entities).detached_descendant_closure(
+        &index,
+        &state.candidate_roots,
+        std::mem::take(&mut state.delete_seed),
+    );
 
     state.stats.styles_replaced = state
         .old_styles_to_remove
