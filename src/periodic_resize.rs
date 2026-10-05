@@ -2476,7 +2476,7 @@ pub(crate) fn prune_detached_vertex_points(entities: &mut Vec<EntityInstance>) -
             simple_record(entity)
                 .is_some_and(|record| record.name == "VERTEX_POINT")
                 .then_some(id)
-                .filter(|id| inbound.get(id).is_none_or(HashSet::is_empty))
+                .filter(|id| inbound.get(id).is_none_or(Vec::is_empty))
         })
         .collect::<HashSet<_>>();
     if seeds.is_empty() {

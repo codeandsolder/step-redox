@@ -496,11 +496,9 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     candidate.extend(old_solids.iter().copied());
     let mut stack: Vec<u64> = old_solids.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        if let Some(children) = refs_before.refs(id) {
-            for &child in children {
-                if candidate.insert(child) {
-                    stack.push(child);
-                }
+        for &child in refs_before.refs(id) {
+            if candidate.insert(child) {
+                stack.push(child);
             }
         }
     }

@@ -112,7 +112,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     let mut candidate = duplicate_roots.clone();
     let mut stack: Vec<u64> = duplicate_roots.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        for &child in references.refs(id).into_iter().flatten() {
+        for &child in references.refs(id).iter() {
             if index.contains_key(&child) && candidate.insert(child) {
                 stack.push(child);
             }
@@ -212,7 +212,7 @@ fn line_alias_is_safe(
     canonical: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-    inbound: &HashMap<u64, HashSet<u64>>,
+    inbound: &HashMap<u64, Vec<u64>>,
 ) -> bool {
     let Some((duplicate_origin, _duplicate_direction, duplicate_magnitude)) =
         line_geometry(duplicate, entities, index)

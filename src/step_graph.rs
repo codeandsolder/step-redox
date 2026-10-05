@@ -69,37 +69,42 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
 #[derive(Debug, Default)]
 pub(super) struct ReferenceGraph {
     forward: HashMap<u64, Vec<u64>>,
-    inbound: HashMap<u64, std::collections::HashSet<u64>>,
+    inbound: HashMap<u64, Vec<u64>>,
 }
 
 impl ReferenceGraph {
     pub(super) fn new(entities: &[EntityInstance]) -> Self {
         let mut forward = HashMap::with_capacity(entities.len());
-        let mut inbound = HashMap::with_capacity(entities.len());
+        let mut inbound: HashMap<u64, Vec<u64>> = HashMap::with_capacity(entities.len());
         for entity in entities {
             let parent = entity_id(entity);
             let mut children = Vec::new();
             visit_entity_refs(entity, &mut |child| {
                 children.push(child);
-                inbound
-                    .entry(child)
-                    .or_insert_with(std::collections::HashSet::new)
-                    .insert(parent);
+                let parents = inbound.entry(child).or_default();
+                // All references from one parent are visited contiguously, so
+                // the last element is enough to suppress repeated references
+                // from that same entity without allocating a HashSet per child.
+                if parents.last().copied() != Some(parent) {
+                    parents.push(parent);
+                }
             });
-            forward.insert(parent, children);
+            if !children.is_empty() {
+                forward.insert(parent, children);
+            }
         }
         Self { forward, inbound }
     }
 
-    pub(super) fn refs(&self, id: u64) -> Option<&[u64]> {
-        self.forward.get(&id).map(Vec::as_slice)
+    pub(super) fn refs(&self, id: u64) -> &[u64] {
+        self.forward.get(&id).map_or(&[], Vec::as_slice)
     }
 
     pub(super) const fn forward(&self) -> &HashMap<u64, Vec<u64>> {
         &self.forward
     }
 
-    pub(super) const fn inbound(&self) -> &HashMap<u64, std::collections::HashSet<u64>> {
+    pub(super) const fn inbound(&self) -> &HashMap<u64, Vec<u64>> {
         &self.inbound
     }
 }

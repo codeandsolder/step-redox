@@ -197,7 +197,7 @@ fn parse_surface(
     entity: &EntityInstance,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-    inbound: &HashMap<u64, HashSet<u64>>,
+    inbound: &HashMap<u64, Vec<u64>>,
 ) -> Option<SurfaceInfo> {
     let EntityInstance::Simple { id, record } = entity else {
         return None;

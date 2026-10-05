@@ -287,9 +287,7 @@ fn coalesce_inner(
                 if !candidate.insert(id) {
                     continue;
                 }
-                if let Some(children) = refs_before.refs(id) {
-                    stack.extend(children.iter().copied());
-                }
+                stack.extend(refs_before.refs(id).iter().copied());
             }
         }
 

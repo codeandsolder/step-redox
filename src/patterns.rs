@@ -745,9 +745,7 @@ pub(crate) fn resize_filled_linear_pattern(
         if !candidate.insert(id) {
             continue;
         }
-        if let Some(children) = refs_before.refs(id) {
-            stack.extend(children.iter().copied());
-        }
+        stack.extend(refs_before.refs(id).iter().copied());
     }
 
     let refs_after = ReferenceGraph::new(entities);
