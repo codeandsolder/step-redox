@@ -45,6 +45,76 @@ struct ShellContext {
     shell_id: u64,
 }
 
+struct ShellTopology {
+    faces: Vec<u64>,
+    face_edges: HashMap<u64, HashSet<u64>>,
+    edge_faces: HashMap<u64, Vec<u64>>,
+    adjacency: HashMap<u64, Vec<u64>>,
+}
+
+impl ShellTopology {
+    fn new(
+        shell_id: u64,
+        entities: &[EntityInstance],
+        index: &HashMap<u64, usize>,
+    ) -> Option<Self> {
+        let faces = ref_list_param(shell_id, 1, entities, index)?;
+        let mut face_edges = HashMap::<u64, HashSet<u64>>::with_capacity(faces.len());
+        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
+        for &face in &faces {
+            let Some(edges) = face_edge_curves(face, entities, index) else {
+                continue;
+            };
+            for &edge in &edges {
+                edge_faces.entry(edge).or_default().push(face);
+            }
+            face_edges.insert(face, edges);
+        }
+
+        let mut adjacency = faces
+            .iter()
+            .copied()
+            .map(|face| (face, Vec::new()))
+            .collect::<HashMap<_, _>>();
+        for attached in edge_faces.values() {
+            if attached.len() < 2 {
+                continue;
+            }
+            for &face in attached {
+                let out = adjacency.entry(face).or_default();
+                out.extend(attached.iter().copied().filter(|other| *other != face));
+            }
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort_unstable();
+            neighbors.dedup();
+        }
+
+        Some(Self {
+            faces,
+            face_edges,
+            edge_faces,
+            adjacency,
+        })
+    }
+
+    fn components_without_hosts(&self, hosts: &HashSet<u64>) -> Vec<HashSet<u64>> {
+        face_components_without_hosts(&self.faces, hosts, &self.adjacency)
+    }
+
+    fn component_is_two_manifold_with_hosts(
+        &self,
+        component: &HashSet<u64>,
+        hosts: &HashSet<u64>,
+    ) -> bool {
+        component_is_two_manifold_with_hosts(component, hosts, &self.face_edges, &self.edge_faces)
+    }
+
+    fn interface_edges(&self, component: &HashSet<u64>, host: u64) -> HashSet<u64> {
+        component_interface_edges(component, host, &self.face_edges, &self.edge_faces)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum StyleKey {
     Face(Vec<u64>),
@@ -848,41 +918,12 @@ fn diagnose_boundary_features_with_index(
     let mut candidates = Vec::<BoundaryFeatureCandidate>::new();
 
     for context in contexts {
-        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, index) else {
+        let Some(topology) = ShellTopology::new(context.shell_id, entities, index) else {
             continue;
         };
+        let shell_faces = &topology.faces;
         if shell_faces.len() < 3 {
             continue;
-        }
-
-        let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
-        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            let Some(edges) = face_edge_curves(face, entities, index) else {
-                continue;
-            };
-            for &edge in &edges {
-                edge_faces.entry(edge).or_default().push(face);
-            }
-            face_edges.insert(face, edges);
-        }
-
-        let mut adjacency = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            adjacency.entry(face).or_default();
-        }
-        for attached in edge_faces.values() {
-            if attached.len() < 2 {
-                continue;
-            }
-            for &face in attached {
-                let out = adjacency.entry(face).or_default();
-                out.extend(attached.iter().copied().filter(|other| *other != face));
-            }
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable();
-            neighbors.dedup();
         }
 
         let hosts = shell_faces
@@ -891,7 +932,7 @@ fn diagnose_boundary_features_with_index(
             .filter_map(|face| {
                 let frame = plane_frame(face, entities, index)?;
                 let bounds = ref_list_param(face, 1, entities, index)?;
-                let boundary_edges = face_edges.get(&face).map_or(0, HashSet::len);
+                let boundary_edges = topology.face_edges.get(&face).map_or(0, HashSet::len);
                 (bounds.len() > MIN_GROUP || boundary_edges >= MIN_COMPLEX_HOST_EDGES)
                     .then_some((face, frame, bounds))
             })
@@ -905,15 +946,14 @@ fn diagnose_boundary_features_with_index(
             let host_set = HashSet::from([*host_face]);
             let frames = HashMap::from([(*host_face, frame.clone())]);
             let lookups = HashMap::from([(*host_face, host_bound_lookup(bounds, entities, index))]);
-            for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
+            for component in topology.components_without_hosts(&host_set) {
                 let Some(candidate) = boundary_feature_candidate(
                     context.shell_id,
                     component,
                     &host_set,
                     &frames,
                     &lookups,
-                    &face_edges,
-                    &edge_faces,
+                    &topology,
                     entities,
                     &index,
                 ) else {
@@ -943,15 +983,14 @@ fn diagnose_boundary_features_with_index(
                 .map(|(face, _, bounds)| (*face, host_bound_lookup(bounds, entities, index)))
                 .collect::<HashMap<_, _>>();
 
-            for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
+            for component in topology.components_without_hosts(&host_set) {
                 let Some(candidate) = boundary_feature_candidate(
                     context.shell_id,
                     component,
                     &host_set,
                     &frames,
                     &lookups,
-                    &face_edges,
-                    &edge_faces,
+                    &topology,
                     entities,
                     &index,
                 ) else {
@@ -1072,24 +1111,23 @@ fn boundary_feature_candidate(
     requested_hosts: &HashSet<u64>,
     frames: &HashMap<u64, PlaneFrame>,
     bound_lookups: &HashMap<u64, HashMap<Vec<u64>, Vec<(u64, u64, String)>>>,
-    face_edges: &HashMap<u64, HashSet<u64>>,
-    edge_faces: &HashMap<u64, Vec<u64>>,
+    topology: &ShellTopology,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<BoundaryFeatureCandidate> {
     if component.is_empty() || component.len() > MAX_BOUNDARY_FEATURE_FACES {
         return None;
     }
-    if !component_is_two_manifold_with_hosts(&component, requested_hosts, face_edges, edge_faces) {
+    if !topology.component_is_two_manifold_with_hosts(&component, requested_hosts) {
         return None;
     }
 
     let mut host_face_ids = Vec::new();
     let mut interface_bound_ids = Vec::new();
     let mut sides = Vec::new();
-    let vertices = component_vertex_points(&component, face_edges, entities, index)?;
+    let vertices = component_vertex_points(&component, &topology.face_edges, entities, index)?;
     for &host in requested_hosts {
-        let interface_edges = component_interface_edges(&component, host, face_edges, edge_faces);
+        let interface_edges = topology.interface_edges(&component, host);
         if interface_edges.is_empty() {
             continue;
         }
@@ -1200,43 +1238,12 @@ pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDia
     report.shell_contexts = contexts.len();
 
     for context in contexts {
-        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+        let Some(topology) = ShellTopology::new(context.shell_id, entities, &index) else {
             continue;
         };
+        let shell_faces = &topology.faces;
         if shell_faces.len() < MIN_GROUP + 2 {
             continue;
-        }
-
-        let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
-        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            let Some(edges) = face_edge_curves(face, entities, &index) else {
-                continue;
-            };
-            for &edge in &edges {
-                edge_faces.entry(edge).or_default().push(face);
-            }
-            face_edges.insert(face, edges);
-        }
-
-        let mut adjacency = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            adjacency.entry(face).or_default();
-        }
-        for attached in edge_faces.values() {
-            if attached.len() < 2 {
-                continue;
-            }
-            for &face in attached {
-                adjacency
-                    .entry(face)
-                    .or_default()
-                    .extend(attached.iter().copied().filter(|other| *other != face));
-            }
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable();
-            neighbors.dedup();
         }
 
         let host_faces = shell_faces
@@ -1261,7 +1268,8 @@ pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDia
                 continue;
             };
             let bound_lookup = host_bound_lookup(&host_bounds, entities, &index);
-            let components = face_components_without_host(&shell_faces, host_face, &adjacency);
+            let host_set = HashSet::from([host_face]);
+            let components = topology.components_without_hosts(&host_set);
             let mut host = PlanarHostDiagnostic {
                 host_face_id: host_face,
                 bound_count: host_bounds.len(),
@@ -1279,17 +1287,11 @@ pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDia
                     report.rejected_empty_or_large += 1;
                     continue;
                 }
-                if !component_is_two_manifold_with_host(
-                    &component,
-                    host_face,
-                    &face_edges,
-                    &edge_faces,
-                ) {
+                if !topology.component_is_two_manifold_with_hosts(&component, &host_set) {
                     report.rejected_non_manifold += 1;
                     continue;
                 }
-                let interface_edges =
-                    component_interface_edges(&component, host_face, &face_edges, &edge_faces);
+                let interface_edges = topology.interface_edges(&component, host_face);
                 if interface_edges.is_empty() {
                     report.rejected_interface += 1;
                     continue;
@@ -1304,7 +1306,7 @@ pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDia
                 }
 
                 let Some(vertices) =
-                    component_vertex_points(&component, &face_edges, entities, &index)
+                    component_vertex_points(&component, &topology.face_edges, entities, &index)
                 else {
                     report.rejected_vertices += 1;
                     continue;
@@ -1373,41 +1375,12 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
     let mut claimed_bounds = HashSet::new();
 
     for context in contexts {
-        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+        let Some(topology) = ShellTopology::new(context.shell_id, entities, &index) else {
             continue;
         };
+        let shell_faces = &topology.faces;
         if shell_faces.len() < MIN_GROUP + 2 {
             continue;
-        }
-
-        let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
-        let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            let Some(edges) = face_edge_curves(face, entities, &index) else {
-                continue;
-            };
-            for &edge in &edges {
-                edge_faces.entry(edge).or_default().push(face);
-            }
-            face_edges.insert(face, edges);
-        }
-
-        let mut adjacency = HashMap::<u64, Vec<u64>>::new();
-        for &face in &shell_faces {
-            adjacency.entry(face).or_default();
-        }
-        for attached in edge_faces.values() {
-            if attached.len() < 2 {
-                continue;
-            }
-            for &face in attached {
-                let out = adjacency.entry(face).or_default();
-                out.extend(attached.iter().copied().filter(|other| *other != face));
-            }
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable();
-            neighbors.dedup();
         }
 
         let container_styles = styles_by_target
@@ -1436,7 +1409,8 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                 continue;
             };
             let bound_lookup = host_bound_lookup(&host_bounds, entities, &index);
-            let components = face_components_without_host(&shell_faces, host_face, &adjacency);
+            let host_set = HashSet::from([host_face]);
+            let components = topology.components_without_hosts(&host_set);
             let mut features = Vec::new();
 
             for component in components {
@@ -1447,16 +1421,10 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                     continue;
                 }
 
-                if !component_is_two_manifold_with_host(
-                    &component,
-                    host_face,
-                    &face_edges,
-                    &edge_faces,
-                ) {
+                if !topology.component_is_two_manifold_with_hosts(&component, &host_set) {
                     continue;
                 }
-                let interface_edges =
-                    component_interface_edges(&component, host_face, &face_edges, &edge_faces);
+                let interface_edges = topology.interface_edges(&component, host_face);
                 if interface_edges.is_empty() {
                     continue;
                 }
@@ -1472,7 +1440,7 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                 }
 
                 let Some(vertices) =
-                    component_vertex_points(&component, &face_edges, entities, &index)
+                    component_vertex_points(&component, &topology.face_edges, entities, &index)
                 else {
                     continue;
                 };
@@ -1957,58 +1925,14 @@ fn edge_set_key(edges: &HashSet<u64>) -> Vec<u64> {
     key
 }
 
-fn face_components_without_host(
-    faces: &[u64],
-    host: u64,
-    adjacency: &HashMap<u64, Vec<u64>>,
-) -> Vec<HashSet<u64>> {
-    let mut remaining: HashSet<u64> = faces.iter().copied().filter(|face| *face != host).collect();
-    let mut out = Vec::new();
-
-    while let Some(&seed) = remaining.iter().next() {
-        remaining.remove(&seed);
-        let mut component = HashSet::from([seed]);
-        let mut queue = VecDeque::from([seed]);
-        while let Some(face) = queue.pop_front() {
-            for &neighbor in adjacency.get(&face).into_iter().flatten() {
-                if neighbor == host || !remaining.remove(&neighbor) {
-                    continue;
-                }
-                component.insert(neighbor);
-                queue.push_back(neighbor);
-            }
-        }
-        out.push(component);
-    }
-    out
-}
-
+#[cfg(test)]
 fn component_is_two_manifold_with_host(
     component: &HashSet<u64>,
     host: u64,
     face_edges: &HashMap<u64, HashSet<u64>>,
     edge_faces: &HashMap<u64, Vec<u64>>,
 ) -> bool {
-    let mut edges = HashSet::new();
-    for face in component {
-        let Some(face_edges) = face_edges.get(face) else {
-            return false;
-        };
-        edges.extend(face_edges.iter().copied());
-    }
-
-    edges.into_iter().all(|edge| {
-        let Some(attached) = edge_faces.get(&edge) else {
-            return false;
-        };
-        if attached.len() != 2 {
-            return false;
-        }
-        attached
-            .iter()
-            .all(|face| *face == host || component.contains(face))
-            && attached.iter().filter(|face| **face == host).count() <= 1
-    })
+    component_is_two_manifold_with_hosts(component, &HashSet::from([host]), face_edges, edge_faces)
 }
 
 fn component_interface_edges(
