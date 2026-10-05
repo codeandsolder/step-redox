@@ -314,7 +314,7 @@ fn rotate_curves_to_minimum(curves: &mut [RecoveredProfileCurve]) -> Option<()> 
     Some(())
 }
 
-fn mixed_profile_self_intersects(curves: &[RecoveredProfileCurve]) -> bool {
+pub(super) fn mixed_profile_self_intersects(curves: &[RecoveredProfileCurve]) -> bool {
     for first in 0..curves.len() {
         for second in first + 1..curves.len() {
             let adjacent = second == first + 1 || (first == 0 && second + 1 == curves.len());
@@ -396,7 +396,7 @@ fn line_pair_has_extra_intersection(
     cross2(u, v).abs() <= GEOM_TOL_MM * scale && dot2(u, v) > GEOM_TOL_MM.powi(2)
 }
 
-fn line_arc_has_extra_intersection(
+pub(super) fn line_arc_has_extra_intersection(
     line: &RecoveredProfileCurve,
     arc: &RecoveredProfileCurve,
     adjacent: bool,
@@ -433,7 +433,7 @@ fn line_arc_has_extra_intersection(
     false
 }
 
-fn arc_pair_has_extra_intersection(
+pub(super) fn arc_pair_has_extra_intersection(
     first: &RecoveredProfileCurve,
     second: &RecoveredProfileCurve,
     adjacent: bool,
@@ -760,7 +760,7 @@ fn polygon_self_intersects(points: &[[f64; 2]]) -> bool {
     false
 }
 
-fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+pub(super) fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     let ab = sub2(b, a);
     let cd = sub2(d, c);
     let scale = (distance2(a, b) + distance2(c, d)).max(GEOM_TOL_MM);
@@ -829,7 +829,7 @@ fn point_order(a: [f64; 2], b: [f64; 2]) -> std::cmp::Ordering {
     a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1]))
 }
 
-fn signed_area(points: &[[f64; 2]]) -> f64 {
+pub(super) fn signed_area(points: &[[f64; 2]]) -> f64 {
     0.5 * (0..points.len())
         .map(|index| {
             let next = (index + 1) % points.len();

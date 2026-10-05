@@ -7,6 +7,11 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod profile_graph;
+#[cfg(test)]
+use profile_graph::{
+    arc_pair_has_extra_intersection, line_arc_has_extra_intersection,
+    mixed_profile_self_intersects, segments_intersect, signed_area,
+};
 use profile_graph::{
     between, closed_profile_from_curves, closed_profile_from_segments, line_profile_curves,
     push_unique_segment, segment_radius_at_axial, shell_faces_connected, sub2,
