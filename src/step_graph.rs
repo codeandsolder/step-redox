@@ -67,13 +67,13 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
 /// multiple parents. Build both directions in one entity traversal when a pass
 /// needs reachability or garbage-collection information.
 #[derive(Debug, Default)]
-pub(crate) struct ReferenceGraph {
+pub(super) struct ReferenceGraph {
     forward: HashMap<u64, Vec<u64>>,
     inbound: HashMap<u64, std::collections::HashSet<u64>>,
 }
 
 impl ReferenceGraph {
-    pub(crate) fn new(entities: &[EntityInstance]) -> Self {
+    pub(super) fn new(entities: &[EntityInstance]) -> Self {
         let mut forward = HashMap::with_capacity(entities.len());
         let mut inbound = HashMap::with_capacity(entities.len());
         for entity in entities {
@@ -91,15 +91,15 @@ impl ReferenceGraph {
         Self { forward, inbound }
     }
 
-    pub(crate) fn refs(&self, id: u64) -> Option<&[u64]> {
+    pub(super) fn refs(&self, id: u64) -> Option<&[u64]> {
         self.forward.get(&id).map(Vec::as_slice)
     }
 
-    pub(crate) const fn forward(&self) -> &HashMap<u64, Vec<u64>> {
+    pub(super) const fn forward(&self) -> &HashMap<u64, Vec<u64>> {
         &self.forward
     }
 
-    pub(crate) const fn inbound(&self) -> &HashMap<u64, std::collections::HashSet<u64>> {
+    pub(super) const fn inbound(&self) -> &HashMap<u64, std::collections::HashSet<u64>> {
         &self.inbound
     }
 }

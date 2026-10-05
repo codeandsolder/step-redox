@@ -41,7 +41,7 @@ pub struct PlanarSurfaceEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct BSplineSurfaceSupport {
+pub(super) struct BSplineSurfaceSupport {
     pub u_degree: usize,
     pub v_degree: usize,
     pub control_points_mm: Vec<Vec<[f64; 3]>>,

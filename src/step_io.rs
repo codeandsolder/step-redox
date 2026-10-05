@@ -132,7 +132,7 @@ pub fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static
     Ok((decoded, "gbk"))
 }
 
-pub(crate) fn write_step_string(s: &str, out: &mut String) {
+pub(super) fn write_step_string(s: &str, out: &mut String) {
     out.push('\'');
 
     let flush_non_ascii = |buf: &mut String, out: &mut String| {
@@ -162,7 +162,7 @@ pub(crate) fn write_step_string(s: &str, out: &mut String) {
     out.push('\'');
 }
 
-pub(crate) fn format_real(v: f64) -> String {
+pub(super) fn format_real(v: f64) -> String {
     let mut s = v.to_string();
     if !s.contains('.') && !s.contains('e') && !s.contains('E') {
         s.push('.');

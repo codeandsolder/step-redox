@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 #[derive(Default)]
-pub(crate) struct ConsolidateStats {
-    pub(crate) total: usize,
-    pub(crate) by_type: BTreeMap<String, usize>,
+pub(super) struct ConsolidateStats {
+    pub(super) total: usize,
+    pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(crate) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
+pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
     use std::collections::{HashMap, HashSet};
 
     let mut refcounts: HashMap<u64, usize> = HashMap::new();
@@ -127,12 +127,12 @@ fn standalone_param_key(param: &Parameter) -> String {
 }
 
 #[derive(Default)]
-pub(crate) struct InternStats {
-    pub(crate) total: usize,
-    pub(crate) by_type: BTreeMap<String, usize>,
+pub(super) struct InternStats {
+    pub(super) total: usize,
+    pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(crate) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
+pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
     // Store redirects only. An identity map for a million-entity STEP file is
     // a surprisingly expensive way of spelling "most things survive".
     let mut alias: HashMap<u64, u64> = HashMap::new();
@@ -215,7 +215,7 @@ fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
     id
 }
 
-pub(crate) fn dense_renumber(entities: &mut [EntityInstance]) {
+pub(super) fn dense_renumber(entities: &mut [EntityInstance]) {
     let id_map: HashMap<u64, u64> = entities
         .iter()
         .enumerate()
@@ -444,7 +444,7 @@ const PLACEHOLDER_NAME_TYPES: &[&str] = &[
     "VERTEX_POINT",
 ];
 
-pub(crate) fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
+pub(super) fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
     let mut changed = 0usize;
     for entity in entities {
         match entity {

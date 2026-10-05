@@ -2,7 +2,7 @@ use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut, visi
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) fn cartesian_point(
+pub(super) fn cartesian_point(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -28,7 +28,7 @@ pub(crate) fn cartesian_point(
     ])
 }
 
-pub(crate) fn number(param: &Parameter) -> Option<f64> {
+pub(super) fn number(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Real(value) => Some(*value),
         Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
@@ -36,14 +36,14 @@ pub(crate) fn number(param: &Parameter) -> Option<f64> {
     }
 }
 
-pub(crate) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
+pub(super) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     let Parameter::List(params) = parameter else {
         return None;
     };
     entity_ref_value(params.get(idx)?)
 }
 
-pub(crate) fn closure_from(
+pub(super) fn closure_from(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -66,7 +66,7 @@ pub(crate) fn closure_from(
     seen
 }
 
-pub(crate) fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
+pub(super) fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
     let record = simple_record(entity)?;
     let Parameter::List(params) = &record.parameter else {
         return None;
@@ -81,7 +81,7 @@ pub(crate) fn representation_items_and_context(entity: &EntityInstance) -> Optio
     Some((item_ids?, entity_ref_value(&params[2])?))
 }
 
-pub(crate) fn patch_presentation_lists(
+pub(super) fn patch_presentation_lists(
     entities: &mut [EntityInstance],
     remove: &HashSet<u64>,
     add: &[u64],
@@ -113,7 +113,7 @@ pub(crate) fn patch_presentation_lists(
     }
 }
 
-pub(crate) fn push_point(
+pub(super) fn push_point(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
     point: [f64; 3],
@@ -129,7 +129,7 @@ pub(crate) fn push_point(
     )
 }
 
-pub(crate) fn push_simple(
+pub(super) fn push_simple(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
     name: &str,
@@ -147,6 +147,6 @@ pub(crate) fn push_simple(
     id
 }
 
-pub(crate) const fn entity_ref(id: u64) -> Parameter {
+pub(super) const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }
