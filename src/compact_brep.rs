@@ -6,6 +6,9 @@ use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
+mod structural_key;
+use structural_key::{curve_hash, curve_structural_eq, surface_hash, surface_structural_eq};
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompactBrep {
     pub source_solid_id: u64,
@@ -2209,9 +2212,17 @@ fn pack_typed_handle(kind: u32, index: u32, kind_shift: u32) -> u32 {
 
 pub fn build_compact_brep(solid_id: u64, entities: &[EntityInstance]) -> Result<CompactBrep> {
     let index = build_index(entities);
-    let face_ids = brep::solid_face_ids(solid_id, entities, &index)
+    build_compact_brep_with_index(solid_id, entities, &index)
+}
+
+pub(crate) fn build_compact_brep_with_index(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<CompactBrep> {
+    let face_ids = brep::solid_face_ids(solid_id, entities, index)
         .with_context(|| format!("solid #{solid_id} has no readable closed-shell face set"))?;
-    build_compact_brep_faces_with_index(solid_id, &face_ids, entities, &index)
+    build_compact_brep_faces_with_index(solid_id, &face_ids, entities, index)
 }
 
 pub fn build_compact_brep_faces(
@@ -2250,13 +2261,13 @@ struct Builder<'a> {
     vertices: Vec<CompactVertex>,
     vertex_by_source: HashMap<u64, u32>,
     curves: Vec<CompactCurve>,
-    curve_by_key: HashMap<String, u32>,
+    curve_by_hash: HashMap<u64, Vec<u32>>,
     edges: Vec<CompactEdge>,
     edge_by_source: HashMap<u64, u32>,
     loops: Vec<CompactLoop>,
     loop_by_source: HashMap<u64, u32>,
     surfaces: Vec<CompactSurface>,
-    surface_by_key: HashMap<String, u32>,
+    surface_by_hash: HashMap<u64, Vec<u32>>,
     faces: Vec<CompactFace>,
 }
 
@@ -2269,13 +2280,13 @@ impl<'a> Builder<'a> {
             vertices: Vec::new(),
             vertex_by_source: HashMap::new(),
             curves: Vec::new(),
-            curve_by_key: HashMap::new(),
+            curve_by_hash: HashMap::new(),
             edges: Vec::new(),
             edge_by_source: HashMap::new(),
             loops: Vec::new(),
             loop_by_source: HashMap::new(),
             surfaces: Vec::new(),
-            surface_by_key: HashMap::new(),
+            surface_by_hash: HashMap::new(),
             faces: Vec::new(),
         }
     }
@@ -2393,13 +2404,17 @@ impl<'a> Builder<'a> {
         } else {
             compact_curve(source_entity_id, support)
         };
-        let key = curve_key(&curve);
-        if let Some(&existing) = self.curve_by_key.get(&key) {
-            return existing;
+        let hash = curve_hash(&curve);
+        if let Some(candidates) = self.curve_by_hash.get(&hash) {
+            for &existing in candidates {
+                if curve_structural_eq(&self.curves[existing as usize], &curve) {
+                    return existing;
+                }
+            }
         }
         let index = self.curves.len() as u32;
         self.curves.push(curve);
-        self.curve_by_key.insert(key, index);
+        self.curve_by_hash.entry(hash).or_default().push(index);
         index
     }
 
@@ -2420,13 +2435,17 @@ impl<'a> Builder<'a> {
                 .map(|record| record.name.as_str());
             compact_surface(source_entity_id, source_kind, &support)
         };
-        let key = surface_key(&surface);
-        if let Some(&existing) = self.surface_by_key.get(&key) {
-            return existing;
+        let hash = surface_hash(&surface);
+        if let Some(candidates) = self.surface_by_hash.get(&hash) {
+            for &existing in candidates {
+                if surface_structural_eq(&self.surfaces[existing as usize], &surface) {
+                    return existing;
+                }
+            }
         }
         let index = self.surfaces.len() as u32;
         self.surfaces.push(surface);
-        self.surface_by_key.insert(key, index);
+        self.surface_by_hash.entry(hash).or_default().push(index);
         index
     }
 }
@@ -2496,193 +2515,6 @@ fn compact_surface(
     }
 }
 
-fn curve_key(curve: &CompactCurve) -> String {
-    match curve {
-        CompactCurve::Line {
-            origin_mm,
-            direction,
-        } => format!("L:{}:{}", vec_key(*origin_mm), vec_key(*direction)),
-        CompactCurve::Circle {
-            center_mm,
-            normal,
-            x_direction,
-            radius_mm,
-        } => format!(
-            "C:{}:{}:{}:{:016x}",
-            vec_key(*center_mm),
-            vec_key(*normal),
-            vec_key(*x_direction),
-            fbits(*radius_mm)
-        ),
-        CompactCurve::BSpline { spline, .. } => bspline_curve_key(spline),
-        CompactCurve::Source { source_entity_id } => format!("SRC:{source_entity_id}"),
-    }
-}
-
-fn surface_key(surface: &CompactSurface) -> String {
-    match surface {
-        CompactSurface::Plane { origin_mm, normal } => {
-            format!("P:{}:{}", vec_key(*origin_mm), vec_key(*normal))
-        }
-        CompactSurface::Cylinder {
-            axis_origin_mm,
-            axis,
-            x_direction,
-            radius_mm,
-        } => format!(
-            "CY:{}:{}:{}:{:016x}",
-            vec_key(*axis_origin_mm),
-            vec_key(*axis),
-            vec_key(*x_direction),
-            fbits(*radius_mm)
-        ),
-        CompactSurface::Cone {
-            reference_origin_mm,
-            axis,
-            x_direction,
-            reference_radius_mm,
-            semi_angle_rad,
-        } => format!(
-            "CO:{}:{}:{}:{:016x}:{:016x}",
-            vec_key(*reference_origin_mm),
-            vec_key(*axis),
-            vec_key(*x_direction),
-            fbits(*reference_radius_mm),
-            fbits(*semi_angle_rad)
-        ),
-        CompactSurface::BSpline { spline, .. } => bspline_surface_key(spline),
-        CompactSurface::Sphere {
-            center_mm,
-            axis,
-            x_direction,
-            radius_mm,
-        } => format!(
-            "S:{}:{}:{}:{:016x}",
-            vec_key(*center_mm),
-            vec_key(*axis),
-            vec_key(*x_direction),
-            fbits(*radius_mm)
-        ),
-        CompactSurface::Torus {
-            center_mm,
-            axis,
-            x_direction,
-            major_radius_mm,
-            minor_radius_mm,
-        } => format!(
-            "T:{}:{}:{}:{:016x}:{:016x}",
-            vec_key(*center_mm),
-            vec_key(*axis),
-            vec_key(*x_direction),
-            fbits(*major_radius_mm),
-            fbits(*minor_radius_mm)
-        ),
-        CompactSurface::Revolution { source_entity_id } => format!("R:{source_entity_id}"),
-        CompactSurface::Source { source_entity_id } => format!("SRC:{source_entity_id}"),
-    }
-}
-
-fn push_bits(out: &mut String, value: f64) {
-    use std::fmt::Write as _;
-    let _ = write!(out, "{:016x}", fbits(value));
-}
-
-fn bspline_curve_key(spline: &BSplineSupport) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(
-        32 + spline.control_points_mm.len() * 49
-            + spline.knots.len() * 17
-            + spline
-                .weights
-                .as_ref()
-                .map_or(0, |weights| weights.len() * 17),
-    );
-    let _ = write!(
-        out,
-        "BS:d{}:cp{}:",
-        spline.degree,
-        spline.control_points_mm.len()
-    );
-    for point in &spline.control_points_mm {
-        for &value in point {
-            push_bits(&mut out, value);
-        }
-        out.push(';');
-    }
-    let _ = write!(out, ":k{}:", spline.knots.len());
-    for &value in &spline.knots {
-        push_bits(&mut out, value);
-        out.push(',');
-    }
-    match &spline.weights {
-        Some(weights) => {
-            let _ = write!(out, ":w{}:", weights.len());
-            for &value in weights {
-                push_bits(&mut out, value);
-                out.push(',');
-            }
-        }
-        None => out.push_str(":w-"),
-    }
-    out
-}
-
-fn bspline_surface_key(spline: &BSplineSurfaceSupport) -> String {
-    use std::fmt::Write as _;
-    let point_count = spline.control_points_mm.iter().map(Vec::len).sum::<usize>();
-    let weight_count = spline
-        .weights
-        .as_ref()
-        .map_or(0, |rows| rows.iter().map(Vec::len).sum::<usize>());
-    let mut out = String::with_capacity(
-        48 + point_count * 49 + (spline.u_knots.len() + spline.v_knots.len() + weight_count) * 17,
-    );
-    let columns = spline.control_points_mm.first().map_or(0, Vec::len);
-    let _ = write!(
-        out,
-        "BSS:du{}:dv{}:r{}:c{}:",
-        spline.u_degree,
-        spline.v_degree,
-        spline.control_points_mm.len(),
-        columns
-    );
-    for row in &spline.control_points_mm {
-        let _ = write!(out, "[{}:", row.len());
-        for point in row {
-            for &value in point {
-                push_bits(&mut out, value);
-            }
-            out.push(';');
-        }
-        out.push(']');
-    }
-    let _ = write!(out, ":uk{}:", spline.u_knots.len());
-    for &value in &spline.u_knots {
-        push_bits(&mut out, value);
-        out.push(',');
-    }
-    let _ = write!(out, ":vk{}:", spline.v_knots.len());
-    for &value in &spline.v_knots {
-        push_bits(&mut out, value);
-        out.push(',');
-    }
-    match &spline.weights {
-        Some(rows) => {
-            let _ = write!(out, ":wr{}:", rows.len());
-            for row in rows {
-                let _ = write!(out, "[{}:", row.len());
-                for &value in row {
-                    push_bits(&mut out, value);
-                    out.push(',');
-                }
-                out.push(']');
-            }
-        }
-        None => out.push_str(":w-"),
-    }
-    out
-}
-
 fn as_u32(value: usize, what: &str) -> Result<u32> {
     u32::try_from(value).with_context(|| format!("too many {what}s for compact B-rep: {value}"))
 }
@@ -2699,18 +2531,18 @@ fn fbits(value: f64) -> u64 {
     clean_zero(value).to_bits()
 }
 
-fn vec_key(v: [f64; 3]) -> String {
-    format!(
-        "{:016x},{:016x},{:016x}",
-        fbits(v[0]),
-        fbits(v[1]),
-        fbits(v[2])
-    )
+pub(crate) fn closure_entity_count_with_index(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> usize {
+    crate::step_entities::closure_from(solid_id, entities, index).len()
 }
 
-pub fn closure_entity_count(solid_id: u64, entities: &[EntityInstance]) -> usize {
+#[cfg(test)]
+fn closure_entity_count(solid_id: u64, entities: &[EntityInstance]) -> usize {
     let index = build_index(entities);
-    crate::step_entities::closure_from(solid_id, entities, &index).len()
+    closure_entity_count_with_index(solid_id, entities, &index)
 }
 
 #[cfg(test)]
@@ -2733,7 +2565,8 @@ mod tests {
                 direction: [1.0, 0.0, 0.0],
             }),
         );
-        assert_eq!(curve_key(&a), curve_key(&b));
+        assert!(curve_structural_eq(&a, &b));
+        assert_eq!(curve_hash(&a), curve_hash(&b));
     }
 
     #[test]
@@ -2752,7 +2585,7 @@ mod tests {
                 direction: [-1.0, 0.0, 0.0],
             }),
         );
-        assert_ne!(curve_key(&a), curve_key(&b));
+        assert!(!curve_structural_eq(&a, &b));
     }
     #[test]
     fn identical_bspline_curve_payloads_ignore_source_entity_id() {
@@ -2770,7 +2603,8 @@ mod tests {
             source_entity_id: 999,
             spline: spline.clone(),
         };
-        assert_eq!(curve_key(&a), curve_key(&b));
+        assert!(curve_structural_eq(&a, &b));
+        assert_eq!(curve_hash(&a), curve_hash(&b));
 
         let mut changed = spline;
         changed.control_points_mm[1][1] =
@@ -2779,7 +2613,7 @@ mod tests {
             source_entity_id: 10,
             spline: changed,
         };
-        assert_ne!(curve_key(&a), curve_key(&c));
+        assert!(!curve_structural_eq(&a, &c));
     }
 
     #[test]
@@ -2803,7 +2637,8 @@ mod tests {
             source_entity_id: 777,
             spline: spline.clone(),
         };
-        assert_eq!(surface_key(&a), surface_key(&b));
+        assert!(surface_structural_eq(&a, &b));
+        assert_eq!(surface_hash(&a), surface_hash(&b));
 
         let mut changed = spline;
         changed.weights.as_mut().unwrap()[1][1] =
@@ -2812,7 +2647,7 @@ mod tests {
             source_entity_id: 20,
             spline: changed,
         };
-        assert_ne!(surface_key(&a), surface_key(&c));
+        assert!(!surface_structural_eq(&a, &c));
     }
 
     #[test]

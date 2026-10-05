@@ -267,8 +267,10 @@ pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<Compact
         if !index.contains_key(&solid_id) {
             continue;
         }
-        let compact = compact_brep::build_compact_brep(solid_id, &section.entities)?;
-        let closure = compact_brep::closure_entity_count(solid_id, &section.entities);
+        let compact =
+            compact_brep::build_compact_brep_with_index(solid_id, &section.entities, &index)?;
+        let closure =
+            compact_brep::closure_entity_count_with_index(solid_id, &section.entities, &index);
         let mut stats = compact.stats(closure);
         stats.serialized_json_bytes = serde_json::to_vec(&compact)?.len();
         let packed = compact.into_packed()?;
