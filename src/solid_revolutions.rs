@@ -7,16 +7,13 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod profile_graph;
-#[cfg(test)]
 use profile_graph::{
-    arc_pair_has_extra_intersection, line_arc_has_extra_intersection,
-    mixed_profile_self_intersects, segments_intersect, signed_area,
-};
-use profile_graph::{
-    between, closed_profile_from_curves, closed_profile_from_segments, line_profile_curves,
-    push_unique_segment, segment_radius_at_axial, shell_faces_connected, sub2,
+    between, push_unique_segment, segment_radius_at_axial, shell_faces_connected, sub2,
     unique_neighbor_face,
 };
+
+mod meridian;
+use meridian::{MeridianArc, MeridianCurve, MeridianLine, MeridianProfile};
 
 const GEOM_TOL_MM: f64 = 1.0e-7;
 /// Default source-evidence tolerance when STEP provides no trusted uncertainty context.
@@ -179,8 +176,6 @@ struct LinearMeridianSupport {
     reference_signed_radius: f64,
     slope: f64,
 }
-
-type ProfileGraph = (Vec<[f64; 2]>, Vec<(usize, usize)>);
 
 #[derive(Debug, Clone)]
 struct FaceInfo {
@@ -561,8 +556,14 @@ fn detect_one_solid(
         }
         push_unique_segment(&mut segments, segment);
     }
-    let profile_points_mm = closed_profile_from_segments(segments)?;
-    let profile_curves = line_profile_curves(&profile_points_mm);
+    let profile = MeridianProfile::from_lines(
+        segments.into_iter().map(|segment| MeridianLine {
+            start: segment.a,
+            end: segment.b,
+        }),
+        GEOM_TOL_MM,
+    )?;
+    let profile_curves = profile.into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids,
@@ -901,12 +902,18 @@ fn detect_one_radial_slot(
     }
     #[cfg(test)]
     let debug_segments = segments.clone();
-    let Some(profile_points_mm) = closed_profile_from_segments(segments) else {
+    let Some(profile) = MeridianProfile::from_lines(
+        segments.into_iter().map(|segment| MeridianLine {
+            start: segment.a,
+            end: segment.b,
+        }),
+        GEOM_TOL_MM,
+    ) else {
         #[cfg(test)]
         eprintln!("radial-slot base profile failed closure: {debug_segments:?}");
         return None;
     };
-    let profile_curves = line_profile_curves(&profile_points_mm);
+    let profile_curves = profile.into_recovered();
     let Some(radial_direction) = radial_basis(axis_direction) else {
         #[cfg(test)]
         eprintln!("radial-slot base profile failed radial basis for axis {axis_direction:?}");
@@ -1088,16 +1095,21 @@ fn detect_full_ring_torus(
         return None;
     }
 
+    let profile_curves = MeridianProfile::closed(
+        vec![MeridianCurve::Arc(MeridianArc {
+            source_edge_ids: Vec::new(),
+            center: [first.major_radius_mm, center_t],
+            radius: first.minor_radius_mm,
+            start_angle: 0.0,
+            end_angle: std::f64::consts::TAU,
+        })],
+        GEOM_TOL_MM,
+    )?
+    .into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids: face_ids.to_vec(),
-        profile_curves: vec![RecoveredProfileCurve::CircleArc {
-            source_edge_ids: Vec::new(),
-            center_mm: [first.major_radius_mm, center_t],
-            radius_mm: first.minor_radius_mm,
-            start_angle_rad: 0.0,
-            end_angle_rad: std::f64::consts::TAU,
-        }],
+        profile_curves,
         axis_origin_mm,
         axis_direction,
         radial_direction,
@@ -1235,28 +1247,31 @@ fn detect_spherical_cap(
     } else {
         -std::f64::consts::FRAC_PI_2
     };
+    let profile_curves = MeridianProfile::closed(
+        vec![
+            MeridianCurve::Line(MeridianLine {
+                start: [0.0, plane_t],
+                end: [cap_radius, plane_t],
+            }),
+            MeridianCurve::Arc(MeridianArc {
+                source_edge_ids: Vec::new(),
+                center: [0.0, center_t],
+                radius: first_sphere.radius_mm,
+                start_angle: cap_angle,
+                end_angle: pole_angle,
+            }),
+            MeridianCurve::Line(MeridianLine {
+                start: [0.0, pole_t],
+                end: [0.0, plane_t],
+            }),
+        ],
+        GEOM_TOL_MM,
+    )?
+    .into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids: face_ids.to_vec(),
-        profile_curves: vec![
-            RecoveredProfileCurve::Line {
-                source_edge_ids: Vec::new(),
-                start_mm: [0.0, plane_t],
-                end_mm: [cap_radius, plane_t],
-            },
-            RecoveredProfileCurve::CircleArc {
-                source_edge_ids: Vec::new(),
-                center_mm: [0.0, center_t],
-                radius_mm: first_sphere.radius_mm,
-                start_angle_rad: cap_angle,
-                end_angle_rad: pole_angle,
-            },
-            RecoveredProfileCurve::Line {
-                source_edge_ids: Vec::new(),
-                start_mm: [0.0, pole_t],
-                end_mm: [0.0, plane_t],
-            },
-        ],
+        profile_curves,
         axis_origin_mm,
         axis_direction,
         radial_direction,
@@ -1512,33 +1527,35 @@ fn detect_hemispherical_end(
     }
 
     let cap_angle = f64::from(sphere_side) * std::f64::consts::FRAC_PI_2;
+    let profile_curves = MeridianProfile::closed(
+        vec![
+            MeridianCurve::Line(MeridianLine {
+                start: [0.0, plane_t],
+                end: [radius_mm, plane_t],
+            }),
+            MeridianCurve::Line(MeridianLine {
+                start: [radius_mm, plane_t],
+                end: [radius_mm, center_t],
+            }),
+            MeridianCurve::Arc(MeridianArc {
+                source_edge_ids: Vec::new(),
+                center: [0.0, center_t],
+                radius: radius_mm,
+                start_angle: 0.0,
+                end_angle: cap_angle,
+            }),
+            MeridianCurve::Line(MeridianLine {
+                start: [0.0, pole_t],
+                end: [0.0, plane_t],
+            }),
+        ],
+        GEOM_TOL_MM,
+    )?
+    .into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids: face_ids.to_vec(),
-        profile_curves: vec![
-            RecoveredProfileCurve::Line {
-                source_edge_ids: Vec::new(),
-                start_mm: [0.0, plane_t],
-                end_mm: [radius_mm, plane_t],
-            },
-            RecoveredProfileCurve::Line {
-                source_edge_ids: Vec::new(),
-                start_mm: [radius_mm, plane_t],
-                end_mm: [radius_mm, center_t],
-            },
-            RecoveredProfileCurve::CircleArc {
-                source_edge_ids: Vec::new(),
-                center_mm: [0.0, center_t],
-                radius_mm,
-                start_angle_rad: 0.0,
-                end_angle_rad: cap_angle,
-            },
-            RecoveredProfileCurve::Line {
-                source_edge_ids: Vec::new(),
-                start_mm: [0.0, pole_t],
-                end_mm: [0.0, plane_t],
-            },
-        ],
+        profile_curves,
         axis_origin_mm,
         axis_direction,
         radial_direction,
@@ -1721,14 +1738,15 @@ fn detect_mixed_curved_revolution(
 
     let mut curves = segments
         .into_iter()
-        .map(|segment| RecoveredProfileCurve::Line {
-            source_edge_ids: Vec::new(),
-            start_mm: segment.a,
-            end_mm: segment.b,
+        .map(|segment| {
+            MeridianCurve::Line(MeridianLine {
+                start: segment.a,
+                end: segment.b,
+            })
         })
         .collect::<Vec<_>>();
     curves.extend(arcs);
-    let profile_curves = closed_profile_from_curves(curves)?;
+    let profile_curves = MeridianProfile::closed(curves, GEOM_TOL_MM)?.into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
         face_ids: face_ids.to_vec(),
@@ -1753,7 +1771,7 @@ fn sphere_profile_arc(
     axis_direction: [f64; 3],
     faces: &[FaceInfo],
     edge_faces: &HashMap<u64, Vec<usize>>,
-) -> Option<(RecoveredProfileCurve, f64)> {
+) -> Option<(MeridianCurve, f64)> {
     if face_indices.is_empty()
         || !sphere.radius_mm.is_finite()
         || sphere.radius_mm <= GEOM_TOL_MM
@@ -1777,7 +1795,6 @@ fn sphere_profile_arc(
         if !same_sphere_support(sphere, face_sphere) || face.loops.len() != 1 {
             return None;
         }
-
         for edge in &face.loops[0].edges {
             let CurveSupport::Circle(circle) = edge.support else {
                 return None;
@@ -1788,7 +1805,6 @@ fn sphere_profile_arc(
                     .max(circle_point_residual(point, circle))
                     .max(sphere_point_residual(point, sphere));
             }
-
             let neighbor = unique_neighbor_face(face_index, edge.edge_id, edge_faces)?;
             match faces.get(neighbor)?.surface {
                 SurfaceSupport::Sphere(neighbor_sphere)
@@ -1835,13 +1851,13 @@ fn sphere_profile_arc(
     let angle_tol = (GEOM_TOL_MM / sphere.radius_mm).max(1.0e-12);
     let mut candidates = Vec::<(f64, f64)>::new();
     if boundary_points.len() == 1 {
-        let start = meridian_angle(boundary_points[0], center_mm, sphere.radius_mm)?;
+        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         candidates.push((start, std::f64::consts::FRAC_PI_2));
         candidates.push((start, -std::f64::consts::FRAC_PI_2));
     } else {
-        let start = meridian_angle(boundary_points[0], center_mm, sphere.radius_mm)?;
-        let end = meridian_angle(boundary_points[1], center_mm, sphere.radius_mm)?;
-        let ccw_delta = positive_angle_delta(start, end);
+        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
+        let end = meridian::angle(boundary_points[1], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
+        let ccw_delta = meridian::positive_angle_delta(start, end);
         let cw_delta = std::f64::consts::TAU - ccw_delta;
         if ccw_delta <= angle_tol || cw_delta <= angle_tol {
             return None;
@@ -1853,27 +1869,34 @@ fn sphere_profile_arc(
     let valid = candidates
         .into_iter()
         .filter(|&(arc_start, arc_end)| {
-            circle_arc_min_radius(0.0, sphere.radius_mm, arc_start, arc_end) >= -GEOM_TOL_MM
+            let curve = MeridianCurve::Arc(MeridianArc {
+                source_edge_ids: Vec::new(),
+                center: center_mm,
+                radius: sphere.radius_mm,
+                start_angle: arc_start,
+                end_angle: arc_end,
+            });
+            curve.min_radius(GEOM_TOL_MM) >= -GEOM_TOL_MM
                 && witness_points.iter().all(|point| {
-                    meridian_angle(*point, center_mm, sphere.radius_mm)
-                        .is_some_and(|angle| angle_on_arc(angle, arc_start, arc_end, angle_tol))
+                    meridian::angle(*point, center_mm, sphere.radius_mm, GEOM_TOL_MM).is_some_and(
+                        |angle| meridian::angle_on_arc(angle, arc_start, arc_end, angle_tol),
+                    )
                 })
         })
         .collect::<Vec<_>>();
-    let [(start_angle_rad, end_angle_rad)] = valid.as_slice() else {
+    let [(start_angle, end_angle)] = valid.as_slice() else {
         return None;
     };
-
     source_edge_ids.sort_unstable();
     source_edge_ids.dedup();
     Some((
-        RecoveredProfileCurve::CircleArc {
+        MeridianCurve::Arc(MeridianArc {
             source_edge_ids,
-            center_mm,
-            radius_mm: sphere.radius_mm,
-            start_angle_rad: *start_angle_rad,
-            end_angle_rad: *end_angle_rad,
-        },
+            center: center_mm,
+            radius: sphere.radius_mm,
+            start_angle: *start_angle,
+            end_angle: *end_angle,
+        }),
         max_residual_mm,
     ))
 }
@@ -1931,7 +1954,7 @@ fn torus_profile_arc(
     axis_direction: [f64; 3],
     faces: &[FaceInfo],
     edge_faces: &HashMap<u64, Vec<usize>>,
-) -> Option<(RecoveredProfileCurve, f64)> {
+) -> Option<(MeridianCurve, f64)> {
     if face_indices.is_empty()
         || torus.major_radius_mm <= GEOM_TOL_MM
         || torus.minor_radius_mm <= GEOM_TOL_MM
@@ -2005,9 +2028,9 @@ fn torus_profile_arc(
     if witness_points.is_empty() || max_residual_mm > GEOM_TOL_MM {
         return None;
     }
-    let start_angle = meridian_angle(*start, center_mm, torus.minor_radius_mm)?;
-    let end_angle = meridian_angle(*end, center_mm, torus.minor_radius_mm)?;
-    let ccw_delta = positive_angle_delta(start_angle, end_angle);
+    let start_angle = meridian::angle(*start, center_mm, torus.minor_radius_mm, GEOM_TOL_MM)?;
+    let end_angle = meridian::angle(*end, center_mm, torus.minor_radius_mm, GEOM_TOL_MM)?;
+    let ccw_delta = meridian::positive_angle_delta(start_angle, end_angle);
     let cw_delta = std::f64::consts::TAU - ccw_delta;
     let angle_tol = (GEOM_TOL_MM / torus.minor_radius_mm).max(1.0e-12);
     if ccw_delta <= angle_tol || cw_delta <= angle_tol {
@@ -2020,35 +2043,36 @@ fn torus_profile_arc(
     let valid = candidates
         .into_iter()
         .filter(|&(arc_start, arc_end)| {
-            witness_points.iter().all(|point| {
-                meridian_angle(*point, center_mm, torus.minor_radius_mm)
-                    .is_some_and(|angle| angle_on_arc(angle, arc_start, arc_end, angle_tol))
-            })
+            let curve = MeridianCurve::Arc(MeridianArc {
+                source_edge_ids: Vec::new(),
+                center: center_mm,
+                radius: torus.minor_radius_mm,
+                start_angle: arc_start,
+                end_angle: arc_end,
+            });
+            curve.min_radius(GEOM_TOL_MM) >= -GEOM_TOL_MM
+                && witness_points.iter().all(|point| {
+                    meridian::angle(*point, center_mm, torus.minor_radius_mm, GEOM_TOL_MM)
+                        .is_some_and(|angle| {
+                            meridian::angle_on_arc(angle, arc_start, arc_end, angle_tol)
+                        })
+                })
         })
         .collect::<Vec<_>>();
-    let [(start_angle_rad, end_angle_rad)] = valid.as_slice() else {
+    let [(start_angle, end_angle)] = valid.as_slice() else {
         return None;
     };
-    if circle_arc_min_radius(
-        center_mm[0],
-        torus.minor_radius_mm,
-        *start_angle_rad,
-        *end_angle_rad,
-    ) < -GEOM_TOL_MM
-    {
-        return None;
-    }
 
     source_edge_ids.sort_unstable();
     source_edge_ids.dedup();
     Some((
-        RecoveredProfileCurve::CircleArc {
+        MeridianCurve::Arc(MeridianArc {
             source_edge_ids,
-            center_mm,
-            radius_mm: torus.minor_radius_mm,
-            start_angle_rad: *start_angle_rad,
-            end_angle_rad: *end_angle_rad,
-        },
+            center: center_mm,
+            radius: torus.minor_radius_mm,
+            start_angle: *start_angle,
+            end_angle: *end_angle,
+        }),
         max_residual_mm,
     ))
 }
@@ -2135,9 +2159,9 @@ fn circle_trim_midpoint(
     let start = parameter(edge.start_mm);
     let end = parameter(edge.end_mm);
     let delta = if edge.parameter_forward {
-        positive_angle_delta(start, end)
+        meridian::positive_angle_delta(start, end)
     } else {
-        -positive_angle_delta(end, start)
+        -meridian::positive_angle_delta(end, start)
     };
     let angle_tol = (GEOM_TOL_MM / circle.radius_mm.max(GEOM_TOL_MM)).max(1.0e-12);
     if delta.abs() <= angle_tol || (std::f64::consts::TAU - delta.abs()) <= angle_tol {
@@ -2151,45 +2175,6 @@ fn circle_trim_midpoint(
             mul(y_direction, circle.radius_mm * midpoint.sin()),
         ),
     ))
-}
-
-fn meridian_angle(point: [f64; 2], center: [f64; 2], radius: f64) -> Option<f64> {
-    if !point[0].is_finite()
-        || !point[1].is_finite()
-        || !radius.is_finite()
-        || radius <= GEOM_TOL_MM
-        || (distance2(point, center) - radius).abs() > GEOM_TOL_MM
-    {
-        return None;
-    }
-    Some((point[1] - center[1]).atan2(point[0] - center[0]))
-}
-
-fn positive_angle_delta(start: f64, end: f64) -> f64 {
-    (end - start).rem_euclid(std::f64::consts::TAU)
-}
-
-fn angle_on_arc(angle: f64, start: f64, end: f64, tolerance: f64) -> bool {
-    if end >= start {
-        positive_angle_delta(start, angle) <= end - start + tolerance
-    } else {
-        positive_angle_delta(angle, start) <= start - end + tolerance
-    }
-}
-
-fn circle_arc_min_radius(center_radius: f64, radius: f64, start_angle: f64, end_angle: f64) -> f64 {
-    let mut minimum =
-        (center_radius + radius * start_angle.cos()).min(center_radius + radius * end_angle.cos());
-    let angle_tolerance = (GEOM_TOL_MM / radius.max(GEOM_TOL_MM)).max(1.0e-12);
-    if angle_on_arc(
-        std::f64::consts::PI,
-        start_angle,
-        end_angle,
-        angle_tolerance,
-    ) {
-        minimum = minimum.min(center_radius - radius);
-    }
-    minimum
 }
 
 fn push_unique_point(points: &mut Vec<[f64; 2]>, candidate: [f64; 2]) {

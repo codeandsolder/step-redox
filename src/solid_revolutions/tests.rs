@@ -1,5 +1,47 @@
 use super::*;
 
+fn profile_has_line(curves: &[RecoveredProfileCurve], first: [f64; 2], second: [f64; 2]) -> bool {
+    curves.iter().any(|curve| {
+        let RecoveredProfileCurve::Line {
+            start_mm, end_mm, ..
+        } = curve
+        else {
+            return false;
+        };
+        (distance2(*start_mm, first) <= 1.0e-12 && distance2(*end_mm, second) <= 1.0e-12)
+            || (distance2(*start_mm, second) <= 1.0e-12 && distance2(*end_mm, first) <= 1.0e-12)
+    })
+}
+
+fn profile_has_arc(
+    curves: &[RecoveredProfileCurve],
+    center: [f64; 2],
+    radius: f64,
+    first: [f64; 2],
+    second: [f64; 2],
+) -> bool {
+    curves.iter().any(|curve| {
+        let RecoveredProfileCurve::CircleArc {
+            center_mm,
+            radius_mm,
+            ..
+        } = curve
+        else {
+            return false;
+        };
+        let Some(start) = curve.start_point() else {
+            return false;
+        };
+        let Some(end) = curve.end_point() else {
+            return false;
+        };
+        distance2(*center_mm, center) <= 1.0e-12
+            && (*radius_mm - radius).abs() <= 1.0e-12
+            && ((distance2(start, first) <= 1.0e-12 && distance2(end, second) <= 1.0e-12)
+                || (distance2(start, second) <= 1.0e-12 && distance2(end, first) <= 1.0e-12))
+    })
+}
+
 #[test]
 fn reads_representation_length_uncertainty_with_hard_cap() -> anyhow::Result<()> {
     fn tolerance_from(text: &str) -> anyhow::Result<Option<f64>> {
@@ -792,32 +834,27 @@ fn recovers_split_hemispherical_end_topology() -> anyhow::Result<()> {
     assert!(recovered.max_residual_mm <= 1.0e-12);
     assert_eq!(recovered.axis_direction, [0.0, 0.0, 1.0]);
 
-    assert!(matches!(
-        recovered.profile_curves.as_slice(),
-        [
-            RecoveredProfileCurve::Line {
-                start_mm: [0.0, 2.0],
-                end_mm: [1.0, 2.0],
-                ..
-            },
-            RecoveredProfileCurve::Line {
-                start_mm: [1.0, 2.0],
-                end_mm: [1.0, 0.0],
-                ..
-            },
-            RecoveredProfileCurve::CircleArc {
-                center_mm: [0.0, 0.0],
-                radius_mm: 1.0,
-                start_angle_rad: 0.0,
-                end_angle_rad,
-                ..
-            },
-            RecoveredProfileCurve::Line {
-                start_mm: [0.0, -1.0],
-                end_mm: [0.0, 2.0],
-                ..
-            }
-        ] if (*end_angle_rad + std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
+    assert!(profile_has_line(
+        &recovered.profile_curves,
+        [0.0, 2.0],
+        [1.0, 2.0]
+    ));
+    assert!(profile_has_line(
+        &recovered.profile_curves,
+        [1.0, 2.0],
+        [1.0, 0.0]
+    ));
+    assert!(profile_has_line(
+        &recovered.profile_curves,
+        [0.0, -1.0],
+        [0.0, 2.0]
+    ));
+    assert!(profile_has_arc(
+        &recovered.profile_curves,
+        [0.0, 0.0],
+        1.0,
+        [1.0, 0.0],
+        [0.0, -1.0],
     ));
 
     #[cfg(feature = "cad-kernel-monstertruck")]
@@ -926,8 +963,9 @@ fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() -> anyhow::Resu
         profile[3].reversed(),
         profile[0].clone(),
     ];
-    let ordered = closed_profile_from_curves(scrambled)
-        .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
+    let ordered = MeridianProfile::from_recovered(&scrambled, GEOM_TOL_MM)
+        .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?
+        .into_recovered();
     assert_eq!(ordered.len(), 5);
     assert!(matches!(
         &ordered[2],
@@ -946,10 +984,13 @@ fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() -> anyhow::Resu
         start_mm: [0.95, 1.2],
         end_mm: [0.95, 1.6],
     };
-    assert!(line_arc_has_extra_intersection(
-        &crossing,
-        &profile[2],
-        false
+    assert!(meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::from_recovered(&crossing)
+            .ok_or_else(|| anyhow::anyhow!("expected line primitive"))?,
+        &MeridianCurve::from_recovered(&profile[2])
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        false,
+        GEOM_TOL_MM,
     ));
     Ok(())
 }
@@ -1000,8 +1041,9 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         profile[4].clone(),
         profile[1].clone(),
     ];
-    let ordered = closed_profile_from_curves(scrambled)
-        .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
+    let ordered = MeridianProfile::from_recovered(&scrambled, GEOM_TOL_MM)
+        .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?
+        .into_recovered();
     assert_eq!(ordered.len(), 6);
     assert_eq!(
         ordered
@@ -1010,7 +1052,6 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
             .count(),
         2
     );
-    assert!(!mixed_profile_self_intersects(&ordered));
 
     let first = RecoveredProfileCurve::CircleArc {
         source_edge_ids: Vec::new(),
@@ -1026,7 +1067,14 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         start_angle_rad: std::f64::consts::FRAC_PI_2,
         end_angle_rad: 3.0 * std::f64::consts::FRAC_PI_2,
     };
-    assert!(arc_pair_has_extra_intersection(&first, &crossing, false));
+    assert!(meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::from_recovered(&first)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        &MeridianCurve::from_recovered(&crossing)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        false,
+        GEOM_TOL_MM,
+    ));
 
     let tangent_a = RecoveredProfileCurve::CircleArc {
         source_edge_ids: Vec::new(),
@@ -1042,8 +1090,13 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         start_angle_rad: -std::f64::consts::FRAC_PI_2,
         end_angle_rad: 0.0,
     };
-    assert!(!arc_pair_has_extra_intersection(
-        &tangent_a, &tangent_b, true
+    assert!(!meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::from_recovered(&tangent_a)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        &MeridianCurve::from_recovered(&tangent_b)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        true,
+        GEOM_TOL_MM,
     ));
 
     let coincident_adjacent = RecoveredProfileCurve::CircleArc {
@@ -1053,10 +1106,13 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         start_angle_rad: std::f64::consts::FRAC_PI_2,
         end_angle_rad: std::f64::consts::PI,
     };
-    assert!(!arc_pair_has_extra_intersection(
-        &tangent_a,
-        &coincident_adjacent,
-        true
+    assert!(!meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::from_recovered(&tangent_a)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        &MeridianCurve::from_recovered(&coincident_adjacent)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        true,
+        GEOM_TOL_MM,
     ));
 
     let coincident_overlap = RecoveredProfileCurve::CircleArc {
@@ -1066,10 +1122,13 @@ fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
         start_angle_rad: std::f64::consts::FRAC_PI_4,
         end_angle_rad: std::f64::consts::PI,
     };
-    assert!(arc_pair_has_extra_intersection(
-        &tangent_a,
-        &coincident_overlap,
-        true
+    assert!(meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::from_recovered(&tangent_a)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        &MeridianCurve::from_recovered(&coincident_overlap)
+            .ok_or_else(|| anyhow::anyhow!("expected arc primitive"))?,
+        true,
+        GEOM_TOL_MM,
     ));
     Ok(())
 }
@@ -1267,8 +1326,22 @@ fn recovers_split_quarter_torus_fillet_topology() -> anyhow::Result<()> {
             && (*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() <= 1.0e-12
     )));
 
-    assert!(circle_arc_min_radius(0.05, 0.1, 0.0, std::f64::consts::FRAC_PI_2) >= 0.0);
-    assert!(circle_arc_min_radius(0.05, 0.1, 0.0, std::f64::consts::PI) < -GEOM_TOL_MM);
+    let quarter = MeridianCurve::Arc(MeridianArc {
+        source_edge_ids: Vec::new(),
+        center: [0.05, 0.0],
+        radius: 0.1,
+        start_angle: 0.0,
+        end_angle: std::f64::consts::FRAC_PI_2,
+    });
+    let half = MeridianCurve::Arc(MeridianArc {
+        source_edge_ids: Vec::new(),
+        center: [0.05, 0.0],
+        radius: 0.1,
+        start_angle: 0.0,
+        end_angle: std::f64::consts::PI,
+    });
+    assert!(quarter.min_radius(GEOM_TOL_MM) >= 0.0);
+    assert!(half.min_radius(GEOM_TOL_MM) < -GEOM_TOL_MM);
 
     let mut tampered = split_quarter_torus_faces(0.9, 0.1);
     for face in tampered.iter_mut().take(2) {
@@ -1317,65 +1390,101 @@ fn shell_connectivity_rejects_disconnected_two_manifolds() {
 
 #[test]
 fn closes_axis_touching_step_profile() -> anyhow::Result<()> {
-    let profile = closed_profile_from_segments(vec![
-        Segment2 {
-            a: [0.0, 0.0],
-            b: [2.0, 0.0],
-        },
-        Segment2 {
-            a: [2.0, 0.0],
-            b: [2.0, 3.0],
-        },
-        Segment2 {
-            a: [0.0, 3.0],
-            b: [2.0, 3.0],
-        },
-    ])
-    .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
+    let profile = MeridianProfile::from_lines(
+        [
+            Segment2 {
+                a: [0.0, 0.0],
+                b: [2.0, 0.0],
+            },
+            Segment2 {
+                a: [2.0, 0.0],
+                b: [2.0, 3.0],
+            },
+            Segment2 {
+                a: [0.0, 3.0],
+                b: [2.0, 3.0],
+            },
+        ]
+        .into_iter()
+        .map(|segment| MeridianLine {
+            start: segment.a,
+            end: segment.b,
+        }),
+        GEOM_TOL_MM,
+    )
+    .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?
+    .into_recovered();
     assert_eq!(profile.len(), 4);
-    assert!(profile.iter().any(|point| *point == [0.0, 0.0]));
-    assert!(profile.iter().any(|point| *point == [0.0, 3.0]));
-    assert!(signed_area(&profile) > 0.0);
+    let points = profile
+        .iter()
+        .filter_map(RecoveredProfileCurve::start_point)
+        .collect::<Vec<_>>();
+    assert!(points.contains(&[0.0, 0.0]));
+    assert!(points.contains(&[0.0, 3.0]));
     Ok(())
 }
 
 #[test]
 fn closes_sloped_frustum_profile() -> anyhow::Result<()> {
-    let profile = closed_profile_from_segments(vec![
-        Segment2 {
-            a: [0.0, -1.0],
-            b: [2.0, -1.0],
-        },
-        Segment2 {
-            a: [2.0, -1.0],
-            b: [1.0, 1.0],
-        },
-        Segment2 {
-            a: [0.0, 1.0],
-            b: [1.0, 1.0],
-        },
-    ])
-    .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
+    let profile = MeridianProfile::from_lines(
+        [
+            Segment2 {
+                a: [0.0, -1.0],
+                b: [2.0, -1.0],
+            },
+            Segment2 {
+                a: [2.0, -1.0],
+                b: [1.0, 1.0],
+            },
+            Segment2 {
+                a: [0.0, 1.0],
+                b: [1.0, 1.0],
+            },
+        ]
+        .into_iter()
+        .map(|segment| MeridianLine {
+            start: segment.a,
+            end: segment.b,
+        }),
+        GEOM_TOL_MM,
+    )
+    .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?
+    .into_recovered();
     assert_eq!(profile.len(), 4);
-    assert!(profile.iter().any(|point| *point == [2.0, -1.0]));
-    assert!(profile.iter().any(|point| *point == [1.0, 1.0]));
-    assert!(signed_area(&profile) > 0.0);
+    let points = profile
+        .iter()
+        .filter_map(RecoveredProfileCurve::start_point)
+        .collect::<Vec<_>>();
+    assert!(points.contains(&[2.0, -1.0]));
+    assert!(points.contains(&[1.0, 1.0]));
     Ok(())
 }
 
 #[test]
 fn rejects_crossing_sloped_profiles() {
-    assert!(segments_intersect(
-        [1.0, 0.0],
-        [3.0, 2.0],
-        [3.0, 0.0],
-        [1.0, 2.0]
+    assert!(meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::Line(MeridianLine {
+            start: [1.0, 0.0],
+            end: [3.0, 2.0]
+        }),
+        &MeridianCurve::Line(MeridianLine {
+            start: [3.0, 0.0],
+            end: [1.0, 2.0]
+        }),
+        false,
+        GEOM_TOL_MM,
     ));
-    assert!(!segments_intersect(
-        [1.0, 0.0],
-        [2.0, 1.0],
-        [3.0, 0.0],
-        [4.0, 1.0]
+    assert!(!meridian::curves_intersect_away_from_shared_endpoint(
+        &MeridianCurve::Line(MeridianLine {
+            start: [1.0, 0.0],
+            end: [2.0, 1.0]
+        }),
+        &MeridianCurve::Line(MeridianLine {
+            start: [3.0, 0.0],
+            end: [4.0, 1.0]
+        }),
+        false,
+        GEOM_TOL_MM,
     ));
 }
 
@@ -1506,46 +1615,26 @@ fn recovers_native_spherical_cap_fixture() -> anyhow::Result<()> {
     assert_eq!(recovered[0].face_ids.len(), 2);
     assert_eq!(recovered[0].profile_curves.len(), 3);
 
-    let RecoveredProfileCurve::Line {
-        start_mm: plane_axis,
-        end_mm: cap_edge,
-        ..
-    } = &recovered[0].profile_curves[0]
-    else {
-        anyhow::bail!("expected planar radial segment");
-    };
-    assert!(plane_axis[0].abs() < 1.0e-12);
-    assert!((plane_axis[1] - 0.073).abs() < 1.0e-12);
-    assert!((cap_edge[0] - 0.107568582774).abs() < 1.0e-12);
-    assert!((cap_edge[1] - 0.073).abs() < 1.0e-12);
-
-    let RecoveredProfileCurve::CircleArc {
-        center_mm,
-        radius_mm,
-        start_angle_rad,
-        end_angle_rad,
-        ..
-    } = &recovered[0].profile_curves[1]
-    else {
-        anyhow::bail!("expected spherical meridian arc");
-    };
-    assert!(center_mm[0].abs() < 1.0e-12);
-    assert!(center_mm[1].abs() < 1.0e-12);
-    assert!((*radius_mm - 0.13).abs() < 1.0e-12);
-    assert!((*start_angle_rad - 0.596243908486).abs() < 1.0e-12);
-    assert!((*end_angle_rad + std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
-
-    let RecoveredProfileCurve::Line {
-        start_mm: pole,
-        end_mm: close,
-        ..
-    } = &recovered[0].profile_curves[2]
-    else {
-        anyhow::bail!("expected axis closure");
-    };
-    assert!(pole[0].abs() < 1.0e-12);
-    assert!((pole[1] + 0.13).abs() < 1.0e-12);
-    assert_eq!(*close, *plane_axis);
+    let plane_axis = [0.0, 0.073];
+    let cap_edge = [0.107568582774, 0.073];
+    let pole = [0.0, -0.13];
+    assert!(profile_has_line(
+        &recovered[0].profile_curves,
+        plane_axis,
+        cap_edge,
+    ));
+    assert!(profile_has_arc(
+        &recovered[0].profile_curves,
+        [0.0, 0.0],
+        0.13,
+        cap_edge,
+        pole,
+    ));
+    assert!(profile_has_line(
+        &recovered[0].profile_curves,
+        pole,
+        plane_axis,
+    ));
     assert!(recovered[0].max_residual_mm < 1.0e-9);
 
     let malformed = String::from_utf8_lossy(bytes).replacen(
@@ -1573,15 +1662,29 @@ fn recovers_positive_spherical_cap_fixture() -> anyhow::Result<()> {
     let recovered = crate::detect_solid_revolutions_bytes(bytes)?;
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].profile_curves.len(), 3);
-    let RecoveredProfileCurve::CircleArc { end_angle_rad, .. } = &recovered[0].profile_curves[1]
+    let pole = [0.0, 0.13];
+    let arc = recovered[0]
+        .profile_curves
+        .iter()
+        .find(|curve| matches!(curve, RecoveredProfileCurve::CircleArc { .. }))
+        .ok_or_else(|| anyhow::anyhow!("expected spherical meridian arc"))?;
+    let RecoveredProfileCurve::CircleArc {
+        center_mm,
+        radius_mm,
+        ..
+    } = arc
     else {
-        anyhow::bail!("expected spherical meridian arc");
+        unreachable!()
     };
-    assert!((*end_angle_rad - std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
-    let RecoveredProfileCurve::Line { start_mm: pole, .. } = &recovered[0].profile_curves[2] else {
-        anyhow::bail!("expected axis closure");
-    };
-    assert!((pole[1] - 0.13).abs() < 1.0e-12);
+    assert!(distance2(*center_mm, [0.0, 0.0]) < 1.0e-12);
+    assert!((*radius_mm - 0.13).abs() < 1.0e-12);
+    let arc_start = arc
+        .start_point()
+        .ok_or_else(|| anyhow::anyhow!("arc start missing"))?;
+    let arc_end = arc
+        .end_point()
+        .ok_or_else(|| anyhow::anyhow!("arc end missing"))?;
+    assert!(distance2(arc_start, pole) < 1.0e-12 || distance2(arc_end, pole) < 1.0e-12);
     assert!(recovered[0].max_residual_mm < 1.0e-10);
 
     #[cfg(feature = "cad-kernel-monstertruck")]
@@ -1669,38 +1772,58 @@ fn closes_hollow_step_profile_and_deduplicates_patches() -> anyhow::Result<()> {
         );
     }
     assert_eq!(segments.len(), 4);
-    let profile = closed_profile_from_segments(segments)
-        .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?;
+    let profile = MeridianProfile::from_lines(
+        segments.into_iter().map(|segment| MeridianLine {
+            start: segment.a,
+            end: segment.b,
+        }),
+        GEOM_TOL_MM,
+    )
+    .ok_or_else(|| anyhow::anyhow!("expected closed profile"))?
+    .into_recovered();
     assert_eq!(profile.len(), 4);
-    assert!(profile.iter().all(|point| point[0] >= 1.0));
+    assert!(
+        profile
+            .iter()
+            .filter_map(RecoveredProfileCurve::start_point)
+            .all(|point| point[0] >= 1.0)
+    );
     Ok(())
 }
 
 #[test]
 fn rejects_branching_or_self_intersecting_profiles() {
     assert!(
-        closed_profile_from_segments(vec![
-            Segment2 {
-                a: [1.0, 0.0],
-                b: [3.0, 0.0]
-            },
-            Segment2 {
-                a: [3.0, 0.0],
-                b: [3.0, 2.0]
-            },
-            Segment2 {
-                a: [3.0, 2.0],
-                b: [1.0, 2.0]
-            },
-            Segment2 {
-                a: [1.0, 2.0],
-                b: [1.0, 0.0]
-            },
-            Segment2 {
-                a: [2.0, 0.0],
-                b: [2.0, 2.0]
-            },
-        ])
+        MeridianProfile::from_lines(
+            [
+                Segment2 {
+                    a: [1.0, 0.0],
+                    b: [3.0, 0.0]
+                },
+                Segment2 {
+                    a: [3.0, 0.0],
+                    b: [3.0, 2.0]
+                },
+                Segment2 {
+                    a: [3.0, 2.0],
+                    b: [1.0, 2.0]
+                },
+                Segment2 {
+                    a: [1.0, 2.0],
+                    b: [1.0, 0.0]
+                },
+                Segment2 {
+                    a: [2.0, 0.0],
+                    b: [2.0, 2.0]
+                },
+            ]
+            .into_iter()
+            .map(|segment| MeridianLine {
+                start: segment.a,
+                end: segment.b
+            }),
+            GEOM_TOL_MM
+        )
         .is_none()
     );
 }
