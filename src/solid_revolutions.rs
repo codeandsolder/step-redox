@@ -1,4 +1,5 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
+use crate::math3::{add, cross, dot, mul, norm, normalize as normalize3, sub};
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::step_entities::representation_items_and_context;
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
@@ -3138,36 +3139,7 @@ fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = norm(vector);
-    (length.is_finite() && length > DIR_TOL).then(|| mul(vector, 1.0 / length))
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f64; 3], scalar: f64) -> [f64; 3] {
-    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    normalize3(vector, DIR_TOL)
 }
 
 #[cfg(test)]

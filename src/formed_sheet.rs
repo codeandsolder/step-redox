@@ -1,6 +1,4 @@
-use crate::math3::{
-    add, cross, distance, dot, mul, norm, normalize_by_division as normalize3, sub,
-};
+use crate::math3::{add, cross, distance, dot, mul, norm, normalize as normalize3, sub};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;

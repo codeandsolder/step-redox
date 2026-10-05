@@ -1,4 +1,4 @@
-use crate::math3::{dot, normalize_by_division as normalize3};
+use crate::math3::{dot, normalize as normalize3};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
     visit_entity_refs,
