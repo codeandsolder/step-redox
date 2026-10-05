@@ -18,11 +18,10 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
         visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
     }
 
-    #[derive(Clone)]
     struct Merge {
         into: usize,
         from: usize,
-        items: Vec<Parameter>,
+        item_param_index: usize,
         ty: &'static str,
     }
 
@@ -40,11 +39,11 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
             continue;
         };
 
-        let (ty, key, items) = match record.name.as_str() {
+        let (ty, key, item_param_index) = match record.name.as_str() {
             "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" if params.len() == 3 => {
-                let Parameter::List(items) = &params[1] else {
+                if !matches!(&params[1], Parameter::List(_)) {
                     continue;
-                };
+                }
                 let key = format!(
                     "MDGPR|{}|{}",
                     standalone_param_key(&params[0]),
@@ -53,19 +52,19 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
                 (
                     "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
                     key,
-                    items.clone(),
+                    1,
                 )
             }
             "PRESENTATION_LAYER_ASSIGNMENT" if params.len() == 3 => {
-                let Parameter::List(items) = &params[2] else {
+                if !matches!(&params[2], Parameter::List(_)) {
                     continue;
-                };
+                }
                 let key = format!(
                     "PLA|{}|{}",
                     standalone_param_key(&params[0]),
                     standalone_param_key(&params[1])
                 );
-                ("PRESENTATION_LAYER_ASSIGNMENT", key, items.clone())
+                ("PRESENTATION_LAYER_ASSIGNMENT", key, 2)
             }
             _ => continue,
         };
@@ -74,7 +73,7 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
             merges.push(Merge {
                 into,
                 from: idx,
-                items,
+                item_param_index,
                 ty,
             });
         } else {
@@ -86,7 +85,16 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
     let mut remove = HashSet::new();
     let mut stats = ConsolidateStats::default();
     for merge in merges {
-        additions.entry(merge.into).or_default().extend(merge.items);
+        let EntityInstance::Simple { record, .. } = &mut entities[merge.from] else {
+            unreachable!();
+        };
+        let Parameter::List(params) = &mut record.parameter else {
+            unreachable!();
+        };
+        let Parameter::List(items) = &mut params[merge.item_param_index] else {
+            unreachable!();
+        };
+        additions.entry(merge.into).or_default().append(items);
         remove.insert(merge.from);
         stats.total += 1;
         *stats.by_type.entry(merge.ty.to_string()).or_insert(0) += 1;
@@ -137,25 +145,60 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
     // a surprisingly expensive way of spelling "most things survive".
     let mut alias: HashMap<u64, u64> = HashMap::new();
 
+    // Cache serialized keys and invalidate only internable parents whose direct
+    // STEP references acquire a new canonical alias. The old implementation
+    // reserialized every internable entity on every fixed-point round even
+    // though a key can change only when one of its referenced IDs changes.
+    let internable = entities.iter().map(is_internable).collect::<Vec<_>>();
+    let mut parents_by_ref = HashMap::<u64, Vec<usize>>::new();
+    for (index, entity) in entities.iter().enumerate() {
+        if !internable[index] {
+            continue;
+        }
+        visit_entity_refs(entity, &mut |child| {
+            parents_by_ref.entry(child).or_default().push(index);
+        });
+    }
+    for parents in parents_by_ref.values_mut() {
+        parents.sort_unstable();
+        parents.dedup();
+    }
+
+    let mut keys = entities
+        .iter()
+        .zip(&internable)
+        .map(|(entity, &enabled)| enabled.then(|| entity_key(entity, &alias)))
+        .collect::<Vec<_>>();
+    let mut dirty = Vec::<usize>::new();
+    let mut dirty_flags = vec![false; entities.len()];
+
     // Value DAGs in the EasyEDA/SolidWorks corpus settle in a handful of
     // rounds (units -> uncertainty/context, colour -> style chains, geometry
-    // primitives -> placements/surfaces). Updates are applied at the end of a
-    // round so keys within that round see a stable alias map.
+    // primitives -> placements/surfaces). Keep the defensive hard cap, but do
+    // expensive key construction only for nodes affected by the prior round.
     for _ in 0..16 {
-        let mut seen: HashMap<String, u64> = HashMap::new();
-        let mut pending: Vec<(u64, u64)> = Vec::new();
+        for index in dirty.drain(..) {
+            dirty_flags[index] = false;
+            let id = entity_id(&entities[index]);
+            if internable[index] && !alias.contains_key(&id) {
+                keys[index] = Some(entity_key(&entities[index], &alias));
+            }
+        }
 
-        for entity in entities.iter() {
-            if !is_internable(entity) {
+        let mut seen: HashMap<&str, u64> = HashMap::new();
+        let mut pending = Vec::<(u64, u64)>::new();
+        for (index, entity) in entities.iter().enumerate() {
+            if !internable[index] {
                 continue;
             }
             let id = entity_id(entity);
             if alias.contains_key(&id) {
                 continue;
             }
-
-            let key = entity_key(entity, &alias);
-            if let Some(&canonical) = seen.get(&key) {
+            let key = keys[index]
+                .as_deref()
+                .expect("internable entity must have a cached structural key");
+            if let Some(&canonical) = seen.get(key) {
                 let canonical = resolve_alias(&alias, canonical);
                 if canonical != id {
                     pending.push((id, canonical));
@@ -168,12 +211,36 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
         if pending.is_empty() {
             break;
         }
+
+        let mut changed_aliases = Vec::with_capacity(pending.len());
         for (id, canonical) in pending {
             alias.insert(id, canonical);
+            changed_aliases.push(id);
         }
-        compress_aliases(&mut alias);
+        changed_aliases.extend(compress_aliases(&mut alias));
+        changed_aliases.sort_unstable();
+        changed_aliases.dedup();
+
+        for id in changed_aliases {
+            for &parent_index in parents_by_ref.get(&id).into_iter().flatten() {
+                let parent_id = entity_id(&entities[parent_index]);
+                if internable[parent_index]
+                    && !alias.contains_key(&parent_id)
+                    && !dirty_flags[parent_index]
+                {
+                    dirty_flags[parent_index] = true;
+                    dirty.push(parent_index);
+                }
+            }
+        }
+
+        // If no surviving internable node references any newly aliased ID, all
+        // cached keys are still current and another grouping round is redundant.
+        if dirty.is_empty() {
+            break;
+        }
     }
-    compress_aliases(&mut alias);
+    let _ = compress_aliases(&mut alias);
 
     let mut stats = InternStats::default();
     let original = std::mem::take(entities);
@@ -192,14 +259,18 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
     stats
 }
 
-fn compress_aliases(alias: &mut HashMap<u64, u64>) {
-    let keys: Vec<u64> = alias.keys().copied().collect();
+fn compress_aliases(alias: &mut HashMap<u64, u64>) -> Vec<u64> {
+    let keys = alias.keys().copied().collect::<Vec<_>>();
+    let mut changed = Vec::new();
     for id in keys {
+        let old = alias[&id];
         let root = resolve_alias(alias, id);
-        if root != id {
+        if root != old {
             alias.insert(id, root);
+            changed.push(id);
         }
     }
+    changed
 }
 
 fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
