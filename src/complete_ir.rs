@@ -6,7 +6,7 @@ use crate::cad_recovery::{
 };
 use crate::solid_revolutions::SolidSurfaceSignature;
 use crate::{Options, OutputProfile, Stats};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -80,15 +80,7 @@ pub struct CompleteIr {
 /// Returns an error if STEP parsing fails, duplicate solid IDs make fallback ownership
 /// ambiguous, or a detector's proven result cannot be converted into valid CAD IR.
 pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
-    let (input_text, _) = crate::decode_input(input)?;
-    let exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure for IR")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by complete IR");
-    }
+    let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
 
     let mut signatures = Vec::new();
     let mut extrusions = Vec::new();

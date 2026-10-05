@@ -2,26 +2,19 @@ use super::{CleanOutput, Options, Stats, audit_exchange_compatibility, detect_ex
 use crate::normalization::{
     consolidate_presentation, dense_renumber, intern_section, minify_placeholder_names,
 };
-use crate::step_io::decode_input;
+use crate::step_io::ParsedExchange;
 use crate::{
     bezier_recovery, curve_replicas, face_coalesce, geometric_intern, instances, line_recovery,
     partition_recovery, planar_features, spherical_caps, surface_recovery, surface_replicas,
     write_exchange,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use ruststep::ast::Exchange;
 
 pub(super) fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
-    let (input_text, input_encoding) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let parsed = ParsedExchange::parse(input)?;
+    let input_encoding = parsed.input_encoding;
+    let mut exchange = parsed.exchange;
 
     let input_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
     let mut stats = Stats {

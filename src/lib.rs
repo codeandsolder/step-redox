@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use ruststep::ast::Exchange;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ mod step_graph;
 mod step_identity;
 mod step_io;
 use normalization::{dense_renumber, intern_section};
-use step_io::decode_input;
+use step_io::ParsedExchange;
 pub use step_io::write_exchange;
 mod surface_recovery;
 mod surface_replicas;
@@ -254,14 +254,7 @@ pub struct PeriodicChainEditOutput {
 /// Returns an error if the STEP exchange cannot be decoded/parsed, contains
 /// unsupported sections, or the requested solid cannot be packed.
 pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<CompactBrepStats> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     for section in &exchange.data {
         let index = step_graph::build_index(&section.entities);
@@ -318,15 +311,7 @@ pub fn peel_patterned_boundary_features_for_analysis_bytes(
         bail!("boundary feature decomposition requires max_passes > 0");
     }
 
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut report = BoundaryFeatureDecompositionReport::default();
     for pass_index in 0..max_passes {
@@ -393,14 +378,7 @@ pub fn peel_patterned_boundary_features_for_analysis_bytes(
 pub fn analyze_open_chain_patterns_bytes(
     input: &[u8],
 ) -> Result<planar_features::OpenChainDiagnostics> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut merged = planar_features::OpenChainDiagnostics::default();
     for section in &exchange.data {
@@ -435,15 +413,7 @@ pub fn materialize_boundary_feature_tools_for_analysis_bytes(
     planar_features::BoundaryFeatureDiagnostics,
     Vec<planar_features::BoundaryFeatureToolMaterialization>,
 )> {
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("boundary feature tool materialization currently requires exactly one DATA section");
     }
@@ -466,14 +436,7 @@ pub fn materialize_boundary_feature_tools_for_analysis_bytes(
 pub fn analyze_boundary_features_bytes(
     input: &[u8],
 ) -> Result<planar_features::BoundaryFeatureDiagnostics> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut merged = planar_features::BoundaryFeatureDiagnostics::default();
     for section in &exchange.data {
@@ -500,14 +463,7 @@ pub fn analyze_boundary_features_bytes(
 /// This reports parser blind spots (negative recesses, host orientation, topology
 /// rejection reasons) so constructive recovery can be extended deliberately.
 pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFeatureDiagnostics> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut merged = PlanarFeatureDiagnostics::default();
     for section in &exchange.data {
@@ -541,14 +497,7 @@ pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFea
 pub fn detect_formed_sheet_evidence_bytes(
     input: &[u8],
 ) -> Result<Vec<formed_sheet::FormedSheetEvidence>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -568,14 +517,7 @@ pub fn detect_formed_sheet_evidence_bytes(
 pub fn detect_solid_surface_signatures_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::SolidSurfaceSignature>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -595,14 +537,7 @@ pub fn detect_solid_surface_signatures_bytes(
 pub fn detect_solid_revolutions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::RecoveredSolidRevolution>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -622,14 +557,7 @@ pub fn detect_solid_revolutions_bytes(
 pub fn detect_radial_slot_revolutions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::RecoveredRadialSlotRevolution>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -649,14 +577,7 @@ pub fn detect_radial_slot_revolutions_bytes(
 pub fn detect_solid_extrusions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -677,14 +598,7 @@ pub fn detect_solid_extrusions_bytes(
 pub fn detect_periodic_chains_bytes(
     input: &[u8],
 ) -> Result<Vec<periodic_chains::PeriodicChainPattern>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -706,14 +620,7 @@ pub fn recover_periodic_chain_surface_decomposition_bytes(
     input: &[u8],
     chain_index: usize,
 ) -> Result<cad_recovery::CadFragment> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut current = 0usize;
     for section in &exchange.data {
@@ -824,15 +731,7 @@ fn resize_periodic_chain_bytes_one_side(
     anchor: CountAnchor,
 ) -> Result<PeriodicChainEditOutput> {
     debug_assert_ne!(anchor, CountAnchor::Center);
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("periodic-chain editing currently requires exactly one DATA section");
     }
@@ -1069,15 +968,7 @@ fn resize_count_parameter_bytes_one_side(
     anchor: CountAnchor,
 ) -> Result<CountEditOutput> {
     debug_assert_ne!(anchor, CountAnchor::Center);
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }
@@ -1279,8 +1170,7 @@ fn reverse_periodic_body(
 }
 
 fn detect_count_parameters_bytes(input: &[u8]) -> Result<Vec<parameters::RecoveredCountParameter>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }
@@ -1343,15 +1233,7 @@ pub fn expand_periodic_body_bytes(
     body_index: usize,
     new_sites: usize,
 ) -> Result<PeriodicBodyEditOutput> {
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut remaining = body_index;
     let mut resize = None;
@@ -1394,15 +1276,7 @@ pub fn resize_linear_pattern_bytes(
     new_count: usize,
     anchor: patterns::PatternAnchor,
 ) -> Result<PatternEditOutput> {
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut remaining = pattern_index;
     let mut resize = None;

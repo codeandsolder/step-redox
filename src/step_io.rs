@@ -1,17 +1,41 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use ruststep::ast::{EntityInstance, Exchange, Name, Parameter, Record};
 use std::fmt::Write as _;
+
+#[derive(Debug)]
+pub(crate) struct ParsedExchange {
+    pub exchange: Exchange,
+    pub input_encoding: &'static str,
+}
+
+impl ParsedExchange {
+    pub(crate) fn parse(input: &[u8]) -> Result<Self> {
+        let (input_text, input_encoding) = decode_input(input)?;
+        let exchange =
+            ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+        require_supported_sections(&exchange)?;
+        Ok(Self {
+            exchange,
+            input_encoding,
+        })
+    }
+}
+
+pub(crate) fn require_supported_sections(exchange: &Exchange) -> Result<()> {
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported");
+    }
+    Ok(())
+}
 
 ///
 /// # Errors
 /// Returns an error if the exchange structure contains data that cannot be serialized as supported STEP text.
 pub fn write_exchange(exchange: &Exchange) -> Result<String> {
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("optional STEP sections are not supported by writer");
-    }
+    require_supported_sections(exchange)?;
 
     let mut out = String::with_capacity(
         exchange
