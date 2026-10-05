@@ -1,6 +1,7 @@
 use crate::math3::{add, cross, dot, norm, scale};
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    visit_entity_refs,
 };
 use anyhow::{Result, anyhow, bail};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
@@ -2488,10 +2489,6 @@ impl<'a> GraphEditor<'a> {
         Ok(())
     }
 
-    fn refs_map(&self) -> HashMap<u64, Vec<u64>> {
-        entity_ref_map(self.entities)
-    }
-
     fn descendant_closure(&self, seeds: &HashSet<u64>) -> Result<HashSet<u64>> {
         let mut descendants = HashSet::with_capacity(seeds.len());
         let mut stack = seeds.iter().copied().collect::<Vec<_>>();
@@ -2513,7 +2510,9 @@ impl<'a> GraphEditor<'a> {
     /// automatically because any inbound reference from outside the deletion
     /// set blocks collection.
     fn prune_unreachable_descendants(&mut self, seeds: &HashSet<u64>) -> Result<usize> {
-        let refs = self.refs_map();
+        let references = ReferenceGraph::new(self.entities);
+        let refs = references.forward();
+        let inbound = references.inbound();
         let mut candidate = HashSet::<u64>::new();
         let mut stack = seeds.iter().copied().collect::<Vec<_>>();
         while let Some(id) = stack.pop() {
@@ -2524,13 +2523,6 @@ impl<'a> GraphEditor<'a> {
                 bail!("prune seed graph references missing entity #{id}");
             };
             stack.extend(children.iter().copied());
-        }
-
-        let mut inbound = HashMap::<u64, HashSet<u64>>::new();
-        for (&parent, children) in &refs {
-            for &child in children {
-                inbound.entry(child).or_default().insert(parent);
-            }
         }
 
         let mut delete = HashSet::<u64>::new();
@@ -3348,17 +3340,6 @@ const fn set_entity_id(entity: &mut EntityInstance, id: u64) {
     }
 }
 
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let mut refs = Vec::new();
-        visit_entity_refs(entity, &mut |child| refs.push(child));
-        out.insert(id, refs);
-    }
-    out
-}
-
 fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params),
@@ -3760,13 +3741,9 @@ pub(crate) fn prune_detached_vertex_points(entities: &mut Vec<EntityInstance>) -
     if entities.is_empty() {
         return 0;
     }
-    let refs = entity_ref_map(entities);
-    let mut inbound = HashMap::<u64, HashSet<u64>>::new();
-    for (&parent, children) in &refs {
-        for &child in children {
-            inbound.entry(child).or_default().insert(parent);
-        }
-    }
+    let references = ReferenceGraph::new(entities);
+    let refs = references.forward();
+    let inbound = references.inbound();
 
     let seeds = entities
         .iter()
