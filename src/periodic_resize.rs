@@ -2694,32 +2694,34 @@ impl<'a> GraphEditor<'a> {
         if origins.is_empty() {
             return Ok(());
         }
-        let refs = entity_ref_map(self.entities);
-        let mut inbound = HashMap::<u64, Vec<u64>>::new();
-        for (&parent, children) in &refs {
-            for &child in children {
-                inbound.entry(child).or_default().push(parent);
-            }
-        }
-        for &origin in origins {
-            for &parent in inbound.get(&origin).into_iter().flatten() {
-                if !cloned_ids.contains(&parent) {
-                    continue;
+
+        // Only cloned parents can make a relative replica origin unsafe.  The
+        // old implementation built forward + inbound maps for the entire STEP
+        // section here, even though it immediately discarded every parent
+        // outside `cloned_ids`.  Stay inside the closure we are about to clone.
+        for &parent in cloned_ids {
+            let parent_index = *old_index
+                .get(&parent)
+                .ok_or_else(|| anyhow!("missing cloned parent #{parent}"))?;
+            let mut referenced_origin = None;
+            visit_entity_refs(&self.entities[parent_index], &mut |child| {
+                if referenced_origin.is_none() && origins.contains(&child) {
+                    referenced_origin = Some(child);
                 }
-                let parent_index = *old_index.get(&parent).ok_or_else(|| {
-                    anyhow!("missing parent #{parent} of replica origin #{origin}")
-                })?;
-                let Some(parent_record) = simple_record(&self.entities[parent_index]) else {
-                    bail!(
-                        "replica transform origin #{origin} is shared with complex cloned parent #{parent}"
-                    );
-                };
-                if parent_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
-                    bail!(
-                        "replica transform origin #{origin} is also used by cloned {} #{parent}",
-                        parent_record.name
-                    );
-                }
+            });
+            let Some(origin) = referenced_origin else {
+                continue;
+            };
+            let Some(parent_record) = simple_record(&self.entities[parent_index]) else {
+                bail!(
+                    "replica transform origin #{origin} is shared with complex cloned parent #{parent}"
+                );
+            };
+            if parent_record.name != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                bail!(
+                    "replica transform origin #{origin} is also used by cloned {} #{parent}",
+                    parent_record.name
+                );
             }
         }
         Ok(())
@@ -2741,13 +2743,16 @@ impl<'a> GraphEditor<'a> {
             mapping.insert(old, new);
         }
 
-        let old_index = self.index.clone();
+        // No graph mutation happens until all clone payloads are materialized,
+        // so the live index is a valid immutable snapshot.  Avoid cloning the
+        // whole section-sized HashMap for every repeated unit.
         let relative_transform_origins =
-            self.relative_replica_transform_origins(&ids, &old_index)?;
+            self.relative_replica_transform_origins(&ids, &self.index)?;
 
         let mut clones = Vec::with_capacity(ids.len());
         for &old in &ids {
-            let idx = *old_index
+            let idx = *self
+                .index
                 .get(&old)
                 .ok_or_else(|| anyhow!("clone graph missing entity #{old}"))?;
             let mut entity = self.entities[idx].clone();
