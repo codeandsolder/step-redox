@@ -3,6 +3,7 @@ use crate::step_io::{format_real, write_step_string};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
 pub(super) struct ConsolidateStats {
@@ -164,10 +165,10 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
         parents.dedup();
     }
 
-    let mut keys = entities
+    let mut hashes = entities
         .iter()
         .zip(&internable)
-        .map(|(entity, &enabled)| enabled.then(|| entity_key(entity, &alias)))
+        .map(|(entity, &enabled)| enabled.then(|| entity_structural_hash(entity, &alias)))
         .collect::<Vec<_>>();
     let mut dirty = Vec::<usize>::new();
     let mut dirty_flags = vec![false; entities.len()];
@@ -181,11 +182,11 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
             dirty_flags[index] = false;
             let id = entity_id(&entities[index]);
             if internable[index] && !alias.contains_key(&id) {
-                keys[index] = Some(entity_key(&entities[index], &alias));
+                hashes[index] = Some(entity_structural_hash(&entities[index], &alias));
             }
         }
 
-        let mut seen: HashMap<&str, u64> = HashMap::new();
+        let mut seen = HashMap::<u64, HashCanonicals>::new();
         let mut pending = Vec::<(u64, u64)>::new();
         for (index, entity) in entities.iter().enumerate() {
             if !internable[index] {
@@ -195,16 +196,22 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
             if alias.contains_key(&id) {
                 continue;
             }
-            let key = keys[index]
-                .as_deref()
-                .expect("internable entity must have a cached structural key");
-            if let Some(&canonical) = seen.get(key) {
-                let canonical = resolve_alias(&alias, canonical);
-                if canonical != id {
-                    pending.push((id, canonical));
+            let hash = hashes[index].expect("internable entity must have a cached structural hash");
+            match seen.entry(hash) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(HashCanonicals::One(index));
                 }
-            } else {
-                seen.insert(key, id);
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if let Some(canonical_index) = entry.get().matching(entity, entities, &alias) {
+                        let canonical =
+                            resolve_alias(&alias, entity_id(&entities[canonical_index]));
+                        if canonical != id {
+                            pending.push((id, canonical));
+                        }
+                    } else {
+                        entry.get_mut().push(index);
+                    }
+                }
             }
         }
 
@@ -271,6 +278,182 @@ fn compress_aliases(alias: &mut HashMap<u64, u64>) -> Vec<u64> {
         }
     }
     changed
+}
+
+#[derive(Debug)]
+enum HashCanonicals {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl HashCanonicals {
+    fn matching(
+        &self,
+        entity: &EntityInstance,
+        entities: &[EntityInstance],
+        alias: &HashMap<u64, u64>,
+    ) -> Option<usize> {
+        let matches = |index: usize| entities_equivalent(entity, &entities[index], alias);
+        match self {
+            Self::One(index) => matches(*index).then_some(*index),
+            Self::Many(indices) => indices.iter().copied().find(|&index| matches(index)),
+        }
+    }
+
+    fn push(&mut self, index: usize) {
+        match self {
+            Self::One(first) => *self = Self::Many(vec![*first, index]),
+            Self::Many(indices) => indices.push(index),
+        }
+    }
+}
+
+fn entity_structural_hash(entity: &EntityInstance, alias: &HashMap<u64, u64>) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match entity {
+        EntityInstance::Simple { record, .. } => {
+            0u8.hash(&mut hasher);
+            hash_record(record, alias, &mut hasher);
+        }
+        EntityInstance::Complex { subsuper, .. } => {
+            1u8.hash(&mut hasher);
+            subsuper.0.len().hash(&mut hasher);
+            for record in &subsuper.0 {
+                hash_record(record, alias, &mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_record(record: &Record, alias: &HashMap<u64, u64>, hasher: &mut impl Hasher) {
+    record.name.hash(hasher);
+    hash_param(&record.parameter, alias, hasher);
+}
+
+fn hash_param(param: &Parameter, alias: &HashMap<u64, u64>, hasher: &mut impl Hasher) {
+    match param {
+        Parameter::Typed { keyword, parameter } => {
+            0u8.hash(hasher);
+            keyword.hash(hasher);
+            hash_param(parameter, alias, hasher);
+        }
+        Parameter::Integer(value) => {
+            1u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Parameter::Real(value) => {
+            2u8.hash(hasher);
+            value.to_bits().hash(hasher);
+        }
+        Parameter::String(value) => {
+            3u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Parameter::Enumeration(value) => {
+            4u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Parameter::List(items) => {
+            5u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_param(item, alias, hasher);
+            }
+        }
+        Parameter::Ref(Name::Entity(id)) => {
+            6u8.hash(hasher);
+            resolve_alias(alias, *id).hash(hasher);
+        }
+        Parameter::Ref(Name::Value(id)) => {
+            7u8.hash(hasher);
+            id.hash(hasher);
+        }
+        Parameter::Ref(Name::ConstantEntity(value)) => {
+            8u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Parameter::Ref(Name::ConstantValue(value)) => {
+            9u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Parameter::NotProvided => 10u8.hash(hasher),
+        Parameter::Omitted => 11u8.hash(hasher),
+    }
+}
+
+fn entities_equivalent(
+    left: &EntityInstance,
+    right: &EntityInstance,
+    alias: &HashMap<u64, u64>,
+) -> bool {
+    match (left, right) {
+        (
+            EntityInstance::Simple { record: left, .. },
+            EntityInstance::Simple { record: right, .. },
+        ) => records_equivalent(left, right, alias),
+        (
+            EntityInstance::Complex { subsuper: left, .. },
+            EntityInstance::Complex {
+                subsuper: right, ..
+            },
+        ) => {
+            left.0.len() == right.0.len()
+                && left
+                    .0
+                    .iter()
+                    .zip(&right.0)
+                    .all(|(left, right)| records_equivalent(left, right, alias))
+        }
+        _ => false,
+    }
+}
+
+fn records_equivalent(left: &Record, right: &Record, alias: &HashMap<u64, u64>) -> bool {
+    left.name == right.name && params_equivalent(&left.parameter, &right.parameter, alias)
+}
+
+fn params_equivalent(left: &Parameter, right: &Parameter, alias: &HashMap<u64, u64>) -> bool {
+    match (left, right) {
+        (
+            Parameter::Typed {
+                keyword: left_keyword,
+                parameter: left_parameter,
+            },
+            Parameter::Typed {
+                keyword: right_keyword,
+                parameter: right_parameter,
+            },
+        ) => {
+            left_keyword == right_keyword
+                && params_equivalent(left_parameter, right_parameter, alias)
+        }
+        (Parameter::Integer(left), Parameter::Integer(right)) => left == right,
+        (Parameter::Real(left), Parameter::Real(right)) => left.to_bits() == right.to_bits(),
+        (Parameter::String(left), Parameter::String(right))
+        | (Parameter::Enumeration(left), Parameter::Enumeration(right)) => left == right,
+        (Parameter::List(left), Parameter::List(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| params_equivalent(left, right, alias))
+        }
+        (Parameter::Ref(Name::Entity(left)), Parameter::Ref(Name::Entity(right))) => {
+            resolve_alias(alias, *left) == resolve_alias(alias, *right)
+        }
+        (Parameter::Ref(Name::Value(left)), Parameter::Ref(Name::Value(right))) => left == right,
+        (
+            Parameter::Ref(Name::ConstantEntity(left)),
+            Parameter::Ref(Name::ConstantEntity(right)),
+        )
+        | (Parameter::Ref(Name::ConstantValue(left)), Parameter::Ref(Name::ConstantValue(right))) => {
+            left == right
+        }
+        (Parameter::NotProvided, Parameter::NotProvided)
+        | (Parameter::Omitted, Parameter::Omitted) => true,
+        _ => false,
+    }
 }
 
 fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
@@ -420,26 +603,6 @@ fn internable_record(name: &str) -> bool {
             | "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT"
             | "GLOBAL_UNIT_ASSIGNED_CONTEXT"
     )
-}
-
-fn entity_key(entity: &EntityInstance, alias: &HashMap<u64, u64>) -> String {
-    let mut out = String::new();
-    match entity {
-        EntityInstance::Simple { record, .. } => write_record_key(record, alias, &mut out),
-        EntityInstance::Complex { subsuper, .. } => {
-            out.push('(');
-            for record in &subsuper.0 {
-                write_record_key(record, alias, &mut out);
-            }
-            out.push(')');
-        }
-    }
-    out
-}
-
-fn write_record_key(record: &Record, alias: &HashMap<u64, u64>, out: &mut String) {
-    out.push_str(&record.name);
-    write_param_key(&record.parameter, alias, out);
 }
 
 fn write_param_key(param: &Parameter, alias: &HashMap<u64, u64>, out: &mut String) {
