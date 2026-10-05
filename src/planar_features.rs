@@ -5,6 +5,7 @@ use crate::brep::{
 use crate::instances::{
     StyleRef, collect_styles_by_target, face_topology_signature, oriented_edge_signature,
 };
+use crate::math3::{add, distance, sub};
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
 };
@@ -44,14 +45,14 @@ struct ShellContext {
     shell_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum StyleKey {
     Face(Vec<u64>),
     Container,
     None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Feature {
     faces: Vec<u64>,
     interface_bound: u64,
@@ -72,7 +73,7 @@ struct PlaneFrame {
     outward: [f64; 3],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeaturePolarity {
     Additive,
@@ -468,7 +469,7 @@ fn translated_blocks_match_cyclic(
         return false;
     }
     let right_start = (start + period) % n;
-    let translation = sub3d(edges[right_start].start_mm, edges[start].start_mm);
+    let translation = sub(edges[right_start].start_mm, edges[start].start_mm);
     if translation.iter().all(|value| value.abs() <= tolerance_mm) {
         return false;
     }
@@ -477,12 +478,11 @@ fn translated_blocks_match_cyclic(
         let left = (start + offset) % n;
         let right = (start + period + offset) % n;
         if signatures[left] != signatures[right]
-            || point_distance(
-                add3d(edges[left].start_mm, translation),
+            || distance(
+                add(edges[left].start_mm, translation),
                 edges[right].start_mm,
             ) > tolerance_mm
-            || point_distance(add3d(edges[left].end_mm, translation), edges[right].end_mm)
-                > tolerance_mm
+            || distance(add(edges[left].end_mm, translation), edges[right].end_mm) > tolerance_mm
         {
             return false;
         }
@@ -500,7 +500,7 @@ fn translated_blocks_match(
     if start + 2 * period > edges.len() {
         return false;
     }
-    let translation = sub3d(edges[start + period].start_mm, edges[start].start_mm);
+    let translation = sub(edges[start + period].start_mm, edges[start].start_mm);
     if translation.iter().all(|value| value.abs() <= tolerance_mm) {
         return false;
     }
@@ -509,12 +509,11 @@ fn translated_blocks_match(
         let left = start + offset;
         let right = left + period;
         if signatures[left] != signatures[right]
-            || point_distance(
-                add3d(edges[left].start_mm, translation),
+            || distance(
+                add(edges[left].start_mm, translation),
                 edges[right].start_mm,
             ) > tolerance_mm
-            || point_distance(add3d(edges[left].end_mm, translation), edges[right].end_mm)
-                > tolerance_mm
+            || distance(add(edges[left].end_mm, translation), edges[right].end_mm) > tolerance_mm
         {
             return false;
         }
@@ -531,7 +530,7 @@ fn open_chain_run(
     wraps_loop: bool,
 ) -> OpenChainRunEvidence {
     let n = loop_data.edges.len();
-    let translation = sub3d(
+    let translation = sub(
         loop_data.edges[(start + period) % n].start_mm,
         loop_data.edges[start].start_mm,
     );
@@ -549,19 +548,6 @@ fn open_chain_run(
             .map(|offset| loop_data.edges[(start + offset) % n].oriented_edge_id)
             .collect(),
     }
-}
-
-fn add3d(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
-}
-
-fn sub3d(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn point_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
-    let delta = sub3d(left, right);
-    (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt()
 }
 
 /// Materialize one closed canonical tool solid per recovered boundary-feature
@@ -588,7 +574,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
         .into_iter()
         .map(|context| (context.shell_id, context.representation_id))
         .collect::<HashMap<_, _>>();
-    let report = diagnose_boundary_features(entities);
+    let report = diagnose_boundary_features_with_index(entities, &initial_index);
     let mut next_id = entities
         .iter()
         .map(entity_id)
@@ -605,7 +591,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
             continue;
         };
 
-        let index = build_index(entities);
+        let index = &initial_index;
         let mut bound_owner = HashMap::<u64, u64>::new();
         for &host in &family.host_face_ids {
             let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
@@ -725,8 +711,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
                 family.shell_id
             );
         };
-        let current_index = build_index(entities);
-        let Some(&representation_index) = current_index.get(&representation_id) else {
+        let Some(&representation_index) = initial_index.get(&representation_id) else {
             bail!("feature representation #{representation_id} is missing");
         };
         if !append_refs_to_list_param(&mut entities[representation_index], 1, &[tool_solid]) {
@@ -761,7 +746,8 @@ pub(crate) fn peel_patterned_boundary_features_for_analysis(
     if min_instances < 2 {
         bail!("patterned feature peel requires min_instances >= 2");
     }
-    let report = diagnose_boundary_features(entities);
+    let index = build_index(entities);
+    let report = diagnose_boundary_features_with_index(entities, &index);
     let selected = report
         .families
         .iter()
@@ -771,7 +757,6 @@ pub(crate) fn peel_patterned_boundary_features_for_analysis(
         return Ok((report, BoundaryFeaturePeelStats::default()));
     }
 
-    let index = build_index(entities);
     let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
     let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
     let mut bound_owner = HashMap::<u64, u64>::new();
@@ -845,18 +830,25 @@ pub(crate) fn peel_patterned_boundary_features_for_analysis(
 }
 
 pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatureDiagnostics {
+    let index = build_index(entities);
+    diagnose_boundary_features_with_index(entities, &index)
+}
+
+fn diagnose_boundary_features_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> BoundaryFeatureDiagnostics {
     let mut report = BoundaryFeatureDiagnostics::default();
     if entities.is_empty() {
         return report;
     }
 
-    let index = build_index(entities);
-    let contexts = collect_shell_contexts(entities, &index);
+    let contexts = collect_shell_contexts(entities, index);
     report.shell_contexts = contexts.len();
     let mut candidates = Vec::<BoundaryFeatureCandidate>::new();
 
     for context in contexts {
-        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, &index) else {
+        let Some(shell_faces) = ref_list_param(context.shell_id, 1, entities, index) else {
             continue;
         };
         if shell_faces.len() < 3 {
@@ -866,7 +858,7 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
         let mut face_edges = HashMap::<u64, HashSet<u64>>::new();
         let mut edge_faces = HashMap::<u64, Vec<u64>>::new();
         for &face in &shell_faces {
-            let Some(edges) = face_edge_curves(face, entities, &index) else {
+            let Some(edges) = face_edge_curves(face, entities, index) else {
                 continue;
             };
             for &edge in &edges {
@@ -897,8 +889,8 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
             .iter()
             .copied()
             .filter_map(|face| {
-                let frame = plane_frame(face, entities, &index)?;
-                let bounds = ref_list_param(face, 1, entities, &index)?;
+                let frame = plane_frame(face, entities, index)?;
+                let bounds = ref_list_param(face, 1, entities, index)?;
                 let boundary_edges = face_edges.get(&face).map_or(0, HashSet::len);
                 (bounds.len() > MIN_GROUP || boundary_edges >= MIN_COMPLEX_HOST_EDGES)
                     .then_some((face, frame, bounds))
@@ -911,14 +903,14 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
         // operator (union vs difference) changes.
         for (host_face, frame, bounds) in &hosts {
             let host_set = HashSet::from([*host_face]);
-            let lookups =
-                HashMap::from([(*host_face, host_bound_lookup(bounds, entities, &index))]);
+            let frames = HashMap::from([(*host_face, frame.clone())]);
+            let lookups = HashMap::from([(*host_face, host_bound_lookup(bounds, entities, index))]);
             for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
                 let Some(candidate) = boundary_feature_candidate(
                     context.shell_id,
                     component,
                     &host_set,
-                    &HashMap::from([(*host_face, frame.clone())]),
+                    &frames,
                     &lookups,
                     &face_edges,
                     &edge_faces,
@@ -948,7 +940,7 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
                 .collect::<HashMap<_, _>>();
             let lookups = hosts
                 .iter()
-                .map(|(face, _, bounds)| (*face, host_bound_lookup(bounds, entities, &index)))
+                .map(|(face, _, bounds)| (*face, host_bound_lookup(bounds, entities, index)))
                 .collect::<HashMap<_, _>>();
 
             for component in face_components_without_hosts(&shell_faces, &host_set, &adjacency) {
@@ -980,9 +972,11 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
             .then_with(|| b.host_face_ids.len().cmp(&a.host_face_ids.len()))
     });
     let mut deduped = Vec::<BoundaryFeatureCandidate>::new();
-    let mut seen_faces = HashSet::<Vec<u64>>::new();
     for candidate in candidates {
-        if seen_faces.insert(candidate.face_ids.clone()) {
+        if deduped
+            .last()
+            .is_none_or(|previous| previous.face_ids != candidate.face_ids)
+        {
             deduped.push(candidate);
         }
     }
@@ -1005,51 +999,61 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
         .filter(|candidate| candidate.host_face_ids.len() > 1)
         .count();
 
-    let mut groups =
-        HashMap::<(u64, FeaturePolarity, Vec<u64>, String), Vec<BoundaryFeatureCandidate>>::new();
+    deduped.sort_by(|a, b| {
+        a.shell_id
+            .cmp(&b.shell_id)
+            .then_with(|| a.polarity.cmp(&b.polarity))
+            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+            .then_with(|| a.signature.cmp(&b.signature))
+            .then_with(|| a.face_ids.cmp(&b.face_ids))
+    });
+    let mut grouped = Vec::<Vec<BoundaryFeatureCandidate>>::new();
     for candidate in deduped {
-        groups
-            .entry((
-                candidate.shell_id,
-                candidate.polarity,
-                candidate.host_face_ids.clone(),
-                candidate.signature.clone(),
-            ))
-            .or_default()
-            .push(candidate);
+        if let Some(group) = grouped.last_mut()
+            && group[0].shell_id == candidate.shell_id
+            && group[0].polarity == candidate.polarity
+            && group[0].host_face_ids == candidate.host_face_ids
+            && group[0].signature == candidate.signature
+        {
+            group.push(candidate);
+        } else {
+            grouped.push(vec![candidate]);
+        }
     }
 
-    let mut families = groups
+    let mut families = grouped
         .into_iter()
-        .map(
-            |((shell_id, polarity, host_face_ids, signature), mut members)| {
-                members.sort_by_key(|member| member.face_ids.clone());
-                let centers = members
-                    .iter()
-                    .map(|member| member.center)
-                    .collect::<Vec<_>>();
-                let lattice = fit_point_lattice(&centers, 1.0e-7);
-                let motif_pattern = factor_point_motif_pattern(&centers, 1.0e-7);
-                BoundaryFeatureFamilyEvidence {
-                    shell_id,
-                    polarity,
-                    host_face_ids,
-                    faces_per_instance: members[0].face_ids.len(),
-                    instances: members.len(),
-                    signature,
-                    members: members
-                        .into_iter()
-                        .map(|member| BoundaryFeatureInstanceEvidence {
-                            face_ids: member.face_ids,
-                            center_mm: member.center,
-                            interface_bound_ids: member.interface_bound_ids,
-                        })
-                        .collect(),
-                    lattice,
-                    motif_pattern,
-                }
-            },
-        )
+        .map(|mut members| {
+            let shell_id = members[0].shell_id;
+            let polarity = members[0].polarity;
+            let faces_per_instance = members[0].face_ids.len();
+            let host_face_ids = std::mem::take(&mut members[0].host_face_ids);
+            let signature = std::mem::take(&mut members[0].signature);
+            let centers = members
+                .iter()
+                .map(|member| member.center)
+                .collect::<Vec<_>>();
+            let lattice = fit_point_lattice(&centers, 1.0e-7);
+            let motif_pattern = factor_point_motif_pattern(&centers, 1.0e-7);
+            BoundaryFeatureFamilyEvidence {
+                shell_id,
+                polarity,
+                host_face_ids,
+                faces_per_instance,
+                instances: members.len(),
+                signature,
+                members: members
+                    .into_iter()
+                    .map(|member| BoundaryFeatureInstanceEvidence {
+                        face_ids: member.face_ids,
+                        center_mm: member.center,
+                        interface_bound_ids: member.interface_bound_ids,
+                    })
+                    .collect(),
+                lattice,
+                motif_pattern,
+            }
+        })
         .collect::<Vec<_>>();
     families.sort_by(|a, b| {
         b.instances
@@ -1508,20 +1512,28 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                 continue;
             }
 
-            let mut groups = HashMap::<(String, String, StyleKey), Vec<Feature>>::new();
+            features.sort_by(|a, b| {
+                a.signature
+                    .cmp(&b.signature)
+                    .then_with(|| a.bound_orientation.cmp(&b.bound_orientation))
+                    .then_with(|| a.style_key.cmp(&b.style_key))
+                    .then_with(|| a.faces.cmp(&b.faces))
+            });
+            let mut grouped = Vec::<Vec<Feature>>::new();
             for feature in features {
-                groups
-                    .entry((
-                        feature.signature.clone(),
-                        feature.bound_orientation.clone(),
-                        feature.style_key.clone(),
-                    ))
-                    .or_default()
-                    .push(feature);
+                if let Some(group) = grouped.last_mut()
+                    && group[0].signature == feature.signature
+                    && group[0].bound_orientation == feature.bound_orientation
+                    && group[0].style_key == feature.style_key
+                {
+                    group.push(feature);
+                } else {
+                    grouped.push(vec![feature]);
+                }
             }
 
-            let mut accepted: Vec<Vec<Feature>> = groups
-                .into_values()
+            let mut accepted: Vec<Vec<Feature>> = grouped
+                .into_iter()
                 .filter(|group| group.len() >= MIN_GROUP)
                 .collect();
             if accepted.is_empty() {
@@ -1564,9 +1576,8 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
             let mut host_remove_bounds = HashSet::new();
             let mut host_family_count = 0usize;
 
-            for group in &mut accepted {
-                group.sort_by_key(|feature| feature.faces.clone());
-                let canonical = group[0].clone();
+            for group in &accepted {
+                let canonical = &group[0];
 
                 let disk_bound = push_simple(
                     entities,
@@ -1729,7 +1740,7 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
                         delete_seed.insert(style);
                     }
                     patch_presentation_lists(entities, &old_style_ids, &new_style_ids);
-                } else if matches!(canonical.style_key, StyleKey::Container)
+                } else if matches!(&canonical.style_key, StyleKey::Container)
                     && !new_style_ids.is_empty()
                 {
                     let anchors: HashSet<u64> =
