@@ -116,75 +116,20 @@ impl<'a> GraphEditor<'a> {
         Ok(())
     }
 
-    pub(super) fn descendant_closure(&self, seeds: &HashSet<u64>) -> Result<HashSet<u64>> {
-        let mut descendants = HashSet::with_capacity(seeds.len());
-        let mut stack = seeds.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = stack.pop() {
-            if !descendants.insert(id) {
-                continue;
-            }
-            let idx = *self
-                .index
-                .get(&id)
-                .ok_or_else(|| anyhow!("descendant graph references missing entity #{id}"))?;
-            visit_entity_refs(&self.entities[idx], &mut |child| stack.push(child));
-        }
-        Ok(descendants)
+    pub(super) fn descendant_closure(&self, seeds: &HashSet<u64>) -> HashSet<u64> {
+        ReferenceGraph::new(self.entities).descendant_closure(&self.index, seeds)
     }
 
-    /// Remove only descendants of explicitly replaced graph roots that have
-    /// become unreachable after rewiring. Shared supports are preserved
-    /// automatically because any inbound reference from outside the deletion
-    /// set blocks collection.
-    pub(super) fn prune_unreachable_descendants(&mut self, seeds: &HashSet<u64>) -> Result<usize> {
-        let references = ReferenceGraph::new(self.entities);
-        let refs = references.forward();
-        let inbound = references.inbound();
-        let mut candidate = HashSet::<u64>::new();
-        let mut stack = seeds.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = stack.pop() {
-            if !candidate.insert(id) {
-                continue;
-            }
-            let Some(children) = refs.get(&id) else {
-                bail!("prune seed graph references missing entity #{id}");
-            };
-            stack.extend(children.iter().copied());
-        }
-
-        let mut delete = HashSet::<u64>::new();
-        loop {
-            let mut changed = false;
-            for &id in &candidate {
-                if delete.contains(&id) {
-                    continue;
-                }
-                let all_dead = inbound
-                    .get(&id)
-                    .is_none_or(|parents| parents.iter().all(|parent| delete.contains(parent)));
-                if !all_dead {
-                    continue;
-                }
-
-                let seed = seeds.contains(&id);
-                let child_of_dead = inbound.get(&id).is_some_and(|parents| {
-                    !parents.is_empty() && parents.iter().all(|parent| delete.contains(parent))
-                });
-                if seed || child_of_dead {
-                    delete.insert(id);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
+    /// Remove descendants of replaced graph roots only when no surviving parent
+    /// still references them. Shared supports therefore remain intact.
+    pub(super) fn prune_unreachable_descendants(&mut self, seeds: &HashSet<u64>) -> usize {
+        let delete =
+            ReferenceGraph::new(self.entities).prunable_descendant_closure(&self.index, seeds);
         let removed = delete.len();
         self.entities
             .retain(|entity| !delete.contains(&entity_id(entity)));
         self.index = build_index(self.entities);
-        Ok(removed)
+        removed
     }
 
     pub(super) fn presentation_members_mut(&mut self, parent: u64) -> Result<&mut Vec<Parameter>> {
@@ -396,7 +341,7 @@ impl<'a> GraphEditor<'a> {
         delta: [f64; 3],
     ) -> Result<HashMap<u64, u64>> {
         let mut ids = self
-            .descendant_closure(seeds)?
+            .descendant_closure(seeds)
             .into_iter()
             .collect::<Vec<_>>();
         ids.sort_unstable();

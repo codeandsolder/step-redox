@@ -751,7 +751,7 @@ impl<'a> ChainResizeContext<'a> {
         let styles_by_target = collect_styles_by_target(entities);
         let preflight_index = build_index(entities);
         let touched_descendants =
-            entity_descendant_closure(entities, &preflight_index, touched_roots)?;
+            ReferenceGraph::new(entities).descendant_closure(&preflight_index, touched_roots);
         require_face_only_direct_styles(
             entities,
             &preflight_index,
@@ -1483,7 +1483,7 @@ pub fn expand_periodic_chain_positive(
 
     removed_style_items +=
         graph.remove_face_styles(&styles_by_target, &style_parents, &tail_faces)?;
-    let pruned_entities = graph.prune_unreachable_descendants(&prune_roots)?;
+    let pruned_entities = graph.prune_unreachable_descendants(&prune_roots);
     let added_entities = graph.added_entities();
     let entity_delta = graph.entity_delta();
     Ok(PeriodicChainResizeStats {
@@ -1679,7 +1679,7 @@ pub fn shrink_periodic_chain_positive(
         .collect::<HashSet<_>>();
     removed_style_items +=
         graph.remove_face_styles(&styles_by_target, &style_parents, &removed_face_roots)?;
-    let pruned_entities = graph.prune_unreachable_descendants(&prune_roots)?;
+    let pruned_entities = graph.prune_unreachable_descendants(&prune_roots);
     let added_entities = graph.added_entities();
     let entity_delta = graph.entity_delta();
     Ok(PeriodicChainResizeStats {
@@ -2249,25 +2249,6 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
 
 #[cfg(test)]
 mod tests;
-
-fn entity_descendant_closure(
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-    seeds: &HashSet<u64>,
-) -> Result<HashSet<u64>> {
-    let mut descendants = HashSet::with_capacity(seeds.len());
-    let mut stack = seeds.iter().copied().collect::<Vec<_>>();
-    while let Some(id) = stack.pop() {
-        if !descendants.insert(id) {
-            continue;
-        }
-        let idx = *index
-            .get(&id)
-            .ok_or_else(|| anyhow!("descendant graph references missing entity #{id}"))?;
-        visit_entity_refs(&entities[idx], &mut |child| stack.push(child));
-    }
-    Ok(descendants)
-}
 
 /// Remove detached topological vertex roots left after later support/value
 /// interning. A bare `VERTEX_POINT` with no inbound STEP reference cannot

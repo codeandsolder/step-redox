@@ -1,9 +1,7 @@
-use crate::{instances, step_entities, step_graph, units};
+use crate::{instances, step_entities, step_graph, step_io::ParsedExchange, units};
 use anyhow::{Context, Result, bail};
-use encoding_rs::GBK;
 use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter, Record};
 use serde::Serialize;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hasher;
@@ -110,21 +108,9 @@ fn fingerprint(value: &instances::ShapeKey) -> String {
     format!("{:016x}{:016x}", hashers[0].finish(), hashers[1].finish())
 }
 
-fn decode_input(input: &[u8]) -> Result<Cow<'_, str>> {
-    if let Ok(text) = std::str::from_utf8(input) {
-        return Ok(Cow::Borrowed(text));
-    }
-    let (decoded, _, had_errors) = GBK.decode(input);
-    if had_errors {
-        bail!("STEP input is neither valid UTF-8 nor valid GBK");
-    }
-    Ok(decoded)
-}
-
 fn parse_exchange(path: &Path) -> Result<ruststep::ast::Exchange> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let text = decode_input(&bytes)?;
-    ruststep::parser::parse(&text).context("parse STEP exchange")
+    Ok(ParsedExchange::parse(&bytes)?.exchange)
 }
 
 fn representation_ownership(entities: &[EntityInstance]) -> HashMap<u64, (u64, u64)> {
@@ -476,12 +462,6 @@ fn extract_one(
 
 fn extract(path: &Path, out_dir: &Path, selections: &[String]) -> Result<()> {
     let exchange = parse_exchange(path)?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not supported by body extraction");
-    }
     fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let mut parsed = Vec::with_capacity(selections.len());

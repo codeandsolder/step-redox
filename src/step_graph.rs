@@ -108,41 +108,50 @@ impl ReferenceGraph {
         &self.inbound
     }
 
-    pub(super) fn detached_descendant_closure(
+    pub(super) fn descendant_closure(
         &self,
         present: &HashMap<u64, usize>,
         roots: &HashSet<u64>,
-        mut delete: HashSet<u64>,
     ) -> HashSet<u64> {
-        let mut candidates = HashSet::new();
+        let mut descendants = HashSet::with_capacity(roots.len());
         let mut stack = roots.iter().copied().collect::<Vec<_>>();
         while let Some(id) = stack.pop() {
-            if !candidates.insert(id) {
+            if !present.contains_key(&id) || !descendants.insert(id) {
                 continue;
             }
-            if let Some(children) = self.forward.get(&id) {
-                stack.extend(
-                    children
-                        .iter()
-                        .copied()
-                        .filter(|child| present.contains_key(child) && !candidates.contains(child)),
-                );
-            }
+            stack.extend(
+                self.refs(id)
+                    .iter()
+                    .copied()
+                    .filter(|child| present.contains_key(child) && !descendants.contains(child)),
+            );
         }
+        descendants
+    }
 
+    fn propagate_detached(
+        &self,
+        candidates: &HashSet<u64>,
+        root_candidates: Option<&HashSet<u64>>,
+        mut delete: HashSet<u64>,
+    ) -> HashSet<u64> {
         loop {
             let mut changed = false;
-            for &id in &candidates {
+            for &id in candidates {
                 if delete.contains(&id) {
                     continue;
                 }
                 let parents = self.inbound.get(&id);
                 let all_dead = parents
                     .is_none_or(|parents| parents.iter().all(|parent| delete.contains(parent)));
+                if !all_dead {
+                    continue;
+                }
                 let child_of_dead = parents.is_some_and(|parents| {
                     !parents.is_empty() && parents.iter().all(|parent| delete.contains(parent))
                 });
-                if all_dead && (child_of_dead || !self.inbound.contains_key(&id)) {
+                let detached_root = root_candidates.is_some_and(|roots| roots.contains(&id));
+                if detached_root || child_of_dead || parents.is_none() {
                     delete.insert(id);
                     changed = true;
                 }
@@ -156,5 +165,28 @@ impl ReferenceGraph {
             delete.contains(id) || children.iter().all(|child| !delete.contains(child))
         }));
         delete
+    }
+
+    /// Collect descendants after callers have already decided that `delete` roots
+    /// are being removed. Shared descendants survive while any live parent remains.
+    pub(super) fn detached_descendant_closure(
+        &self,
+        present: &HashMap<u64, usize>,
+        roots: &HashSet<u64>,
+        delete: HashSet<u64>,
+    ) -> HashSet<u64> {
+        let candidates = self.descendant_closure(present, roots);
+        self.propagate_detached(&candidates, None, delete)
+    }
+
+    /// Collect roots and descendants only when they are genuinely detached from
+    /// the surviving graph. This is the safe variant for speculative cleanup.
+    pub(super) fn prunable_descendant_closure(
+        &self,
+        present: &HashMap<u64, usize>,
+        roots: &HashSet<u64>,
+    ) -> HashSet<u64> {
+        let candidates = self.descendant_closure(present, roots);
+        self.propagate_detached(&candidates, Some(roots), HashSet::new())
     }
 }
