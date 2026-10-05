@@ -680,6 +680,43 @@ pub fn detect_periodic_chains_bytes(
         .collect())
 }
 
+/// Recover a self-contained periodic surface decomposition for one fused solid.
+///
+/// Repeated site/gap patches are stored once and referenced through CAD-IR
+/// Pattern nodes. One-off rails/end geometry remains as exact packed face
+/// patches. The root is intentionally an Assembly rather than an editable solid.
+///
+/// # Errors
+/// Returns an error if the input cannot be parsed, the chain index is invalid,
+/// or the selected chain cannot be decomposed and packed exactly.
+pub fn recover_periodic_chain_surface_decomposition_bytes(
+    input: &[u8],
+    chain_index: usize,
+) -> Result<cad_recovery::CadFragment> {
+    let (input_text, _) = decode_input(input)?;
+    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    if !exchange.anchor.is_empty()
+        || !exchange.reference.is_empty()
+        || !exchange.signature.is_empty()
+    {
+        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
+    }
+
+    let mut current = 0usize;
+    for section in &exchange.data {
+        for chain in periodic_chains::detect_periodic_chains(&section.entities) {
+            if current == chain_index {
+                return cad_recovery::recover_periodic_chain_surface_decomposition_fragment(
+                    &chain,
+                    &section.entities,
+                );
+            }
+            current += 1;
+        }
+    }
+    bail!("periodic chain index {chain_index} not found")
+}
+
 /// Resize one proven periodic fused-solid chain while keeping its start fixed.
 ///
 /// # Errors

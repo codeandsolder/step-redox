@@ -272,6 +272,7 @@ fn source_solid_id(source: &CadFragmentSource) -> Option<u64> {
         | CadFragmentSource::SolidRevolution { solid_id, .. }
         | CadFragmentSource::RadialSlotRevolution { solid_id, .. }
         | CadFragmentSource::PeriodicChain { solid_id, .. }
+        | CadFragmentSource::PeriodicChainSurfaceDecomposition { solid_id, .. }
         | CadFragmentSource::BrepFallback { solid_id } => Some(*solid_id),
         CadFragmentSource::InstancePattern { .. } => None,
     }
