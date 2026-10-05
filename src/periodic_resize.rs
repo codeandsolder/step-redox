@@ -2464,6 +2464,22 @@ impl<'a> GraphEditor<'a> {
         entity_ref_map(self.entities)
     }
 
+    fn descendant_closure(&self, seeds: &HashSet<u64>) -> Result<HashSet<u64>> {
+        let mut descendants = HashSet::with_capacity(seeds.len());
+        let mut stack = seeds.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = stack.pop() {
+            if !descendants.insert(id) {
+                continue;
+            }
+            let idx = *self
+                .index
+                .get(&id)
+                .ok_or_else(|| anyhow!("descendant graph references missing entity #{id}"))?;
+            visit_entity_refs(&self.entities[idx], &mut |child| stack.push(child));
+        }
+        Ok(descendants)
+    }
+
     /// Remove only descendants of explicitly replaced graph roots that have
     /// become unreachable after rewiring. Shared supports are preserved
     /// automatically because any inbound reference from outside the deletion
@@ -2732,7 +2748,8 @@ impl<'a> GraphEditor<'a> {
         seeds: &HashSet<u64>,
         delta: [f64; 3],
     ) -> Result<HashMap<u64, u64>> {
-        let mut ids = entity_descendant_closure(self.entities, seeds)?
+        let mut ids = self
+            .descendant_closure(seeds)?
             .into_iter()
             .collect::<Vec<_>>();
         ids.sort_unstable();
@@ -3691,17 +3708,17 @@ fn entity_descendant_closure(
     entities: &[EntityInstance],
     seeds: &HashSet<u64>,
 ) -> Result<HashSet<u64>> {
-    let refs = entity_ref_map(entities);
-    let mut descendants = HashSet::new();
+    let index = build_index(entities);
+    let mut descendants = HashSet::with_capacity(seeds.len());
     let mut stack = seeds.iter().copied().collect::<Vec<_>>();
     while let Some(id) = stack.pop() {
         if !descendants.insert(id) {
             continue;
         }
-        let Some(children) = refs.get(&id) else {
-            bail!("descendant graph references missing entity #{id}");
-        };
-        stack.extend(children.iter().copied());
+        let idx = *index
+            .get(&id)
+            .ok_or_else(|| anyhow!("descendant graph references missing entity #{id}"))?;
+        visit_entity_refs(&entities[idx], &mut |child| stack.push(child));
     }
     Ok(descendants)
 }
