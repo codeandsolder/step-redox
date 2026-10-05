@@ -14,6 +14,23 @@ const DIR_TOL: f64 = 1.0e-10;
 // differently. Keep the canonical origin reasonably local to every edge.
 const LINE_MAX_ORIGIN_SHIFT_EDGE_CHORDS: f64 = 64.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SupportKey {
+    Plane {
+        normal: [i64; 3],
+        offset: i64,
+    },
+    Line {
+        direction: [i64; 3],
+        closest: [i64; 3],
+    },
+    Cylinder {
+        direction: [i64; 3],
+        closest: [i64; 3],
+        radius: i64,
+    },
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct GeometricInternStats {
     pub supports_merged: usize,
@@ -46,7 +63,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     let references = ReferenceGraph::new(entities);
     let inbound = references.inbound();
 
-    let mut seen: HashMap<String, u64> = HashMap::new();
+    let mut seen: HashMap<SupportKey, u64> = HashMap::new();
     let mut alias: HashMap<u64, u64> = HashMap::new();
 
     for entity in entities.iter() {
@@ -156,7 +173,7 @@ fn support_key(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-) -> Option<String> {
+) -> Option<SupportKey> {
     let record = simple_record(&entities[*index.get(&id)?])?;
     match record.name.as_str() {
         "PLANE" => {
@@ -164,27 +181,23 @@ fn support_key(
             let (origin, z, _x) = axis3(axis, entities, index)?;
             let n = unit(z)?;
             let d = dot(n, origin);
-            Some(format!(
-                "PLANE:{},{},{}:{}",
-                q(n[0], DIR_TOL),
-                q(n[1], DIR_TOL),
-                q(n[2], DIR_TOL),
-                q(d, POS_TOL_MM)
-            ))
+            Some(SupportKey::Plane {
+                normal: [q(n[0], DIR_TOL), q(n[1], DIR_TOL), q(n[2], DIR_TOL)],
+                offset: q(d, POS_TOL_MM),
+            })
         }
         "LINE" => {
             let (p, d, _magnitude) = line_geometry(id, entities, index)?;
             // Closest point on the infinite line to the global origin.
             let c = sub(p, mul(d, dot(d, p)));
-            Some(format!(
-                "LINE:{},{},{}:{},{},{}",
-                q(d[0], DIR_TOL),
-                q(d[1], DIR_TOL),
-                q(d[2], DIR_TOL),
-                q(c[0], POS_TOL_MM),
-                q(c[1], POS_TOL_MM),
-                q(c[2], POS_TOL_MM)
-            ))
+            Some(SupportKey::Line {
+                direction: [q(d[0], DIR_TOL), q(d[1], DIR_TOL), q(d[2], DIR_TOL)],
+                closest: [
+                    q(c[0], POS_TOL_MM),
+                    q(c[1], POS_TOL_MM),
+                    q(c[2], POS_TOL_MM),
+                ],
+            })
         }
         "CYLINDRICAL_SURFACE" => {
             let axis = nth_ref(&record.parameter, 1)?;
@@ -192,16 +205,15 @@ fn support_key(
             let (origin, z, _x) = axis3(axis, entities, index)?;
             let d = unit(z)?;
             let c = sub(origin, mul(d, dot(d, origin)));
-            Some(format!(
-                "CYL:{},{},{}:{},{},{}:{}",
-                q(d[0], DIR_TOL),
-                q(d[1], DIR_TOL),
-                q(d[2], DIR_TOL),
-                q(c[0], POS_TOL_MM),
-                q(c[1], POS_TOL_MM),
-                q(c[2], POS_TOL_MM),
-                q(radius, SCALAR_TOL_MM)
-            ))
+            Some(SupportKey::Cylinder {
+                direction: [q(d[0], DIR_TOL), q(d[1], DIR_TOL), q(d[2], DIR_TOL)],
+                closest: [
+                    q(c[0], POS_TOL_MM),
+                    q(c[1], POS_TOL_MM),
+                    q(c[2], POS_TOL_MM),
+                ],
+                radius: q(radius, SCALAR_TOL_MM),
+            })
         }
         _ => None,
     }
