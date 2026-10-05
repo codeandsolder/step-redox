@@ -1,8 +1,10 @@
 use crate::math3::{add, distance, norm, sub};
 use crate::step_entities::{cartesian_point, entity_ref, push_simple};
-use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value};
+use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
+use crate::step_identity::{hash_parameter, parameters_equivalent};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 const GEOMETRY_TOLERANCE_MM: f64 = 1.0e-5;
 // Translation values are part of the actual replica transform. They must not
@@ -26,7 +28,6 @@ struct CurveInfo {
     name: Parameter,
     points: Vec<u64>,
     xyz: Vec<[f64; 3]>,
-    key: String,
 }
 
 /// Factor 3-D `B_SPLINE_CURVE_WITH_KNOTS` entities that differ only by one
@@ -39,13 +40,28 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
     }
 
     let index = build_index(entities);
-    let mut groups: HashMap<String, Vec<CurveInfo>> = HashMap::new();
+    let mut groups = Vec::<Vec<CurveInfo>>::new();
+    let mut groups_by_hash = HashMap::<u64, Vec<usize>>::new();
 
     for entity in entities.iter() {
-        let Some(info) = parse_curve(entity, entities, &index) else {
+        let Some((key_hash, info)) = parse_curve(entity, entities, &index) else {
             continue;
         };
-        groups.entry(info.key.clone()).or_default().push(info);
+        let matching_group = groups_by_hash.get(&key_hash).and_then(|candidates| {
+            candidates.iter().copied().find(|&group_index| {
+                curve_keys_equal(&info, &groups[group_index][0], entities, &index)
+            })
+        });
+        if let Some(group_index) = matching_group {
+            groups[group_index].push(info);
+        } else {
+            let group_index = groups.len();
+            groups_by_hash
+                .entry(key_hash)
+                .or_default()
+                .push(group_index);
+            groups.push(vec![info]);
+        }
     }
 
     let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
@@ -54,7 +70,6 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
     let mut old_points = HashSet::new();
     let mut transform_cache: HashMap<[i64; 3], u64> = HashMap::new();
 
-    let mut groups: Vec<_> = groups.into_values().collect();
     for group in &mut groups {
         group.sort_by_key(|curve| curve.id);
     }
@@ -199,7 +214,7 @@ fn parse_curve(
     entity: &EntityInstance,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-) -> Option<CurveInfo> {
+) -> Option<(u64, CurveInfo)> {
     let EntityInstance::Simple { id, record } = entity else {
         return None;
     };
@@ -225,67 +240,87 @@ fn parse_curve(
         .map(|&p| cartesian_point(p, entities, index))
         .collect();
     let xyz = xyz?;
-    let p0 = xyz[0];
-
     // Geometry class = exact non-pole parameters + relative pole positions
-    // quantized to the global 1e-5 mm equivalence floor.
-    let mut key = String::new();
-    for (idx, param) in params.iter().enumerate() {
-        if idx == 0 || idx == 2 {
-            continue; // names do not affect geometry; poles handled below.
+    // quantized to the global 1e-5 mm equivalence floor. Hash structurally and
+    // verify equality inside each hash bucket, avoiding a serialized String key.
+    let key_hash = curve_key_hash(params, &xyz);
+
+    Some((
+        key_hash,
+        CurveInfo {
+            id: *id,
+            name: params[0].clone(),
+            points,
+            xyz,
+        },
+    ))
+}
+
+fn curve_key_hash(params: &[Parameter], xyz: &[[f64; 3]]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (index, param) in params.iter().enumerate() {
+        if index == 0 || index == 2 {
+            continue;
         }
-        write_param_key(param, &mut key);
-        key.push('|');
+        index.hash(&mut hasher);
+        hash_parameter(param, &mut hasher);
     }
-    for p in &xyz {
-        let r = sub(*p, p0);
-        key.push_str(&format!("{},{},{};", quant(r[0]), quant(r[1]), quant(r[2])));
+    xyz.len().hash(&mut hasher);
+    let origin = xyz[0];
+    for point in xyz {
+        let relative = sub(*point, origin);
+        [quant(relative[0]), quant(relative[1]), quant(relative[2])].hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn curve_keys_equal(
+    left: &CurveInfo,
+    right: &CurveInfo,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> bool {
+    if left.xyz.len() != right.xyz.len() {
+        return false;
+    }
+    let Some(left_params) = curve_params(left.id, entities, index) else {
+        return false;
+    };
+    let Some(right_params) = curve_params(right.id, entities, index) else {
+        return false;
+    };
+    if left_params.len() != right_params.len()
+        || left_params
+            .iter()
+            .zip(right_params)
+            .enumerate()
+            .any(|(index, (left, right))| {
+                index != 0 && index != 2 && !parameters_equivalent(left, right)
+            })
+    {
+        return false;
     }
 
-    Some(CurveInfo {
-        id: *id,
-        name: params[0].clone(),
-        points,
-        xyz,
-        key,
+    let left_origin = left.xyz[0];
+    let right_origin = right.xyz[0];
+    left.xyz.iter().zip(&right.xyz).all(|(left, right)| {
+        let left = sub(*left, left_origin);
+        let right = sub(*right, right_origin);
+        [quant(left[0]), quant(left[1]), quant(left[2])]
+            == [quant(right[0]), quant(right[1]), quant(right[2])]
     })
 }
 
-fn write_param_key(param: &Parameter, out: &mut String) {
-    match param {
-        Parameter::Typed { keyword, parameter } => {
-            out.push_str(keyword);
-            out.push('(');
-            write_param_key(parameter, out);
-            out.push(')');
-        }
-        Parameter::Integer(v) => out.push_str(&v.to_string()),
-        Parameter::Real(v) => out.push_str(&format!("{v:.17e}")),
-        Parameter::String(v) => {
-            out.push('\'');
-            out.push_str(v);
-            out.push('\'');
-        }
-        Parameter::Enumeration(v) => {
-            out.push('.');
-            out.push_str(v);
-            out.push('.');
-        }
-        Parameter::List(items) => {
-            out.push('(');
-            for item in items {
-                write_param_key(item, out);
-                out.push(',');
-            }
-            out.push(')');
-        }
-        Parameter::Ref(Name::Entity(id)) => out.push_str(&format!("#{id}")),
-        Parameter::Ref(Name::Value(id)) => out.push_str(&format!("@{id}")),
-        Parameter::Ref(Name::ConstantEntity(v)) => out.push_str(&format!("#{v}")),
-        Parameter::Ref(Name::ConstantValue(v)) => out.push_str(&format!("@{v}")),
-        Parameter::NotProvided => out.push('$'),
-        Parameter::Omitted => out.push('*'),
-    }
+fn curve_params<'a>(
+    id: u64,
+    entities: &'a [EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<&'a [Parameter]> {
+    let record = simple_record(&entities[*index.get(&id)?])?;
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    Some(params)
 }
 
 fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, p: [f64; 3]) -> u64 {
@@ -355,13 +390,17 @@ mod tests {
     }
 
     fn curve(id: u64, points: [u64; 2]) -> EntityInstance {
+        curve_with_degree(id, points, 1)
+    }
+
+    fn curve_with_degree(id: u64, points: [u64; 2], degree: i64) -> EntityInstance {
         EntityInstance::Simple {
             id,
             record: Record {
                 name: "B_SPLINE_CURVE_WITH_KNOTS".to_string(),
                 parameter: Parameter::List(vec![
                     Parameter::String(String::new()),
-                    Parameter::Integer(1),
+                    Parameter::Integer(degree),
                     Parameter::List(points.into_iter().map(entity_ref).collect()),
                     Parameter::Enumeration("UNSPECIFIED".to_string()),
                     Parameter::Enumeration("F".to_string()),
@@ -419,6 +458,22 @@ mod tests {
         assert_eq!(stats.direct_aliases, 0);
         assert_eq!(replica_origin(&entities, 20)?, [3.0, -2.0, 1.0]);
         Ok(())
+    }
+
+    #[test]
+    fn translated_curves_with_different_parameters_do_not_share_a_family() {
+        let mut entities = vec![
+            point(1, [0.0, 0.0, 0.0]),
+            point(2, [1.0, 0.0, 0.0]),
+            point(3, [3.0, -2.0, 1.0]),
+            point(4, [4.0, -2.0, 1.0]),
+            curve_with_degree(10, [1, 2], 1),
+            curve_with_degree(20, [3, 4], 2),
+        ];
+        let stats = instance_translated_bspline_curves(&mut entities);
+        assert_eq!(stats.replicas, 0);
+        assert_eq!(stats.direct_aliases, 0);
+        assert_eq!(stats.families, 0);
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub mod solid_revolutions;
 mod spherical_caps;
 mod step_entities;
 mod step_graph;
+mod step_identity;
 mod step_io;
 use normalization::{dense_renumber, intern_section};
 use step_io::decode_input;

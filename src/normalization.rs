@@ -1,8 +1,9 @@
 use crate::step_graph::visit_entity_refs;
-use crate::step_io::{format_real, write_step_string};
+use crate::step_identity::{
+    hash_parameter_with_alias, parameters_equivalent_with_alias, resolve_alias,
+};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
@@ -26,7 +27,7 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
         ty: &'static str,
     }
 
-    let mut groups: HashMap<String, usize> = HashMap::new();
+    let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut merges = Vec::new();
 
     for (idx, entity) in entities.iter().enumerate() {
@@ -40,37 +41,43 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
             continue;
         };
 
-        let (ty, key, item_param_index) = match record.name.as_str() {
+        let (ty, key_hash, item_param_index, key_param_indices): (
+            &'static str,
+            u64,
+            usize,
+            [usize; 2],
+        ) = match record.name.as_str() {
             "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" if params.len() == 3 => {
                 if !matches!(&params[1], Parameter::List(_)) {
                     continue;
                 }
-                let key = format!(
-                    "MDGPR|{}|{}",
-                    standalone_param_key(&params[0]),
-                    standalone_param_key(&params[2])
-                );
                 (
                     "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
-                    key,
+                    presentation_key_hash(0, &params[0], &params[2]),
                     1,
+                    [0, 2],
                 )
             }
             "PRESENTATION_LAYER_ASSIGNMENT" if params.len() == 3 => {
                 if !matches!(&params[2], Parameter::List(_)) {
                     continue;
                 }
-                let key = format!(
-                    "PLA|{}|{}",
-                    standalone_param_key(&params[0]),
-                    standalone_param_key(&params[1])
-                );
-                ("PRESENTATION_LAYER_ASSIGNMENT", key, 2)
+                (
+                    "PRESENTATION_LAYER_ASSIGNMENT",
+                    presentation_key_hash(1, &params[0], &params[1]),
+                    2,
+                    [0, 1],
+                )
             }
             _ => continue,
         };
 
-        if let Some(&into) = groups.get(&key) {
+        let matching = groups.get(&key_hash).and_then(|candidates| {
+            candidates.iter().copied().find(|&candidate_idx| {
+                presentation_keys_equal(&entities[candidate_idx], entity, key_param_indices)
+            })
+        });
+        if let Some(into) = matching {
             merges.push(Merge {
                 into,
                 from: idx,
@@ -78,7 +85,7 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
                 ty,
             });
         } else {
-            groups.insert(key, idx);
+            groups.entry(key_hash).or_default().push(idx);
         }
     }
 
@@ -129,10 +136,34 @@ pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> Co
     stats
 }
 
-fn standalone_param_key(param: &Parameter) -> String {
-    let mut out = String::new();
-    write_param_key(param, &HashMap::new(), &mut out);
-    out
+fn presentation_key_hash(kind: u8, first: &Parameter, second: &Parameter) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut hasher);
+    crate::step_identity::hash_parameter(first, &mut hasher);
+    crate::step_identity::hash_parameter(second, &mut hasher);
+    hasher.finish()
+}
+
+fn presentation_keys_equal(
+    left: &EntityInstance,
+    right: &EntityInstance,
+    key_param_indices: [usize; 2],
+) -> bool {
+    let (EntityInstance::Simple { record: left, .. }, EntityInstance::Simple { record: right, .. }) =
+        (left, right)
+    else {
+        return false;
+    };
+    if left.name != right.name {
+        return false;
+    }
+    let (Parameter::List(left), Parameter::List(right)) = (&left.parameter, &right.parameter)
+    else {
+        return false;
+    };
+    key_param_indices
+        .into_iter()
+        .all(|index| crate::step_identity::parameters_equivalent(&left[index], &right[index]))
 }
 
 #[derive(Default)]
@@ -146,10 +177,10 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
     // a surprisingly expensive way of spelling "most things survive".
     let mut alias: HashMap<u64, u64> = HashMap::new();
 
-    // Cache serialized keys and invalidate only internable parents whose direct
+    // Cache structural hashes and invalidate only internable parents whose direct
     // STEP references acquire a new canonical alias. The old implementation
-    // reserialized every internable entity on every fixed-point round even
-    // though a key can change only when one of its referenced IDs changes.
+    // rebuilt every internable key on every fixed-point round even though a key
+    // can change only when one of its referenced IDs changes.
     let internable = entities.iter().map(is_internable).collect::<Vec<_>>();
     let mut parents_by_ref = HashMap::<u64, Vec<usize>>::new();
     for (index, entity) in entities.iter().enumerate() {
@@ -328,58 +359,7 @@ fn entity_structural_hash(entity: &EntityInstance, alias: &HashMap<u64, u64>) ->
 
 fn hash_record(record: &Record, alias: &HashMap<u64, u64>, hasher: &mut impl Hasher) {
     record.name.hash(hasher);
-    hash_param(&record.parameter, alias, hasher);
-}
-
-fn hash_param(param: &Parameter, alias: &HashMap<u64, u64>, hasher: &mut impl Hasher) {
-    match param {
-        Parameter::Typed { keyword, parameter } => {
-            0u8.hash(hasher);
-            keyword.hash(hasher);
-            hash_param(parameter, alias, hasher);
-        }
-        Parameter::Integer(value) => {
-            1u8.hash(hasher);
-            value.hash(hasher);
-        }
-        Parameter::Real(value) => {
-            2u8.hash(hasher);
-            value.to_bits().hash(hasher);
-        }
-        Parameter::String(value) => {
-            3u8.hash(hasher);
-            value.hash(hasher);
-        }
-        Parameter::Enumeration(value) => {
-            4u8.hash(hasher);
-            value.hash(hasher);
-        }
-        Parameter::List(items) => {
-            5u8.hash(hasher);
-            items.len().hash(hasher);
-            for item in items {
-                hash_param(item, alias, hasher);
-            }
-        }
-        Parameter::Ref(Name::Entity(id)) => {
-            6u8.hash(hasher);
-            resolve_alias(alias, *id).hash(hasher);
-        }
-        Parameter::Ref(Name::Value(id)) => {
-            7u8.hash(hasher);
-            id.hash(hasher);
-        }
-        Parameter::Ref(Name::ConstantEntity(value)) => {
-            8u8.hash(hasher);
-            value.hash(hasher);
-        }
-        Parameter::Ref(Name::ConstantValue(value)) => {
-            9u8.hash(hasher);
-            value.hash(hasher);
-        }
-        Parameter::NotProvided => 10u8.hash(hasher),
-        Parameter::Omitted => 11u8.hash(hasher),
-    }
+    hash_parameter_with_alias(&record.parameter, alias, hasher);
 }
 
 fn entities_equivalent(
@@ -410,63 +390,8 @@ fn entities_equivalent(
 }
 
 fn records_equivalent(left: &Record, right: &Record, alias: &HashMap<u64, u64>) -> bool {
-    left.name == right.name && params_equivalent(&left.parameter, &right.parameter, alias)
-}
-
-fn params_equivalent(left: &Parameter, right: &Parameter, alias: &HashMap<u64, u64>) -> bool {
-    match (left, right) {
-        (
-            Parameter::Typed {
-                keyword: left_keyword,
-                parameter: left_parameter,
-            },
-            Parameter::Typed {
-                keyword: right_keyword,
-                parameter: right_parameter,
-            },
-        ) => {
-            left_keyword == right_keyword
-                && params_equivalent(left_parameter, right_parameter, alias)
-        }
-        (Parameter::Integer(left), Parameter::Integer(right)) => left == right,
-        (Parameter::Real(left), Parameter::Real(right)) => left.to_bits() == right.to_bits(),
-        (Parameter::String(left), Parameter::String(right))
-        | (Parameter::Enumeration(left), Parameter::Enumeration(right)) => left == right,
-        (Parameter::List(left), Parameter::List(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| params_equivalent(left, right, alias))
-        }
-        (Parameter::Ref(Name::Entity(left)), Parameter::Ref(Name::Entity(right))) => {
-            resolve_alias(alias, *left) == resolve_alias(alias, *right)
-        }
-        (Parameter::Ref(Name::Value(left)), Parameter::Ref(Name::Value(right))) => left == right,
-        (
-            Parameter::Ref(Name::ConstantEntity(left)),
-            Parameter::Ref(Name::ConstantEntity(right)),
-        )
-        | (Parameter::Ref(Name::ConstantValue(left)), Parameter::Ref(Name::ConstantValue(right))) => {
-            left == right
-        }
-        (Parameter::NotProvided, Parameter::NotProvided)
-        | (Parameter::Omitted, Parameter::Omitted) => true,
-        _ => false,
-    }
-}
-
-fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
-    for _ in 0..64 {
-        let Some(&next) = alias.get(&id) else {
-            return id;
-        };
-        if next == id {
-            return id;
-        }
-        id = next;
-    }
-    id
+    left.name == right.name
+        && parameters_equivalent_with_alias(&left.parameter, &right.parameter, alias)
 }
 
 pub(super) fn dense_renumber(entities: &mut [EntityInstance]) {
@@ -605,53 +530,6 @@ fn internable_record(name: &str) -> bool {
     )
 }
 
-fn write_param_key(param: &Parameter, alias: &HashMap<u64, u64>, out: &mut String) {
-    match param {
-        Parameter::Typed { keyword, parameter } => {
-            out.push_str(keyword);
-            out.push('(');
-            write_param_key(parameter, alias, out);
-            out.push(')');
-        }
-        Parameter::Integer(v) => {
-            let _ = write!(out, "{v}");
-        }
-        Parameter::Real(v) => out.push_str(&format_real(*v)),
-        Parameter::String(s) => write_step_string(s, out),
-        Parameter::Enumeration(s) => {
-            out.push('.');
-            out.push_str(s);
-            out.push('.');
-        }
-        Parameter::List(items) => {
-            out.push('(');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_param_key(item, alias, out);
-            }
-            out.push(')');
-        }
-        Parameter::Ref(Name::Entity(id)) => {
-            let _ = write!(out, "#{}", resolve_alias(alias, *id));
-        }
-        Parameter::Ref(Name::Value(id)) => {
-            let _ = write!(out, "@{id}");
-        }
-        Parameter::Ref(Name::ConstantEntity(s)) => {
-            out.push('#');
-            out.push_str(s);
-        }
-        Parameter::Ref(Name::ConstantValue(s)) => {
-            out.push('@');
-            out.push_str(s);
-        }
-        Parameter::NotProvided => out.push('$'),
-        Parameter::Omitted => out.push('*'),
-    }
-}
-
 const PLACEHOLDER_NAME_TYPES: &[&str] = &[
     "ADVANCED_FACE",
     "AXIS2_PLACEMENT_3D",
@@ -710,4 +588,55 @@ fn minify_placeholder_record_name(record: &mut Record) -> usize {
     }
     name.clear();
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layer(id: u64, name: &str, description: &str, item: u64) -> EntityInstance {
+        EntityInstance::Simple {
+            id,
+            record: Record {
+                name: "PRESENTATION_LAYER_ASSIGNMENT".to_string(),
+                parameter: Parameter::List(vec![
+                    Parameter::String(name.to_string()),
+                    Parameter::String(description.to_string()),
+                    Parameter::List(vec![Parameter::Ref(Name::Entity(item))]),
+                ]),
+            },
+        }
+    }
+
+    #[test]
+    fn presentation_consolidation_merges_structurally_equal_roots() {
+        let mut entities = vec![
+            layer(10, "top", "copper", 100),
+            layer(20, "top", "copper", 200),
+        ];
+        let stats = consolidate_presentation(&mut entities);
+        assert_eq!(stats.total, 1);
+        assert_eq!(entities.len(), 1);
+        let EntityInstance::Simple { record, .. } = &entities[0] else {
+            unreachable!();
+        };
+        let Parameter::List(params) = &record.parameter else {
+            unreachable!();
+        };
+        let Parameter::List(items) = &params[2] else {
+            unreachable!();
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn presentation_consolidation_keeps_distinct_structural_keys() {
+        let mut entities = vec![
+            layer(10, "top", "copper", 100),
+            layer(20, "bottom", "copper", 200),
+        ];
+        let stats = consolidate_presentation(&mut entities);
+        assert_eq!(stats.total, 0);
+        assert_eq!(entities.len(), 2);
+    }
 }
