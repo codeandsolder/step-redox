@@ -945,10 +945,20 @@ pub fn expand_periodic_chain_positive(
         .chain(tail_faces.iter())
         .copied()
         .collect::<HashSet<_>>();
-    let clone_descendants = entity_descendant_closure(entities, &clone_roots)?;
-    require_face_only_direct_styles(entities, &clone_descendants, &styles_by_target)?;
-    let style_parents =
-        collect_style_container_parents(entities, &styles_by_target, &clone_descendants)?;
+    let preflight_index = build_index(entities);
+    let clone_descendants = entity_descendant_closure(entities, &preflight_index, &clone_roots)?;
+    require_face_only_direct_styles(
+        entities,
+        &preflight_index,
+        &clone_descendants,
+        &styles_by_target,
+    )?;
+    let style_parents = collect_style_container_parents(
+        entities,
+        &preflight_index,
+        &styles_by_target,
+        &clone_descendants,
+    )?;
 
     let mut graph = GraphEditor::new(entities);
     let mut cloned_style_items = 0usize;
@@ -1546,10 +1556,21 @@ pub fn shrink_periodic_chain_positive(
         .chain(tail_faces.iter())
         .copied()
         .collect::<HashSet<_>>();
-    let touched_descendants = entity_descendant_closure(entities, &touched_roots)?;
-    require_face_only_direct_styles(entities, &touched_descendants, &styles_by_target)?;
-    let style_parents =
-        collect_style_container_parents(entities, &styles_by_target, &touched_descendants)?;
+    let preflight_index = build_index(entities);
+    let touched_descendants =
+        entity_descendant_closure(entities, &preflight_index, &touched_roots)?;
+    require_face_only_direct_styles(
+        entities,
+        &preflight_index,
+        &touched_descendants,
+        &styles_by_target,
+    )?;
+    let style_parents = collect_style_container_parents(
+        entities,
+        &preflight_index,
+        &styles_by_target,
+        &touched_descendants,
+    )?;
 
     let mut graph = GraphEditor::new(entities);
     let mut cloned_style_items = 0usize;
@@ -2248,17 +2269,24 @@ fn chain_set_oriented_edge(
 
 fn collect_style_container_parents(
     entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     styles_by_target: &HashMap<u64, Vec<StyleRef>>,
     relevant_targets: &HashSet<u64>,
 ) -> Result<HashMap<u64, Vec<u64>>> {
-    let refs = entity_ref_map(entities);
-    let mut inbound = HashMap::<u64, Vec<u64>>::new();
-    for (&parent, children) in &refs {
-        for &child in children {
-            inbound.entry(child).or_default().push(parent);
-        }
+    let relevant_styles = relevant_targets
+        .iter()
+        .flat_map(|target| styles_by_target.get(target).into_iter().flatten())
+        .map(|style| style.id)
+        .collect::<HashSet<_>>();
+    let mut inbound = HashMap::<u64, Vec<u64>>::with_capacity(relevant_styles.len());
+    for entity in entities {
+        let parent = entity_id(entity);
+        visit_entity_refs(entity, &mut |child| {
+            if relevant_styles.contains(&child) {
+                inbound.entry(child).or_default().push(parent);
+            }
+        });
     }
-    let index = build_index(entities);
     let mut out = HashMap::<u64, Vec<u64>>::new();
     for style in relevant_targets
         .iter()
@@ -2302,10 +2330,10 @@ fn collect_style_container_parents(
 
 fn require_face_only_direct_styles(
     entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     touched: &HashSet<u64>,
     styles_by_target: &HashMap<u64, Vec<StyleRef>>,
 ) -> Result<()> {
-    let index = build_index(entities);
     for &target in touched {
         if !styles_by_target.contains_key(&target) {
             continue;
@@ -3439,8 +3467,9 @@ mod tests {
 
         let styles = collect_styles_by_target(&entities);
         let relevant = HashSet::from([1]);
-        let parents = collect_style_container_parents(&entities, &styles, &relevant)?;
-        require_face_only_direct_styles(&entities, &relevant, &styles)?;
+        let index = build_index(&entities);
+        let parents = collect_style_container_parents(&entities, &index, &styles, &relevant)?;
+        require_face_only_direct_styles(&entities, &index, &relevant, &styles)?;
 
         {
             let mut graph = GraphEditor::new(&mut entities);
@@ -3706,9 +3735,9 @@ mod tests {
 
 fn entity_descendant_closure(
     entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     seeds: &HashSet<u64>,
 ) -> Result<HashSet<u64>> {
-    let index = build_index(entities);
     let mut descendants = HashSet::with_capacity(seeds.len());
     let mut stack = seeds.iter().copied().collect::<Vec<_>>();
     while let Some(id) = stack.pop() {
