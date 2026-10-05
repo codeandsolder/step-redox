@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 mod bezier_recovery;
+#[doc(hidden)]
+pub mod body_corpus;
 mod brep;
 mod compact_brep;
 pub use compact_brep::CompactBrepStats;
