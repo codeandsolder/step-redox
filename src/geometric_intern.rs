@@ -1,6 +1,6 @@
-use crate::instances::{cartesian_point, entity_ref_map, inbound_map, number};
+use crate::instances::{cartesian_point, number};
 use crate::math3::{dot, mul, norm, sub};
-use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Name, Parameter};
 use std::collections::{HashMap, HashSet};
 
@@ -43,8 +43,8 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     }
 
     let index = build_index(entities);
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
 
     let mut seen: HashMap<String, u64> = HashMap::new();
     let mut alias: HashMap<u64, u64> = HashMap::new();
@@ -112,7 +112,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     let mut candidate = duplicate_roots.clone();
     let mut stack: Vec<u64> = duplicate_roots.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        for &child in refs.get(&id).into_iter().flatten() {
+        for &child in references.refs(id).into_iter().flatten() {
             if index.contains_key(&child) && candidate.insert(child) {
                 stack.push(child);
             }
@@ -123,8 +123,8 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
         rewrite_refs(entity, &alias);
     }
 
-    let rewritten_refs = entity_ref_map(entities);
-    let rewritten_inbound = inbound_map(&rewritten_refs);
+    let rewritten_references = ReferenceGraph::new(entities);
+    let rewritten_inbound = rewritten_references.inbound();
     let mut delete = duplicate_roots;
 
     // Fixed-point orphan collection within the duplicate support closures.

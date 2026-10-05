@@ -1,5 +1,6 @@
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    visit_entity_refs,
 };
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -121,7 +122,7 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     }
 
     let index = build_index(entities);
-    let refs_before = entity_ref_map(entities);
+    let refs_before = ReferenceGraph::new(entities);
     let styles_by_target = styles_by_target(entities);
 
     let mut solid_shell = HashMap::new();
@@ -495,7 +496,7 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     candidate.extend(old_solids.iter().copied());
     let mut stack: Vec<u64> = old_solids.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        if let Some(children) = refs_before.get(&id) {
+        if let Some(children) = refs_before.refs(id) {
             for &child in children {
                 if candidate.insert(child) {
                     stack.push(child);
@@ -506,8 +507,8 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     let mut seeds = old_solids;
     seeds.extend(old_styles.iter().copied());
 
-    let refs_after = entity_ref_map(entities);
-    let inbound_after = inbound_map(&refs_after);
+    let refs_after = ReferenceGraph::new(entities);
+    let inbound_after = refs_after.inbound();
     let mut delete = HashSet::new();
     loop {
         let mut changed = false;
@@ -986,27 +987,6 @@ fn direct_refs_of_type(
         }
     });
     refs
-}
-
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let mut refs = Vec::new();
-        visit_entity_refs(entity, &mut |child| refs.push(child));
-        out.insert(id, refs);
-    }
-    out
-}
-
-fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
-    let mut out: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (&parent, children) in refs {
-        for &child in children {
-            out.entry(child).or_default().push(parent);
-        }
-    }
-    out
 }
 
 const fn entity_ref(id: u64) -> Parameter {

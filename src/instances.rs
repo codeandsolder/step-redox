@@ -1,6 +1,6 @@
 pub(crate) use crate::step_graph::visit_entity_refs;
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
 use ruststep::ast::{EntityInstance, Name, Parameter, Record, SubSuperRecord};
 use std::collections::{HashMap, HashSet};
@@ -425,8 +425,8 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     let mut candidate = geometry_candidates;
     candidate.extend(old_styles_to_remove.iter().copied());
 
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut delete = HashSet::new();
 
     // Fixed point: an eligible entity can disappear only when every remaining
@@ -490,8 +490,8 @@ pub fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> Insta
 
 fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
     let index = build_index(entities);
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let styles_by_target = collect_styles_by_target(entities);
 
     let source_reps: HashSet<u64> = entities
@@ -2412,27 +2412,6 @@ pub fn patch_presentation_lists(
         items.retain(|item| entity_ref_value(item).is_none_or(|id| !remove.contains(&id)));
         items.extend(add.iter().copied().map(entity_ref));
     }
-}
-
-pub fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    entities
-        .iter()
-        .map(|entity| {
-            let mut refs = Vec::new();
-            visit_entity_refs(entity, &mut |id| refs.push(id));
-            (entity_id(entity), refs)
-        })
-        .collect()
-}
-
-pub fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> {
-    let mut inbound: HashMap<u64, HashSet<u64>> = HashMap::new();
-    for (&parent, children) in refs {
-        for &child in children {
-            inbound.entry(child).or_default().insert(parent);
-        }
-    }
-    inbound
 }
 
 pub fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {

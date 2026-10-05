@@ -1,6 +1,6 @@
 use crate::math3::{add, cross, dot, norm, scale, sub};
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
@@ -488,7 +488,7 @@ pub(crate) fn resize_filled_linear_pattern(
     }
 
     let index = build_index(entities);
-    let refs_before = entity_ref_map(entities);
+    let refs_before = ReferenceGraph::new(entities);
     let styles = style_records_by_target(entities);
 
     let mut old_targets = Vec::with_capacity(old_count);
@@ -736,13 +736,13 @@ pub(crate) fn resize_filled_linear_pattern(
         if !candidate.insert(id) {
             continue;
         }
-        if let Some(children) = refs_before.get(&id) {
+        if let Some(children) = refs_before.refs(id) {
             stack.extend(children.iter().copied());
         }
     }
 
-    let refs_after = entity_ref_map(entities);
-    let inbound = inbound_map(&refs_after);
+    let refs_after = ReferenceGraph::new(entities);
+    let inbound = refs_after.inbound();
     let mut delete = std::collections::HashSet::new();
     loop {
         let mut changed = false;
@@ -1210,27 +1210,6 @@ fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
         return None;
     };
     items.iter().map(entity_ref_value).collect()
-}
-
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let mut refs = Vec::new();
-        visit_entity_refs(entity, &mut |child| refs.push(child));
-        out.insert(id, refs);
-    }
-    out
-}
-
-fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
-    let mut out: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (&parent, children) in refs {
-        for &child in children {
-            out.entry(child).or_default().push(parent);
-        }
-    }
-    out
 }
 
 fn push_simple(

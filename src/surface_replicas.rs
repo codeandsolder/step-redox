@@ -1,8 +1,6 @@
-use crate::instances::{
-    cartesian_point, closure_from, entity_ref, entity_ref_map, inbound_map, number, push_simple,
-};
+use crate::instances::{cartesian_point, closure_from, entity_ref, number, push_simple};
 use crate::math3::{distance, norm, sub};
-use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
@@ -58,8 +56,8 @@ pub fn instance_translated_analytic_surfaces(
     }
 
     let index = build_index(entities);
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut groups = HashMap::<SurfaceKey, Vec<SurfaceInfo>>::new();
 
     for entity in entities.iter() {
@@ -168,8 +166,8 @@ pub fn instance_translated_analytic_surfaces(
         }
     }
 
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut delete = HashSet::<u64>::new();
     loop {
         let mut changed = false;

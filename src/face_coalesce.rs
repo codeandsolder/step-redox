@@ -1,5 +1,5 @@
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -77,7 +77,7 @@ fn coalesce_inner(
     }
 
     let index = build_index(entities);
-    let refs_before = entity_ref_map(entities);
+    let refs_before = ReferenceGraph::new(entities);
     let mut face_info = HashMap::<u64, FaceInfo>::new();
     let mut edge_faces: HashMap<u64, BTreeSet<u64>> = HashMap::new();
 
@@ -287,7 +287,7 @@ fn coalesce_inner(
                 if !candidate.insert(id) {
                     continue;
                 }
-                if let Some(children) = refs_before.get(&id) {
+                if let Some(children) = refs_before.refs(id) {
                     stack.extend(children.iter().copied());
                 }
             }
@@ -369,8 +369,8 @@ fn coalesce_inner(
 
     candidate.extend(style_delete.iter().copied());
     // Recompute references after canonical-face/shell/presentation rewrites.
-    let refs_after = entity_ref_map(entities);
-    let inbound_after = inbound_map(&refs_after);
+    let refs_after = ReferenceGraph::new(entities);
+    let inbound_after = refs_after.inbound();
     let mut delete = HashSet::new();
     loop {
         let mut changed = false;
@@ -664,27 +664,6 @@ fn remove_refs_from_direct_lists(param: &mut Parameter, drop: &HashSet<u64>) {
         Parameter::Typed { parameter, .. } => remove_refs_from_direct_lists(parameter, drop),
         _ => {}
     }
-}
-
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let mut refs = Vec::new();
-        visit_entity_refs(entity, &mut |child| refs.push(child));
-        out.insert(id, refs);
-    }
-    out
-}
-
-fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
-    let mut out: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (&parent, children) in refs {
-        for &child in children {
-            out.entry(child).or_default().push(parent);
-        }
-    }
-    out
 }
 
 const fn entity_ref(id: u64) -> Parameter {

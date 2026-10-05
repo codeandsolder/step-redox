@@ -95,10 +95,6 @@ impl ReferenceGraph {
         self.forward.get(&id).map(Vec::as_slice)
     }
 
-    pub(crate) fn parents(&self, id: u64) -> Option<&std::collections::HashSet<u64>> {
-        self.inbound.get(&id)
-    }
-
     pub(crate) const fn forward(&self) -> &HashMap<u64, Vec<u64>> {
         &self.forward
     }

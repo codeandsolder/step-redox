@@ -3,12 +3,11 @@ use crate::brep::{
     matching_plane_bound, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{
-    cartesian_point, collect_styles_by_target, entity_ref, entity_ref_map, face_topology_signature,
-    inbound_map, number, patch_presentation_lists, push_point, push_simple,
-    representation_items_and_context,
+    cartesian_point, collect_styles_by_target, entity_ref, face_topology_signature, number,
+    patch_presentation_lists, push_point, push_simple, representation_items_and_context,
 };
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
 use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
@@ -519,8 +518,8 @@ pub fn instance_planar_spherical_caps(entities: &mut Vec<EntityInstance>) -> Sph
         });
     }
 
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut delete = delete_seed;
 
     loop {
@@ -546,7 +545,7 @@ pub fn instance_planar_spherical_caps(entities: &mut Vec<EntityInstance>) -> Sph
     }
 
     // No live entity may point at a deleted entity.
-    for (id, children) in &refs {
+    for (id, children) in references.forward() {
         if delete.contains(id) {
             continue;
         }

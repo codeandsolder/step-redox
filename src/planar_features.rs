@@ -3,15 +3,16 @@ use crate::brep::{
     face_surface, manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{
-    StyleRef, cartesian_point, collect_styles_by_target, entity_ref, entity_ref_map,
-    face_topology_signature, inbound_map, oriented_edge_signature, patch_presentation_lists,
-    push_point, push_simple, representation_items_and_context,
+    StyleRef, cartesian_point, collect_styles_by_target, entity_ref, face_topology_signature,
+    oriented_edge_signature, patch_presentation_lists, push_point, push_simple,
+    representation_items_and_context,
 };
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
 };
 use crate::step_graph::{
-    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut, visit_entity_refs,
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    visit_entity_refs,
 };
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Parameter};
@@ -1784,8 +1785,8 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
         });
     }
 
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut delete = delete_seed;
 
     loop {
@@ -1810,7 +1811,7 @@ pub fn instance_planar_positive_features(entities: &mut Vec<EntityInstance>) -> 
         }
     }
 
-    for (id, children) in &refs {
+    for (id, children) in references.forward() {
         if delete.contains(id) {
             continue;
         }

@@ -1,6 +1,6 @@
-use crate::instances::{cartesian_point, entity_ref, entity_ref_map, inbound_map, push_simple};
+use crate::instances::{cartesian_point, entity_ref, push_simple};
 use crate::math3::{add, distance, norm, sub};
-use crate::step_graph::{build_index, entity_id, entity_ref_value};
+use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
@@ -167,8 +167,8 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
     let mut candidate: HashSet<u64> = old_points;
     candidate.extend(aliases.keys().copied());
 
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
     let mut delete: HashSet<u64> = aliases.keys().copied().collect();
 
     loop {
