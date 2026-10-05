@@ -67,12 +67,20 @@ pub fn detect_periodic_bodies(
     entities: &[EntityInstance],
     instance_patterns: &[InstancePattern],
 ) -> Vec<PeriodicBodyPattern> {
+    let index = build_index(entities);
+    detect_periodic_bodies_with_index(entities, &index, instance_patterns)
+}
+
+pub(crate) fn detect_periodic_bodies_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    instance_patterns: &[InstancePattern],
+) -> Vec<PeriodicBodyPattern> {
     let candidates = lattice_candidates(instance_patterns);
     if candidates.is_empty() {
         return Vec::new();
     }
 
-    let index = build_index(entities);
     let solids = entities
         .iter()
         .filter_map(|entity| {

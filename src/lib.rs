@@ -1447,10 +1447,15 @@ fn detect_exchange_semantics(
     let mut bodies_out = Vec::new();
 
     for section in &exchange.data {
-        let local_patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        let index = step_graph::build_index(&section.entities);
+        let local_patterns =
+            patterns::detect_instance_patterns_with_index(&section.entities, &index, 1.0e-7, 4);
         let offset = patterns_out.len();
-        let mut local_bodies =
-            periodic_bodies::detect_periodic_bodies(&section.entities, &local_patterns);
+        let mut local_bodies = periodic_bodies::detect_periodic_bodies_with_index(
+            &section.entities,
+            &index,
+            &local_patterns,
+        );
         for body in &mut local_bodies {
             for index in &mut body.coupled_instance_patterns {
                 *index += offset;

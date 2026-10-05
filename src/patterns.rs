@@ -359,11 +359,20 @@ pub fn detect_instance_patterns(
     tolerance_mm: f64,
     min_items: usize,
 ) -> Vec<InstancePattern> {
+    let index = build_index(entities);
+    detect_instance_patterns_with_index(entities, &index, tolerance_mm, min_items)
+}
+
+pub(crate) fn detect_instance_patterns_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    tolerance_mm: f64,
+    min_items: usize,
+) -> Vec<InstancePattern> {
     if tolerance_mm <= 0.0 || !tolerance_mm.is_finite() || min_items < 2 {
         return Vec::new();
     }
 
-    let index = build_index(entities);
     let parents = mapped_item_parents(entities);
     let styles = styles_by_target(entities);
     let mut groups: BTreeMap<GroupKey, Vec<MappedPlacement>> = BTreeMap::new();
