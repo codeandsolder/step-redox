@@ -27,7 +27,7 @@ struct SolidInfo {
     face_style: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ShapeKey {
     pub(crate) vertices: usize,
     pub(crate) edges: usize,
@@ -163,7 +163,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     let mut shape_rep_replacements = HashMap::new();
 
     for representation_id in representation_ids {
-        let Some(rep_idx) = current_index_of(entities, representation_id) else {
+        let Some(&rep_idx) = initial_index.get(&representation_id) else {
             continue;
         };
         let Some((item_ids, context_id)) = representation_items_and_context(&entities[rep_idx])
@@ -226,26 +226,35 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
             }
         }
 
-        let mut groups: HashMap<(ShapeKey, Vec<u64>), Vec<SolidInfo>> = HashMap::new();
+        // Group owned analysis records directly. The old HashMap path cloned each
+        // potentially large ShapeKey and style vector just to form a grouping key.
+        infos.sort_by(|a, b| {
+            a.key
+                .cmp(&b.key)
+                .then_with(|| a.face_style.cmp(&b.face_style))
+                .then_with(|| a.root.cmp(&b.root))
+        });
+        let mut groups: Vec<Vec<SolidInfo>> = Vec::new();
         for info in infos {
-            groups
-                .entry((info.key.clone(), info.face_style.clone()))
-                .or_default()
-                .push(info);
+            if let Some(group) = groups.last_mut()
+                && group[0].key == info.key
+                && group[0].face_style == info.face_style
+            {
+                group.push(info);
+            } else {
+                groups.push(vec![info]);
+            }
         }
+        // Preserve the previous deterministic emission order.
+        groups.sort_by_key(|group| group.first().map_or(u64::MAX, |info| info.root));
 
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        for (_, group) in &mut groups {
-            group.sort_by_key(|info| info.root);
-        }
-        groups.sort_by_key(|(_, group)| group.first().map_or(u64::MAX, |info| info.root));
-
-        for ((_shape_key, face_style), group) in groups {
-            if group.len() < 2 || face_style.is_empty() {
+        for group in groups {
+            if group.len() < 2 || group[0].face_style.is_empty() {
                 continue;
             }
 
             let canonical = &group[0];
+            let face_style = &canonical.face_style;
 
             // Do not infer the actual instance transform from the canonical-key
             // rotation. Symmetric envelopes can have several equivalent
@@ -254,7 +263,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
             let mut mapped_group = vec![(canonical, 0u8)];
             for target in group.iter().skip(1) {
                 if let Some(quarter) =
-                    unique_relative_quarter(&canonical, target, entities, &initial_index)
+                    unique_relative_quarter(canonical, target, entities, &initial_index)
                 {
                     mapped_group.push((target, quarter));
                 }
@@ -2339,10 +2348,6 @@ fn retarget_shape_representation_items(
             replace_representation_items(entity, replacements);
         }
     }
-}
-
-pub fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
-    entities.iter().position(|entity| entity_id(entity) == id)
 }
 
 #[cfg(test)]
