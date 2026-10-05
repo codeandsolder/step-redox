@@ -535,149 +535,185 @@ pub fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> Insta
     }
 }
 
-fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
-    let index = build_index(entities);
-    let references = ReferenceGraph::new(entities);
-    let inbound = references.inbound();
-    let styles_by_target = collect_styles_by_target(entities);
+struct AssemblyPlan {
+    index: HashMap<u64, usize>,
+    references: ReferenceGraph,
+    styles_by_target: HashMap<u64, Vec<StyleRef>>,
+    map_to_source: HashMap<u64, u64>,
+    map_to_origin: HashMap<u64, u64>,
+    mapped_info: HashMap<u64, (u64, u64)>,
+    mapped_ids: HashSet<u64>,
+    top_reps: Vec<u64>,
+    mapped_style_ids: HashSet<u64>,
+}
 
-    let source_reps: HashSet<u64> = entities
-        .iter()
-        .filter_map(|entity| {
+impl AssemblyPlan {
+    fn discover(entities: &[EntityInstance]) -> Option<Self> {
+        let index = build_index(entities);
+        let references = ReferenceGraph::new(entities);
+        let styles_by_target = collect_styles_by_target(entities);
+
+        let source_reps = entities
+            .iter()
+            .filter_map(|entity| {
+                let id = entity_id(entity);
+                let record = simple_record(entity)?;
+                if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                    return None;
+                }
+                let Parameter::List(params) = &record.parameter else {
+                    return None;
+                };
+                matches!(
+                    params.first(),
+                    Some(Parameter::String(name)) if name == "step-redox instance source"
+                )
+                .then_some(id)
+            })
+            .collect::<HashSet<_>>();
+        if source_reps.is_empty() {
+            return None;
+        }
+
+        let mut map_to_source = HashMap::new();
+        let mut map_to_origin = HashMap::new();
+        for entity in entities {
             let id = entity_id(entity);
-            let record = simple_record(entity)?;
-            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
-                return None;
+            let Some(record) = simple_record(entity) else {
+                continue;
+            };
+            if record.name != "REPRESENTATION_MAP" {
+                continue;
             }
             let Parameter::List(params) = &record.parameter else {
-                return None;
+                continue;
             };
-            matches!(
-                params.first(),
-                Some(Parameter::String(name)) if name == "step-redox instance source"
-            )
-            .then_some(id)
-        })
-        .collect();
-    if source_reps.is_empty() {
-        return false;
-    }
+            if params.len() != 2 {
+                continue;
+            }
+            let Some(origin) = entity_ref_value(&params[0]) else {
+                continue;
+            };
+            let Some(rep) = entity_ref_value(&params[1]) else {
+                continue;
+            };
+            if source_reps.contains(&rep) {
+                map_to_source.insert(id, rep);
+                map_to_origin.insert(id, origin);
+            }
+        }
+        if map_to_source.is_empty() {
+            return None;
+        }
 
-    let mut map_to_source = HashMap::new();
-    let mut map_to_origin = HashMap::new();
-    for entity in entities.iter() {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "REPRESENTATION_MAP" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 2 {
-            continue;
-        }
-        let Some(origin) = entity_ref_value(&params[0]) else {
-            continue;
-        };
-        let Some(rep) = entity_ref_value(&params[1]) else {
-            continue;
-        };
-        if source_reps.contains(&rep) {
-            map_to_source.insert(id, rep);
-            map_to_origin.insert(id, origin);
-        }
-    }
-    if map_to_source.is_empty() {
-        return false;
-    }
-
-    let mut mapped_info: HashMap<u64, (u64, u64)> = HashMap::new();
-    for entity in entities.iter() {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "MAPPED_ITEM" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 3 {
-            continue;
-        }
-        let Some(map) = entity_ref_value(&params[1]) else {
-            continue;
-        };
-        let Some(axis) = entity_ref_value(&params[2]) else {
-            continue;
-        };
-        if map_to_source.contains_key(&map) {
-            mapped_info.insert(id, (map, axis));
-        }
-    }
-    if mapped_info.is_empty() {
-        return false;
-    }
-    let mapped_ids: HashSet<u64> = mapped_info.keys().copied().collect();
-
-    let top_reps: Vec<u64> = entities
-        .iter()
-        .filter_map(|entity| {
+        let mut mapped_info = HashMap::new();
+        for entity in entities {
             let id = entity_id(entity);
-            if source_reps.contains(&id) {
-                return None;
+            let Some(record) = simple_record(entity) else {
+                continue;
+            };
+            if record.name != "MAPPED_ITEM" {
+                continue;
             }
-            let record = simple_record(entity)?;
-            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
-                return None;
+            let Parameter::List(params) = &record.parameter else {
+                continue;
+            };
+            if params.len() != 3 {
+                continue;
             }
-            let (items, _) = representation_items_and_context(entity)?;
-            items
-                .iter()
-                .any(|item| mapped_ids.contains(item))
-                .then_some(id)
-        })
-        .collect();
-    if top_reps.is_empty() {
-        return false;
-    }
-
-    // Every generated mapped item must be owned by exactly one top shape rep.
-    let mut ownership = HashMap::<u64, usize>::new();
-    for &rep in &top_reps {
-        let Some(&idx) = index.get(&rep) else {
-            return false;
-        };
-        let Some((items, _)) = representation_items_and_context(&entities[idx]) else {
-            return false;
-        };
-        for item in items {
-            if mapped_ids.contains(&item) {
-                *ownership.entry(item).or_insert(0) += 1;
+            let Some(map) = entity_ref_value(&params[1]) else {
+                continue;
+            };
+            let Some(axis) = entity_ref_value(&params[2]) else {
+                continue;
+            };
+            if map_to_source.contains_key(&map) {
+                mapped_info.insert(id, (map, axis));
             }
         }
-    }
-    if mapped_ids
-        .iter()
-        .any(|id| ownership.get(id).copied() != Some(1))
-    {
-        return false;
-    }
+        if mapped_info.is_empty() {
+            return None;
+        }
+        let mapped_ids = mapped_info.keys().copied().collect::<HashSet<_>>();
 
-    let mapped_style_ids: HashSet<u64> = mapped_ids
-        .iter()
-        .flat_map(|mapped| {
-            styles_by_target
-                .get(mapped)
-                .into_iter()
-                .flatten()
-                .map(|style| style.id)
+        let top_reps = entities
+            .iter()
+            .filter_map(|entity| {
+                let id = entity_id(entity);
+                if source_reps.contains(&id) {
+                    return None;
+                }
+                let record = simple_record(entity)?;
+                if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                    return None;
+                }
+                let (items, _) = representation_items_and_context(entity)?;
+                items
+                    .iter()
+                    .any(|item| mapped_ids.contains(item))
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        if top_reps.is_empty() {
+            return None;
+        }
+
+        // Every generated mapped item must be owned by exactly one top shape rep.
+        let mut ownership = HashMap::<u64, usize>::new();
+        for &rep in &top_reps {
+            let &idx = index.get(&rep)?;
+            let (items, _) = representation_items_and_context(&entities[idx])?;
+            for item in items {
+                if mapped_ids.contains(&item) {
+                    *ownership.entry(item).or_insert(0) += 1;
+                }
+            }
+        }
+        if mapped_ids
+            .iter()
+            .any(|id| ownership.get(id).copied() != Some(1))
+        {
+            return None;
+        }
+
+        let mapped_style_ids = mapped_ids
+            .iter()
+            .flat_map(|mapped| {
+                styles_by_target
+                    .get(mapped)
+                    .into_iter()
+                    .flatten()
+                    .map(|style| style.id)
+            })
+            .collect();
+
+        Some(Self {
+            index,
+            references,
+            styles_by_target,
+            map_to_source,
+            map_to_origin,
+            mapped_info,
+            mapped_ids,
+            top_reps,
+            mapped_style_ids,
         })
-        .collect();
+    }
+}
+
+fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
+    let Some(plan) = AssemblyPlan::discover(entities) else {
+        return false;
+    };
+    let index = &plan.index;
+    let inbound = plan.references.inbound();
+    let styles_by_target = &plan.styles_by_target;
+    let map_to_source = &plan.map_to_source;
+    let map_to_origin = &plan.map_to_origin;
+    let mapped_info = &plan.mapped_info;
+    let mapped_ids = &plan.mapped_ids;
+    let top_reps = &plan.top_reps;
+    let mapped_style_ids = plan.mapped_style_ids.clone();
 
     let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
     let mut new_style_ids = Vec::new();
