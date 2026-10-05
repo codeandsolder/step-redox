@@ -33,6 +33,7 @@ pub mod profile_curves;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
 mod spherical_caps;
+mod step_graph;
 mod surface_recovery;
 mod surface_replicas;
 mod units;

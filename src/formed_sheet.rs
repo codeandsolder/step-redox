@@ -1,4 +1,5 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -1688,37 +1689,9 @@ fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
 
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(index, entity)| (entity_id(entity), index))
-        .collect()
-}
-
-const fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
 const fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params.as_slice()),
-        _ => None,
-    }
-}
-
-const fn entity_ref_value(parameter: &Parameter) -> Option<u64> {
-    match parameter {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
         _ => None,
     }
 }

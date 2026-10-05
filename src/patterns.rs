@@ -1,3 +1,6 @@
+use crate::step_graph::{
+    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+};
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use serde::{Deserialize, Serialize};
@@ -1197,43 +1200,8 @@ fn canonicalize_vector(v: &mut [f64; 3]) {
     }
 }
 
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(idx, entity)| (entity_id(entity), idx))
-        .collect()
-}
-
-const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-const fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
 const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
-}
-
-const fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
 }
 
 fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
