@@ -536,15 +536,38 @@ pub fn instance_z90_solids_assembly(entities: &mut Vec<EntityInstance>) -> Insta
 }
 
 struct AssemblyPlan {
-    index: HashMap<u64, usize>,
-    references: ReferenceGraph,
-    styles_by_target: HashMap<u64, Vec<StyleRef>>,
-    map_to_source: HashMap<u64, u64>,
-    map_to_origin: HashMap<u64, u64>,
-    mapped_info: HashMap<u64, (u64, u64)>,
-    mapped_ids: HashSet<u64>,
-    top_reps: Vec<u64>,
+    tops: Vec<AssemblyTopPlan>,
     mapped_style_ids: HashSet<u64>,
+    mapped_ids: HashSet<u64>,
+    used_maps: HashSet<u64>,
+}
+
+struct AssemblyTopPlan {
+    top_rep: u64,
+    top_rep_index: usize,
+    context_id: u64,
+    residual_items: Vec<u64>,
+    root_axes: Vec<u64>,
+    product: AssemblyProductContext,
+    families: Vec<AssemblyFamilyPlan>,
+}
+
+#[derive(Clone, Copy)]
+struct AssemblyProductContext {
+    root_sdr_index: usize,
+    parent_pd: u64,
+    pd_context: u64,
+    product_context: u64,
+}
+
+struct AssemblyFamilyPlan {
+    map: u64,
+    source_rep: u64,
+    source_origin: u64,
+    canonical_solid: u64,
+    inherited_style: Vec<u64>,
+    canonical_style_indices: Vec<usize>,
+    occurrences: Vec<(u64, u64)>,
 }
 
 impl AssemblyPlan {
@@ -553,125 +576,23 @@ impl AssemblyPlan {
         let references = ReferenceGraph::new(entities);
         let styles_by_target = collect_styles_by_target(entities);
 
-        let source_reps = entities
-            .iter()
-            .filter_map(|entity| {
-                let id = entity_id(entity);
-                let record = simple_record(entity)?;
-                if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
-                    return None;
-                }
-                let Parameter::List(params) = &record.parameter else {
-                    return None;
-                };
-                matches!(
-                    params.first(),
-                    Some(Parameter::String(name)) if name == "step-redox instance source"
-                )
-                .then_some(id)
-            })
-            .collect::<HashSet<_>>();
+        let source_reps = discover_instance_source_representations(entities);
         if source_reps.is_empty() {
             return None;
         }
-
-        let mut map_to_source = HashMap::new();
-        let mut map_to_origin = HashMap::new();
-        for entity in entities {
-            let id = entity_id(entity);
-            let Some(record) = simple_record(entity) else {
-                continue;
-            };
-            if record.name != "REPRESENTATION_MAP" {
-                continue;
-            }
-            let Parameter::List(params) = &record.parameter else {
-                continue;
-            };
-            if params.len() != 2 {
-                continue;
-            }
-            let Some(origin) = entity_ref_value(&params[0]) else {
-                continue;
-            };
-            let Some(rep) = entity_ref_value(&params[1]) else {
-                continue;
-            };
-            if source_reps.contains(&rep) {
-                map_to_source.insert(id, rep);
-                map_to_origin.insert(id, origin);
-            }
-        }
+        let (map_to_source, map_to_origin) =
+            discover_instance_representation_maps(entities, &source_reps);
         if map_to_source.is_empty() {
             return None;
         }
-
-        let mut mapped_info = HashMap::new();
-        for entity in entities {
-            let id = entity_id(entity);
-            let Some(record) = simple_record(entity) else {
-                continue;
-            };
-            if record.name != "MAPPED_ITEM" {
-                continue;
-            }
-            let Parameter::List(params) = &record.parameter else {
-                continue;
-            };
-            if params.len() != 3 {
-                continue;
-            }
-            let Some(map) = entity_ref_value(&params[1]) else {
-                continue;
-            };
-            let Some(axis) = entity_ref_value(&params[2]) else {
-                continue;
-            };
-            if map_to_source.contains_key(&map) {
-                mapped_info.insert(id, (map, axis));
-            }
-        }
+        let mapped_info = discover_instance_mapped_items(entities, &map_to_source);
         if mapped_info.is_empty() {
             return None;
         }
         let mapped_ids = mapped_info.keys().copied().collect::<HashSet<_>>();
-
-        let top_reps = entities
-            .iter()
-            .filter_map(|entity| {
-                let id = entity_id(entity);
-                if source_reps.contains(&id) {
-                    return None;
-                }
-                let record = simple_record(entity)?;
-                if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
-                    return None;
-                }
-                let (items, _) = representation_items_and_context(entity)?;
-                items
-                    .iter()
-                    .any(|item| mapped_ids.contains(item))
-                    .then_some(id)
-            })
-            .collect::<Vec<_>>();
-        if top_reps.is_empty() {
-            return None;
-        }
-
-        // Every generated mapped item must be owned by exactly one top shape rep.
-        let mut ownership = HashMap::<u64, usize>::new();
-        for &rep in &top_reps {
-            let &idx = index.get(&rep)?;
-            let (items, _) = representation_items_and_context(&entities[idx])?;
-            for item in items {
-                if mapped_ids.contains(&item) {
-                    *ownership.entry(item).or_insert(0) += 1;
-                }
-            }
-        }
-        if mapped_ids
-            .iter()
-            .any(|id| ownership.get(id).copied() != Some(1))
+        let top_reps = discover_instance_top_representations(entities, &source_reps, &mapped_ids);
+        if top_reps.is_empty()
+            || !mapped_items_have_unique_top_owner(entities, &index, &top_reps, &mapped_ids)
         {
             return None;
         }
@@ -685,119 +606,468 @@ impl AssemblyPlan {
                     .flatten()
                     .map(|style| style.id)
             })
-            .collect();
+            .collect::<HashSet<_>>();
+
+        let inbound = references.inbound();
+        let mut tops = Vec::with_capacity(top_reps.len());
+        let mut used_maps = HashSet::new();
+        for top_rep in top_reps {
+            let top = discover_assembly_top_plan(
+                top_rep,
+                entities,
+                &index,
+                inbound,
+                &styles_by_target,
+                &mapped_info,
+                &mapped_ids,
+                &map_to_source,
+                &map_to_origin,
+            )?;
+            used_maps.extend(top.families.iter().map(|family| family.map));
+            tops.push(top);
+        }
 
         Some(Self {
-            index,
-            references,
-            styles_by_target,
-            map_to_source,
-            map_to_origin,
-            mapped_info,
-            mapped_ids,
-            top_reps,
+            tops,
             mapped_style_ids,
+            mapped_ids,
+            used_maps,
         })
     }
 }
 
-fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
-    let Some(plan) = AssemblyPlan::discover(entities) else {
-        return false;
-    };
-    let index = &plan.index;
-    let inbound = plan.references.inbound();
-    let styles_by_target = &plan.styles_by_target;
-    let map_to_source = &plan.map_to_source;
-    let map_to_origin = &plan.map_to_origin;
-    let mapped_info = &plan.mapped_info;
-    let mapped_ids = &plan.mapped_ids;
-    let top_reps = &plan.top_reps;
-    let mapped_style_ids = plan.mapped_style_ids.clone();
+fn discover_instance_source_representations(entities: &[EntityInstance]) -> HashSet<u64> {
+    entities
+        .iter()
+        .filter_map(|entity| {
+            let id = entity_id(entity);
+            let record = simple_record(entity)?;
+            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                return None;
+            }
+            let Parameter::List(params) = &record.parameter else {
+                return None;
+            };
+            matches!(
+                params.first(),
+                Some(Parameter::String(name)) if name == "step-redox instance source"
+            )
+            .then_some(id)
+        })
+        .collect()
+}
 
-    let mut next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
-    let mut new_style_ids = Vec::new();
-    let mut used_maps = HashSet::new();
-
-    for (rep_ordinal, &top_rep) in top_reps.iter().enumerate() {
-        let Some(&top_idx) = index.get(&top_rep) else {
-            return false;
+fn discover_instance_representation_maps(
+    entities: &[EntityInstance],
+    source_reps: &HashSet<u64>,
+) -> (HashMap<u64, u64>, HashMap<u64, u64>) {
+    let mut map_to_source = HashMap::new();
+    let mut map_to_origin = HashMap::new();
+    for entity in entities {
+        let id = entity_id(entity);
+        let Some(record) = simple_record(entity) else {
+            continue;
         };
-        let Some((top_items, context_id)) = representation_items_and_context(&entities[top_idx])
-        else {
-            return false;
-        };
-        let local_mapped: Vec<u64> = top_items
-            .iter()
-            .copied()
-            .filter(|item| mapped_ids.contains(item))
-            .collect();
-        if local_mapped.is_empty() {
+        if record.name != "REPRESENTATION_MAP" {
             continue;
         }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        let [origin_param, source_param] = params.as_slice() else {
+            continue;
+        };
+        let Some(origin) = entity_ref_value(origin_param) else {
+            continue;
+        };
+        let Some(source) = entity_ref_value(source_param) else {
+            continue;
+        };
+        if source_reps.contains(&source) {
+            map_to_source.insert(id, source);
+            map_to_origin.insert(id, origin);
+        }
+    }
+    (map_to_source, map_to_origin)
+}
 
-        let sdr_candidates: Vec<u64> = inbound
-            .get(&top_rep)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|id| {
-                index
-                    .get(id)
-                    .and_then(|idx| simple_record(&entities[*idx]))
-                    .is_some_and(|record| record.name == "SHAPE_DEFINITION_REPRESENTATION")
-            })
-            .collect();
-        if sdr_candidates.len() != 1 {
+fn discover_instance_mapped_items(
+    entities: &[EntityInstance],
+    map_to_source: &HashMap<u64, u64>,
+) -> HashMap<u64, (u64, u64)> {
+    let mut mapped_info = HashMap::new();
+    for entity in entities {
+        let id = entity_id(entity);
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MAPPED_ITEM" {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        let [_, map_param, axis_param] = params.as_slice() else {
+            continue;
+        };
+        let Some(map) = entity_ref_value(map_param) else {
+            continue;
+        };
+        let Some(axis) = entity_ref_value(axis_param) else {
+            continue;
+        };
+        if map_to_source.contains_key(&map) {
+            mapped_info.insert(id, (map, axis));
+        }
+    }
+    mapped_info
+}
+
+fn discover_instance_top_representations(
+    entities: &[EntityInstance],
+    source_reps: &HashSet<u64>,
+    mapped_ids: &HashSet<u64>,
+) -> Vec<u64> {
+    entities
+        .iter()
+        .filter_map(|entity| {
+            let id = entity_id(entity);
+            if source_reps.contains(&id) {
+                return None;
+            }
+            let record = simple_record(entity)?;
+            if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                return None;
+            }
+            let (items, _) = representation_items_and_context(entity)?;
+            items
+                .iter()
+                .any(|item| mapped_ids.contains(item))
+                .then_some(id)
+        })
+        .collect()
+}
+
+fn mapped_items_have_unique_top_owner(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    top_reps: &[u64],
+    mapped_ids: &HashSet<u64>,
+) -> bool {
+    let mut ownership = HashMap::<u64, usize>::new();
+    for &rep in top_reps {
+        let Some(&entity_index) = index.get(&rep) else {
+            return false;
+        };
+        let Some((items, _)) = representation_items_and_context(&entities[entity_index]) else {
+            return false;
+        };
+        for item in items {
+            if mapped_ids.contains(&item) {
+                *ownership.entry(item).or_insert(0) += 1;
+            }
+        }
+    }
+    mapped_ids
+        .iter()
+        .all(|id| ownership.get(id).copied() == Some(1))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "assembly planning needs the immutable indexes discovered once for the whole conversion"
+)]
+fn discover_assembly_top_plan(
+    top_rep: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    inbound: &HashMap<u64, Vec<u64>>,
+    styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+    mapped_info: &HashMap<u64, (u64, u64)>,
+    mapped_ids: &HashSet<u64>,
+    map_to_source: &HashMap<u64, u64>,
+    map_to_origin: &HashMap<u64, u64>,
+) -> Option<AssemblyTopPlan> {
+    let &top_rep_index = index.get(&top_rep)?;
+    let (top_items, context_id) = representation_items_and_context(&entities[top_rep_index])?;
+    let local_mapped = top_items
+        .iter()
+        .copied()
+        .filter(|item| mapped_ids.contains(item))
+        .collect::<Vec<_>>();
+    if local_mapped.is_empty() {
+        return None;
+    }
+
+    let product = discover_assembly_product_context(top_rep, entities, index, inbound)?;
+    let residual_items = top_items
+        .iter()
+        .copied()
+        .filter(|item| !mapped_ids.contains(item))
+        .collect::<Vec<_>>();
+
+    let mut root_axes = Vec::new();
+    let mut seen_axes = HashSet::new();
+    let mut local_by_map = HashMap::<u64, Vec<(u64, u64)>>::new();
+    for mapped in local_mapped {
+        let &(map, axis) = mapped_info.get(&mapped)?;
+        if seen_axes.insert(axis) {
+            root_axes.push(axis);
+        }
+        local_by_map.entry(map).or_default().push((mapped, axis));
+    }
+
+    let mut local_by_map = local_by_map.into_iter().collect::<Vec<_>>();
+    local_by_map.sort_by_key(|(map, _)| *map);
+    let mut families = Vec::with_capacity(local_by_map.len());
+    for (map, mut occurrences) in local_by_map {
+        occurrences.sort_by_key(|(mapped, _)| *mapped);
+        families.push(discover_assembly_family_plan(
+            map,
+            occurrences,
+            entities,
+            index,
+            styles_by_target,
+            map_to_source,
+            map_to_origin,
+        )?);
+    }
+
+    Some(AssemblyTopPlan {
+        top_rep,
+        top_rep_index,
+        context_id,
+        residual_items,
+        root_axes,
+        product,
+        families,
+    })
+}
+
+fn discover_assembly_product_context(
+    top_rep: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    inbound: &HashMap<u64, Vec<u64>>,
+) -> Option<AssemblyProductContext> {
+    let sdr_candidates = inbound
+        .get(&top_rep)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|id| {
+            index
+                .get(id)
+                .and_then(|idx| simple_record(&entities[*idx]))
+                .is_some_and(|record| record.name == "SHAPE_DEFINITION_REPRESENTATION")
+        })
+        .collect::<Vec<_>>();
+    let [root_sdr] = sdr_candidates.as_slice() else {
+        return None;
+    };
+    let &root_sdr_index = index.get(root_sdr)?;
+
+    let root_sdr_record = simple_record(&entities[root_sdr_index])?;
+    let Parameter::List(root_sdr_params) = &root_sdr_record.parameter else {
+        return None;
+    };
+    if !root_sdr_params
+        .iter()
+        .any(|param| entity_ref_value(param) == Some(top_rep))
+    {
+        return None;
+    }
+
+    let root_pds = referenced_of_type(*root_sdr, entities, index, &["PRODUCT_DEFINITION_SHAPE"])?;
+    let parent_pd = referenced_of_type(root_pds, entities, index, &["PRODUCT_DEFINITION"])?;
+    let pd_context = referenced_of_type(
+        parent_pd,
+        entities,
+        index,
+        &["PRODUCT_DEFINITION_CONTEXT", "DESIGN_CONTEXT"],
+    )?;
+    let formation = referenced_of_type(
+        parent_pd,
+        entities,
+        index,
+        &[
+            "PRODUCT_DEFINITION_FORMATION",
+            "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
+        ],
+    )?;
+    let parent_product = referenced_of_type(formation, entities, index, &["PRODUCT"])?;
+    let product_context = referenced_of_type(
+        parent_product,
+        entities,
+        index,
+        &["PRODUCT_CONTEXT", "MECHANICAL_CONTEXT"],
+    )?;
+
+    Some(AssemblyProductContext {
+        root_sdr_index,
+        parent_pd,
+        pd_context,
+        product_context,
+    })
+}
+
+fn discover_assembly_family_plan(
+    map: u64,
+    occurrences: Vec<(u64, u64)>,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    styles_by_target: &HashMap<u64, Vec<StyleRef>>,
+    map_to_source: &HashMap<u64, u64>,
+    map_to_origin: &HashMap<u64, u64>,
+) -> Option<AssemblyFamilyPlan> {
+    let source_rep = *map_to_source.get(&map)?;
+    let source_origin = *map_to_origin.get(&map)?;
+    let &source_index = index.get(&source_rep)?;
+    let (source_items, _) = representation_items_and_context(&entities[source_index])?;
+    let source_solids = source_items
+        .iter()
+        .copied()
+        .filter(|id| {
+            index
+                .get(id)
+                .and_then(|idx| simple_record(&entities[*idx]))
+                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+        })
+        .collect::<Vec<_>>();
+    let [canonical_solid] = source_solids.as_slice() else {
+        return None;
+    };
+
+    let first_mapped = occurrences.first()?.0;
+    let mapped_styles = styles_by_target.get(&first_mapped)?;
+    if mapped_styles.len() != 1 || mapped_styles[0].assignments.is_empty() {
+        return None;
+    }
+    let inherited_style = mapped_styles[0].assignments.clone();
+    if occurrences.iter().any(|(mapped, _)| {
+        styles_by_target
+            .get(mapped)
+            .is_none_or(|styles| styles.len() != 1 || styles[0].assignments != inherited_style)
+    }) {
+        return None;
+    }
+
+    let mut canonical_style_indices = Vec::new();
+    if let Some(root_styles) = styles_by_target.get(canonical_solid) {
+        canonical_style_indices.reserve(root_styles.len());
+        for style in root_styles {
+            let &style_index = index.get(&style.id)?;
+            let record = simple_record(&entities[style_index])?;
+            let Parameter::List(params) = &record.parameter else {
+                return None;
+            };
+            if record.name != "STYLED_ITEM" || params.len() != 3 {
+                return None;
+            }
+            canonical_style_indices.push(style_index);
+        }
+    }
+
+    Some(AssemblyFamilyPlan {
+        map,
+        source_rep,
+        source_origin,
+        canonical_solid: *canonical_solid,
+        inherited_style,
+        canonical_style_indices,
+        occurrences,
+    })
+}
+
+struct AssemblyEmitter<'a> {
+    entities: &'a mut Vec<EntityInstance>,
+    next_id: u64,
+    new_style_ids: Vec<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct AssemblyEmissionContext {
+    parent_pd: u64,
+    pd_context: u64,
+    product_context: u64,
+    root_rep: u64,
+}
+
+impl<'a> AssemblyEmitter<'a> {
+    fn new(entities: &'a mut Vec<EntityInstance>) -> Self {
+        let next_id = entities.iter().map(entity_id).max().unwrap_or(0) + 1;
+        Self {
+            entities,
+            next_id,
+            new_style_ids: Vec::new(),
+        }
+    }
+
+    fn emit_top(&mut self, rep_ordinal: usize, top: AssemblyTopPlan) -> bool {
+        let AssemblyTopPlan {
+            top_rep,
+            top_rep_index,
+            context_id,
+            mut residual_items,
+            root_axes,
+            product,
+            families,
+        } = top;
+        let AssemblyProductContext {
+            root_sdr_index,
+            parent_pd,
+            pd_context,
+            product_context,
+        } = product;
+
+        let (root_origin, residual_origin) = self.emit_top_origins();
+        let has_residual_items = !residual_items.is_empty();
+        residual_items.push(residual_origin);
+        set_representation_items(&mut self.entities[top_rep_index], &residual_items);
+
+        let mut root_items =
+            Vec::with_capacity(1 + usize::from(has_residual_items) + root_axes.len());
+        root_items.push(root_origin);
+        if has_residual_items {
+            root_items.push(residual_origin);
+        }
+        root_items.extend(root_axes);
+        let root_rep = push_simple(
+            self.entities,
+            &mut self.next_id,
+            "SHAPE_REPRESENTATION",
+            vec![
+                Parameter::String(format!("step-redox assembly {rep_ordinal}")),
+                Parameter::List(root_items.into_iter().map(entity_ref).collect()),
+                entity_ref(context_id),
+            ],
+        );
+        if !replace_direct_ref_in_simple(&mut self.entities[root_sdr_index], top_rep, root_rep) {
             return false;
         }
-        let root_sdr = sdr_candidates[0];
 
-        let Some(root_pds) =
-            referenced_of_type(root_sdr, entities, &index, &["PRODUCT_DEFINITION_SHAPE"])
-        else {
-            return false;
-        };
-        let Some(parent_pd) =
-            referenced_of_type(root_pds, entities, &index, &["PRODUCT_DEFINITION"])
-        else {
-            return false;
-        };
-        let Some(pd_context) = referenced_of_type(
+        let context = AssemblyEmissionContext {
             parent_pd,
-            entities,
-            &index,
-            &["PRODUCT_DEFINITION_CONTEXT", "DESIGN_CONTEXT"],
-        ) else {
-            return false;
+            pd_context,
+            product_context,
+            root_rep,
         };
-        let Some(formation) = referenced_of_type(
-            parent_pd,
-            entities,
-            &index,
-            &[
-                "PRODUCT_DEFINITION_FORMATION",
-                "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
-            ],
-        ) else {
-            return false;
-        };
-        let Some(parent_product) = referenced_of_type(formation, entities, &index, &["PRODUCT"])
-        else {
-            return false;
-        };
-        let Some(product_context) = referenced_of_type(
-            parent_product,
-            entities,
-            &index,
-            &["PRODUCT_CONTEXT", "MECHANICAL_CONTEXT"],
-        ) else {
-            return false;
-        };
+        if has_residual_items {
+            self.emit_residual_child(rep_ordinal, top_rep, residual_origin, root_origin, context);
+        }
 
+        for (family_ordinal, family) in families.iter().enumerate() {
+            if !self.emit_family(rep_ordinal, family_ordinal, context, family) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn emit_top_origins(&mut self) -> (u64, u64) {
         let z_dir = push_simple(
-            entities,
-            &mut next_id,
+            self.entities,
+            &mut self.next_id,
             "DIRECTION",
             vec![
                 Parameter::String(String::new()),
@@ -809,8 +1079,8 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
             ],
         );
         let x_dir = push_simple(
-            entities,
-            &mut next_id,
+            self.entities,
+            &mut self.next_id,
             "DIRECTION",
             vec![
                 Parameter::String(String::new()),
@@ -821,10 +1091,10 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 ]),
             ],
         );
-        let root_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
+        let root_point = push_point(self.entities, &mut self.next_id, [0.0, 0.0, 0.0]);
         let root_origin = push_simple(
-            entities,
-            &mut next_id,
+            self.entities,
+            &mut self.next_id,
             "AXIS2_PLACEMENT_3D",
             vec![
                 Parameter::String(String::new()),
@@ -833,10 +1103,10 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 entity_ref(x_dir),
             ],
         );
-        let residual_point = push_point(entities, &mut next_id, [0.0, 0.0, 0.0]);
+        let residual_point = push_point(self.entities, &mut self.next_id, [0.0, 0.0, 0.0]);
         let residual_origin = push_simple(
-            entities,
-            &mut next_id,
+            self.entities,
+            &mut self.next_id,
             "AXIS2_PLACEMENT_3D",
             vec![
                 Parameter::String(String::new()),
@@ -845,182 +1115,120 @@ fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> b
                 entity_ref(x_dir),
             ],
         );
-
-        let residual_items = top_items
-            .iter()
-            .copied()
-            .filter(|item| !mapped_ids.contains(item))
-            .collect::<Vec<_>>();
-        let has_residual_items = !residual_items.is_empty();
-        let mut patched_residual_items = residual_items;
-        patched_residual_items.push(residual_origin);
-        let Some(top_representation) = entities.get_mut(top_idx) else {
-            return false;
-        };
-        set_representation_items(top_representation, &patched_residual_items);
-
-        let mut root_items = vec![root_origin];
-        if has_residual_items {
-            root_items.push(residual_origin);
-        }
-        for mapped in &local_mapped {
-            let Some((_, axis)) = mapped_info.get(mapped) else {
-                return false;
-            };
-            if !root_items.contains(axis) {
-                root_items.push(*axis);
-            }
-        }
-        let root_rep = push_simple(
-            entities,
-            &mut next_id,
-            "SHAPE_REPRESENTATION",
-            vec![
-                Parameter::String(format!("step-redox assembly {rep_ordinal}")),
-                Parameter::List(root_items.iter().copied().map(entity_ref).collect()),
-                entity_ref(context_id),
-            ],
-        );
-        let Some(&root_sdr_index) = index.get(&root_sdr) else {
-            return false;
-        };
-        let Some(root_sdr_entity) = entities.get_mut(root_sdr_index) else {
-            return false;
-        };
-        if !replace_direct_ref_in_simple(root_sdr_entity, top_rep, root_rep) {
-            return false;
-        }
-
-        if has_residual_items {
-            let residual_pd = push_child_product(
-                entities,
-                &mut next_id,
-                &format!("step-redox residual {rep_ordinal}"),
-                product_context,
-                pd_context,
-                top_rep,
-            );
-            push_assembly_occurrence(
-                entities,
-                &mut next_id,
-                parent_pd,
-                residual_pd,
-                top_rep,
-                root_rep,
-                residual_origin,
-                root_origin,
-                &format!("residual-{rep_ordinal}"),
-            );
-        }
-
-        let mut local_by_map: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
-        for mapped in &local_mapped {
-            let Some(&(map, axis)) = mapped_info.get(mapped) else {
-                return false;
-            };
-            local_by_map.entry(map).or_default().push((*mapped, axis));
-        }
-
-        let mut local_by_map: Vec<_> = local_by_map.into_iter().collect();
-        local_by_map.sort_by_key(|(map, _)| *map);
-        for (family_ordinal, (map, mut occurrences)) in local_by_map.into_iter().enumerate() {
-            occurrences.sort_by_key(|(mapped, _)| *mapped);
-            used_maps.insert(map);
-            let Some(&source_rep) = map_to_source.get(&map) else {
-                return false;
-            };
-            let Some(&source_origin) = map_to_origin.get(&map) else {
-                return false;
-            };
-            let Some(&source_idx) = index.get(&source_rep) else {
-                return false;
-            };
-            let Some((source_items, _)) = representation_items_and_context(&entities[source_idx])
-            else {
-                return false;
-            };
-            let source_solids: Vec<u64> = source_items
-                .iter()
-                .copied()
-                .filter(|id| {
-                    index
-                        .get(id)
-                        .and_then(|idx| simple_record(&entities[*idx]))
-                        .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
-                })
-                .collect();
-            if source_solids.len() != 1 {
-                return false;
-            }
-            let canonical_solid = source_solids[0];
-
-            let first_mapped = occurrences[0].0;
-            let Some(mapped_styles) = styles_by_target.get(&first_mapped) else {
-                return false;
-            };
-            if mapped_styles.len() != 1 || mapped_styles[0].assignments.is_empty() {
-                return false;
-            }
-            let inherited_style = &mapped_styles[0].assignments;
-            for (mapped, _) in &occurrences {
-                let Some(styles) = styles_by_target.get(mapped) else {
-                    return false;
-                };
-                if styles.len() != 1 || styles[0].assignments != *inherited_style {
-                    return false;
-                }
-            }
-
-            if let Some(root_styles) = styles_by_target.get(&canonical_solid) {
-                for style in root_styles {
-                    let Some(&style_idx) = index.get(&style.id) else {
-                        return false;
-                    };
-                    if !set_styled_item_assignments(&mut entities[style_idx], &inherited_style) {
-                        return false;
-                    }
-                }
-            } else {
-                let styled = push_simple(
-                    entities,
-                    &mut next_id,
-                    "STYLED_ITEM",
-                    vec![
-                        Parameter::String("NONE".to_string()),
-                        Parameter::List(inherited_style.iter().copied().map(entity_ref).collect()),
-                        entity_ref(canonical_solid),
-                    ],
-                );
-                new_style_ids.push(styled);
-            }
-
-            let child_pd = push_child_product(
-                entities,
-                &mut next_id,
-                &format!("step-redox repeated solid {rep_ordinal}-{family_ordinal}"),
-                product_context,
-                pd_context,
-                source_rep,
-            );
-
-            for (occurrence_ordinal, (_, axis)) in occurrences.iter().enumerate() {
-                push_assembly_occurrence(
-                    entities,
-                    &mut next_id,
-                    parent_pd,
-                    child_pd,
-                    source_rep,
-                    root_rep,
-                    source_origin,
-                    *axis,
-                    &format!("instance-{rep_ordinal}-{family_ordinal}-{occurrence_ordinal}"),
-                );
-            }
-        }
+        (root_origin, residual_origin)
     }
 
-    // Remove the intermediate occurrence styles from presentation roots and
-    // register any new inherited child styles.
+    fn emit_residual_child(
+        &mut self,
+        rep_ordinal: usize,
+        top_rep: u64,
+        residual_origin: u64,
+        root_origin: u64,
+        context: AssemblyEmissionContext,
+    ) {
+        let residual_pd = push_child_product(
+            self.entities,
+            &mut self.next_id,
+            &format!("step-redox residual {rep_ordinal}"),
+            context.product_context,
+            context.pd_context,
+            top_rep,
+        );
+        push_assembly_occurrence(
+            self.entities,
+            &mut self.next_id,
+            context.parent_pd,
+            residual_pd,
+            top_rep,
+            context.root_rep,
+            residual_origin,
+            root_origin,
+            &format!("residual-{rep_ordinal}"),
+        );
+    }
+
+    fn emit_family(
+        &mut self,
+        rep_ordinal: usize,
+        family_ordinal: usize,
+        context: AssemblyEmissionContext,
+        family: &AssemblyFamilyPlan,
+    ) -> bool {
+        for style_index in family.canonical_style_indices.iter().copied() {
+            if !set_styled_item_assignments(
+                &mut self.entities[style_index],
+                &family.inherited_style,
+            ) {
+                return false;
+            }
+        }
+        if family.canonical_style_indices.is_empty() {
+            let styled = push_simple(
+                self.entities,
+                &mut self.next_id,
+                "STYLED_ITEM",
+                vec![
+                    Parameter::String("NONE".to_string()),
+                    Parameter::List(
+                        family
+                            .inherited_style
+                            .iter()
+                            .copied()
+                            .map(entity_ref)
+                            .collect(),
+                    ),
+                    entity_ref(family.canonical_solid),
+                ],
+            );
+            self.new_style_ids.push(styled);
+        }
+
+        let child_pd = push_child_product(
+            self.entities,
+            &mut self.next_id,
+            &format!("step-redox repeated solid {rep_ordinal}-{family_ordinal}"),
+            context.product_context,
+            context.pd_context,
+            family.source_rep,
+        );
+        for (occurrence_ordinal, (_, axis)) in family.occurrences.iter().enumerate() {
+            push_assembly_occurrence(
+                self.entities,
+                &mut self.next_id,
+                context.parent_pd,
+                child_pd,
+                family.source_rep,
+                context.root_rep,
+                family.source_origin,
+                *axis,
+                &format!("instance-{rep_ordinal}-{family_ordinal}-{occurrence_ordinal}"),
+            );
+        }
+        true
+    }
+}
+
+fn convert_z90_mapped_items_to_assembly(entities: &mut Vec<EntityInstance>) -> bool {
+    let Some(plan) = AssemblyPlan::discover(entities) else {
+        return false;
+    };
+    let AssemblyPlan {
+        tops,
+        mapped_style_ids,
+        mapped_ids,
+        used_maps,
+    } = plan;
+
+    let new_style_ids = {
+        let mut emitter = AssemblyEmitter::new(entities);
+        for (rep_ordinal, top) in tops.into_iter().enumerate() {
+            if !emitter.emit_top(rep_ordinal, top) {
+                return false;
+            }
+        }
+        emitter.new_style_ids
+    };
+
     patch_presentation_lists(entities, &mapped_style_ids, &new_style_ids);
 
     let mut delete = mapped_style_ids;
