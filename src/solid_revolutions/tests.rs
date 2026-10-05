@@ -1,5 +1,23 @@
 use super::*;
 
+fn test_linear_profile_segment(
+    face_index: usize,
+    face: &FaceInfo,
+    context: &TopologyContext<'_>,
+    source_tolerance_mm: f64,
+) -> Option<(Segment2, f64)> {
+    linear_profile_segment(
+        face_index,
+        face,
+        ProfileSegmentContext::without_angular_trims(
+            context,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            source_tolerance_mm,
+        ),
+    )
+}
+
 fn profile_has_line(curves: &[RecoveredProfileCurve], first: [f64; 2], second: [f64; 2]) -> bool {
     curves.iter().any(|curve| {
         let RecoveredProfileCurve::Line {
@@ -208,19 +226,9 @@ fn plane_profile_accepts_bounded_noisy_circle_vertices() -> anyhow::Result<()> {
         entities: &entities,
         index: &index,
     };
-    let (segment, residual) = plane_profile_segment(
-        0,
-        &noisy,
-        match noisy.surface {
-            SurfaceSupport::Plane(plane) => plane,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )
-    .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
+    let (segment, residual) =
+        test_linear_profile_segment(0, &noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
     assert_eq!(segment.a, [0.0, 0.0]);
     assert_eq!(segment.b, [1.0, 0.0]);
     assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -235,19 +243,8 @@ fn plane_profile_accepts_bounded_noisy_circle_vertices() -> anyhow::Result<()> {
         index: &index,
     };
     assert!(
-        plane_profile_segment(
-            0,
-            &too_noisy,
-            match too_noisy.surface {
-                SurfaceSupport::Plane(plane) => plane,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )
-        .is_none()
+        test_linear_profile_segment(0, &too_noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .is_none()
     );
     Ok(())
 }
@@ -286,19 +283,9 @@ fn plane_profile_detects_axis_crossing_inside_radial_edge() -> anyhow::Result<()
         entities: &entities,
         index: &index,
     };
-    let (segment, _) = plane_profile_segment(
-        0,
-        &crossing,
-        match crossing.surface {
-            SurfaceSupport::Plane(plane) => plane,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )
-    .ok_or_else(|| anyhow::anyhow!("axis-crossing radial edge should prove a disk"))?;
+    let (segment, _) =
+        test_linear_profile_segment(0, &crossing, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .ok_or_else(|| anyhow::anyhow!("axis-crossing radial edge should prove a disk"))?;
     assert_eq!(segment.a, [0.0, 0.0]);
     assert_eq!(segment.b, [1.0, 0.0]);
 
@@ -312,19 +299,8 @@ fn plane_profile_detects_axis_crossing_inside_radial_edge() -> anyhow::Result<()
         index: &index,
     };
     assert!(
-        plane_profile_segment(
-            0,
-            &one_sided,
-            match one_sided.surface {
-                SurfaceSupport::Plane(plane) => plane,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )
-        .is_none()
+        test_linear_profile_segment(0, &one_sided, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .is_none()
     );
     Ok(())
 }
@@ -371,19 +347,9 @@ fn cylinder_profile_accepts_bounded_noisy_trim_vertices() -> anyhow::Result<()> 
         entities: &empty_entities,
         index: &empty_index,
     };
-    let (segment, residual) = cylinder_profile_segment(
-        0,
-        &noisy,
-        match noisy.surface {
-            SurfaceSupport::Cylinder(cylinder) => cylinder,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )
-    .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
+    let (segment, residual) =
+        test_linear_profile_segment(0, &noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
     assert_eq!(segment.a, [1.0, 0.0]);
     assert_eq!(segment.b, [1.0, 1.0]);
     assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -397,19 +363,8 @@ fn cylinder_profile_accepts_bounded_noisy_trim_vertices() -> anyhow::Result<()> 
         index: &empty_index,
     };
     assert!(
-        cylinder_profile_segment(
-            0,
-            &too_noisy,
-            match too_noisy.surface {
-                SurfaceSupport::Cylinder(cylinder) => cylinder,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )
-        .is_none()
+        test_linear_profile_segment(0, &too_noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .is_none()
     );
     Ok(())
 }
@@ -454,19 +409,9 @@ fn cone_profile_accepts_proven_apex_and_bounded_source_noise() -> anyhow::Result
         entities: &empty_entities,
         index: &empty_index,
     };
-    let (segment, residual) = cone_profile_segment(
-        0,
-        &apex_face,
-        match apex_face.surface {
-            SurfaceSupport::Cone(cone) => cone,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )
-    .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
+    let (segment, residual) =
+        test_linear_profile_segment(0, &apex_face, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
     assert_eq!(segment.a, [0.0, 0.0]);
     assert_eq!(segment.b, [1.0, 1.0]);
     assert!(residual <= 1.0e-12);
@@ -515,19 +460,9 @@ fn cone_profile_accepts_proven_apex_and_bounded_source_noise() -> anyhow::Result
         entities: &empty_entities,
         index: &empty_index,
     };
-    let (segment, residual) = cone_profile_segment(
-        0,
-        &noisy,
-        match noisy.surface {
-            SurfaceSupport::Cone(cone) => cone,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )
-    .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
+    let (segment, residual) =
+        test_linear_profile_segment(0, &noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .ok_or_else(|| anyhow::anyhow!("expected bounded profile segment"))?;
     assert_eq!(segment.a, [1.0, 0.0]);
     assert_eq!(segment.b, [2.0, 1.0]);
     assert!((residual - 0.5 * REVOLUTION_SOURCE_SUPPORT_TOL_MM).abs() <= 1.0e-12);
@@ -541,19 +476,8 @@ fn cone_profile_accepts_proven_apex_and_bounded_source_noise() -> anyhow::Result
         index: &empty_index,
     };
     assert!(
-        cone_profile_segment(
-            0,
-            &too_noisy,
-            match too_noisy.surface {
-                SurfaceSupport::Cone(cone) => cone,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )
-        .is_none()
+        test_linear_profile_segment(0, &too_noisy, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .is_none()
     );
 
     let declared_tolerance_mm = 1.0e-6;
@@ -566,34 +490,16 @@ fn cone_profile_accepts_proven_apex_and_bounded_source_noise() -> anyhow::Result
         index: &empty_index,
     };
     assert!(
-        cone_profile_segment(
+        test_linear_profile_segment(
             0,
             &declared_noisy,
-            match declared_noisy.surface {
-                SurfaceSupport::Cone(cone) => cone,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
             &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+            REVOLUTION_SOURCE_SUPPORT_TOL_MM
         )
         .is_none()
     );
     assert!(
-        cone_profile_segment(
-            0,
-            &declared_noisy,
-            match declared_noisy.surface {
-                SurfaceSupport::Cone(cone) => cone,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            declared_tolerance_mm,
-        )
-        .is_some()
+        test_linear_profile_segment(0, &declared_noisy, &context, declared_tolerance_mm).is_some()
     );
     Ok(())
 }
@@ -665,34 +571,12 @@ fn cone_profile_uses_neighbor_constraint_plus_repeated_trim_circle() -> anyhow::
     };
 
     assert!(
-        cone_profile_segment(
-            0,
-            &cone_face,
-            match cone_face.surface {
-                SurfaceSupport::Cone(cone) => cone,
-                _ => unreachable!(),
-            },
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            &context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )
-        .is_none()
+        test_linear_profile_segment(0, &cone_face, &context, REVOLUTION_SOURCE_SUPPORT_TOL_MM)
+            .is_none()
     );
 
-    let (segment, residual) = cone_profile_segment(
-        0,
-        &cone_face,
-        match cone_face.surface {
-            SurfaceSupport::Cone(cone) => cone,
-            _ => unreachable!(),
-        },
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        &context,
-        1.0e-5,
-    )
-    .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
+    let (segment, residual) = test_linear_profile_segment(0, &cone_face, &context, 1.0e-5)
+        .ok_or_else(|| anyhow::anyhow!("expected recovered test geometry"))?;
 
     // The cylinder constrains radius while preserving the repeated trim-circle
     // axial coordinate; the plane constrains axial position while preserving

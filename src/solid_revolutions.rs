@@ -193,8 +193,27 @@ struct TopologyContext<'a> {
 #[derive(Clone, Copy)]
 struct ProfileSegmentContext<'ctx, 'data> {
     topology: &'ctx TopologyContext<'data>,
+    axis_origin_mm: [f64; 3],
+    axis_direction: [f64; 3],
     source_tolerance_mm: f64,
     angular_trim_faces: Option<&'ctx HashSet<usize>>,
+}
+
+impl<'ctx, 'data> ProfileSegmentContext<'ctx, 'data> {
+    const fn without_angular_trims(
+        topology: &'ctx TopologyContext<'data>,
+        axis_origin_mm: [f64; 3],
+        axis_direction: [f64; 3],
+        source_tolerance_mm: f64,
+    ) -> Self {
+        Self {
+            topology,
+            axis_origin_mm,
+            axis_direction,
+            source_tolerance_mm,
+            angular_trim_faces: None,
+        }
+    }
 }
 
 fn source_tolerance_by_representation_item(
@@ -511,45 +530,14 @@ fn detect_one_solid(
 
     let mut max_residual_mm = 0.0_f64;
     let mut segments = Vec::new();
+    let segment_context = ProfileSegmentContext::without_angular_trims(
+        &context,
+        axis_origin_mm,
+        axis_direction,
+        source_tolerance_mm,
+    );
     for (face_index, face) in faces.iter().enumerate() {
-        let (segment, residual) = match face.surface {
-            SurfaceSupport::Cylinder(cylinder) => cylinder_profile_segment(
-                face_index,
-                face,
-                cylinder,
-                axis_origin_mm,
-                axis_direction,
-                &context,
-                source_tolerance_mm,
-            )?,
-            SurfaceSupport::Cone(cone) => cone_profile_segment(
-                face_index,
-                face,
-                cone,
-                axis_origin_mm,
-                axis_direction,
-                &context,
-                source_tolerance_mm,
-            )?,
-            SurfaceSupport::Revolution(revolution) => revolution_line_profile_segment(
-                face_index,
-                face,
-                revolution,
-                axis_origin_mm,
-                axis_direction,
-                &context,
-            )?,
-            SurfaceSupport::Plane(plane) => plane_profile_segment(
-                face_index,
-                face,
-                plane,
-                axis_origin_mm,
-                axis_direction,
-                &context,
-                source_tolerance_mm,
-            )?,
-            _ => return None,
-        };
+        let (segment, residual) = linear_profile_segment(face_index, face, segment_context)?;
         max_residual_mm = max_residual_mm.max(residual);
         if max_residual_mm > source_tolerance_mm {
             return None;
@@ -845,6 +833,8 @@ fn detect_one_radial_slot(
     let mut base_face_ids = Vec::<u64>::new();
     let segment_context = ProfileSegmentContext {
         topology: &context,
+        axis_origin_mm,
+        axis_direction,
         source_tolerance_mm,
         angular_trim_faces: Some(&angular_trim_faces),
     };
@@ -852,33 +842,7 @@ fn detect_one_radial_slot(
         if excluded_profile_faces.contains(&face_index) {
             continue;
         }
-        let segment_result = match face.surface {
-            SurfaceSupport::Cylinder(cylinder) => cylinder_profile_segment_with_angular_trims(
-                face_index,
-                face,
-                cylinder,
-                axis_origin_mm,
-                axis_direction,
-                segment_context,
-            ),
-            SurfaceSupport::Cone(cone) => cone_profile_segment_with_angular_trims(
-                face_index,
-                face,
-                cone,
-                axis_origin_mm,
-                axis_direction,
-                segment_context,
-            ),
-            SurfaceSupport::Plane(plane) => plane_profile_segment_with_angular_trims(
-                face_index,
-                face,
-                plane,
-                axis_origin_mm,
-                axis_direction,
-                segment_context,
-            ),
-            _ => return None,
-        };
+        let segment_result = linear_profile_segment(face_index, face, segment_context);
         let Some((segment, residual)) = segment_result else {
             #[cfg(test)]
             eprintln!(
@@ -1368,15 +1332,14 @@ fn detect_hemispherical_end(
         return None;
     }
 
-    let (plane_segment, plane_residual) = plane_profile_segment(
-        plane_index,
-        plane_face,
-        plane,
+    let segment_context = ProfileSegmentContext::without_angular_trims(
+        context,
         axis_origin_mm,
         axis_direction,
-        context,
         REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-    )?;
+    );
+    let (plane_segment, plane_residual) =
+        linear_profile_segment(plane_index, plane_face, segment_context)?;
     max_residual_mm = max_residual_mm.max(plane_residual);
     let plane_radii = [plane_segment.a[0], plane_segment.b[0]];
     if (plane_segment.a[1] - plane_t).abs() > GEOM_TOL_MM
@@ -1389,19 +1352,11 @@ fn detect_hemispherical_end(
         return None;
     }
 
-    for (face_index, face, cylinder) in [
-        (*cylinder_index_a, *cylinder_face_a, *first_cylinder),
-        (*cylinder_index_b, *cylinder_face_b, *cylinder_b),
+    for (face_index, face) in [
+        (*cylinder_index_a, *cylinder_face_a),
+        (*cylinder_index_b, *cylinder_face_b),
     ] {
-        let (segment, residual) = cylinder_profile_segment(
-            face_index,
-            face,
-            cylinder,
-            axis_origin_mm,
-            axis_direction,
-            context,
-            REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-        )?;
+        let (segment, residual) = linear_profile_segment(face_index, face, segment_context)?;
         max_residual_mm = max_residual_mm.max(residual);
         let axial = [segment.a[1], segment.b[1]];
         if (segment.a[0] - radius_mm).abs() > GEOM_TOL_MM
@@ -1602,56 +1557,20 @@ fn detect_mixed_curved_revolution(
     let mut segments = Vec::new();
     let mut torus_faces = Vec::<(usize, brep::TorusSupport)>::new();
     let mut sphere_faces = Vec::<(usize, brep::SphereSupport)>::new();
+    let segment_context = ProfileSegmentContext::without_angular_trims(
+        context,
+        axis_origin_mm,
+        axis_direction,
+        REVOLUTION_SOURCE_SUPPORT_TOL_MM,
+    );
     for (face_index, face) in faces.iter().enumerate() {
         match face.surface {
-            SurfaceSupport::Cylinder(cylinder) => {
-                let (segment, residual) = cylinder_profile_segment(
-                    face_index,
-                    face,
-                    cylinder,
-                    axis_origin_mm,
-                    axis_direction,
-                    context,
-                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-                )?;
-                max_residual_mm = max_residual_mm.max(residual);
-                push_unique_segment(&mut segments, segment);
-            }
-            SurfaceSupport::Cone(cone) => {
-                let (segment, residual) = cone_profile_segment(
-                    face_index,
-                    face,
-                    cone,
-                    axis_origin_mm,
-                    axis_direction,
-                    context,
-                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-                )?;
-                max_residual_mm = max_residual_mm.max(residual);
-                push_unique_segment(&mut segments, segment);
-            }
-            SurfaceSupport::Revolution(revolution) => {
-                let (segment, residual) = revolution_line_profile_segment(
-                    face_index,
-                    face,
-                    revolution,
-                    axis_origin_mm,
-                    axis_direction,
-                    context,
-                )?;
-                max_residual_mm = max_residual_mm.max(residual);
-                push_unique_segment(&mut segments, segment);
-            }
-            SurfaceSupport::Plane(plane) => {
-                let (segment, residual) = plane_profile_segment(
-                    face_index,
-                    face,
-                    plane,
-                    axis_origin_mm,
-                    axis_direction,
-                    context,
-                    REVOLUTION_SOURCE_SUPPORT_TOL_MM,
-                )?;
+            SurfaceSupport::Cylinder(_)
+            | SurfaceSupport::Cone(_)
+            | SurfaceSupport::Revolution(_)
+            | SurfaceSupport::Plane(_) => {
+                let (segment, residual) =
+                    linear_profile_segment(face_index, face, segment_context)?;
                 max_residual_mm = max_residual_mm.max(residual);
                 push_unique_segment(&mut segments, segment);
             }
@@ -2186,39 +2105,38 @@ fn push_unique_point(points: &mut Vec<[f64; 2]>, candidate: [f64; 2]) {
     }
 }
 
-fn cylinder_profile_segment(
+fn linear_profile_segment(
     face_index: usize,
     face: &FaceInfo,
-    cylinder: brep::CylinderSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
-    context: &TopologyContext<'_>,
-    source_tolerance_mm: f64,
+    segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
-    cylinder_profile_segment_with_angular_trims(
-        face_index,
-        face,
-        cylinder,
-        axis_origin,
-        axis,
-        ProfileSegmentContext {
-            topology: context,
-            source_tolerance_mm,
-            angular_trim_faces: None,
-        },
-    )
+    match face.surface {
+        SurfaceSupport::Cylinder(cylinder) => {
+            cylinder_profile_segment_with_angular_trims(face_index, face, cylinder, segment_context)
+        }
+        SurfaceSupport::Cone(cone) => {
+            cone_profile_segment_with_angular_trims(face_index, face, cone, segment_context)
+        }
+        SurfaceSupport::Revolution(revolution) => {
+            revolution_line_profile_segment(face_index, face, revolution, segment_context)
+        }
+        SurfaceSupport::Plane(plane) => {
+            plane_profile_segment_with_angular_trims(face_index, face, plane, segment_context)
+        }
+        _ => None,
+    }
 }
 
 fn cylinder_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,
     cylinder: brep::CylinderSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
     segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
     let ProfileSegmentContext {
         topology: context,
+        axis_origin_mm: axis_origin,
+        axis_direction: axis,
         source_tolerance_mm,
         angular_trim_faces,
     } = segment_context;
@@ -2358,59 +2276,26 @@ fn push_unique_scalar(values: &mut Vec<f64>, candidate: f64) {
     }
 }
 
-fn cone_profile_segment(
-    face_index: usize,
-    face: &FaceInfo,
-    cone: brep::ConeSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
-    context: &TopologyContext<'_>,
-    source_tolerance_mm: f64,
-) -> Option<(Segment2, f64)> {
-    cone_profile_segment_with_angular_trims(
-        face_index,
-        face,
-        cone,
-        axis_origin,
-        axis,
-        ProfileSegmentContext {
-            topology: context,
-            source_tolerance_mm,
-            angular_trim_faces: None,
-        },
-    )
-}
-
 fn cone_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,
     cone: brep::ConeSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
     segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
-    cone_profile_segment_with_angular_trims_inner(
-        face_index,
-        face,
-        cone,
-        axis_origin,
-        axis,
-        segment_context,
-        true,
-    )
+    cone_profile_segment_with_angular_trims_inner(face_index, face, cone, segment_context, true)
 }
 
 fn cone_profile_segment_with_angular_trims_inner(
     face_index: usize,
     face: &FaceInfo,
     cone: brep::ConeSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
     segment_context: ProfileSegmentContext<'_, '_>,
     allow_sibling_fallback: bool,
 ) -> Option<(Segment2, f64)> {
     let ProfileSegmentContext {
         topology: context,
+        axis_origin_mm: axis_origin,
+        axis_direction: axis,
         source_tolerance_mm,
         angular_trim_faces,
     } = segment_context;
@@ -2631,8 +2516,6 @@ fn cone_profile_segment_with_angular_trims_inner(
                             sibling_index,
                             sibling_face,
                             sibling_cone,
-                            axis_origin,
-                            axis,
                             segment_context,
                             false,
                         )
@@ -2767,10 +2650,14 @@ fn revolution_line_profile_segment(
     face_index: usize,
     face: &FaceInfo,
     revolution: brep::RevolutionSurfaceSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
-    context: &TopologyContext<'_>,
+    segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
+    let ProfileSegmentContext {
+        topology: context,
+        axis_origin_mm: axis_origin,
+        axis_direction: axis,
+        ..
+    } = segment_context;
     if face.loops.len() != 1 {
         return None;
     }
@@ -2932,39 +2819,16 @@ fn linear_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
     Some(linear_signed_radius_at(support, axial)?.abs())
 }
 
-fn plane_profile_segment(
-    face_index: usize,
-    face: &FaceInfo,
-    plane: brep::PlaneSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
-    context: &TopologyContext<'_>,
-    source_tolerance_mm: f64,
-) -> Option<(Segment2, f64)> {
-    plane_profile_segment_with_angular_trims(
-        face_index,
-        face,
-        plane,
-        axis_origin,
-        axis,
-        ProfileSegmentContext {
-            topology: context,
-            source_tolerance_mm,
-            angular_trim_faces: None,
-        },
-    )
-}
-
 fn plane_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,
     plane: brep::PlaneSupport,
-    axis_origin: [f64; 3],
-    axis: [f64; 3],
     segment_context: ProfileSegmentContext<'_, '_>,
 ) -> Option<(Segment2, f64)> {
     let ProfileSegmentContext {
         topology: context,
+        axis_origin_mm: axis_origin,
+        axis_direction: axis,
         source_tolerance_mm,
         angular_trim_faces,
     } = segment_context;
@@ -3093,13 +2957,7 @@ fn plane_profile_segment_with_angular_trims(
                                     neighbor,
                                     neighbor_face,
                                     cone,
-                                    axis_origin,
-                                    axis,
-                                    ProfileSegmentContext {
-                                        topology: context,
-                                        source_tolerance_mm,
-                                        angular_trim_faces,
-                                    },
+                                    segment_context,
                                 )?;
                             source_support_residual =
                                 source_support_residual.max(cone_source_residual);
