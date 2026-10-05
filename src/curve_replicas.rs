@@ -1,8 +1,6 @@
-use crate::instances::{
-    build_index, cartesian_point, entity_id, entity_ref, entity_ref_map, entity_ref_value,
-    inbound_map, push_simple,
-};
+use crate::instances::{cartesian_point, entity_ref, entity_ref_map, inbound_map, push_simple};
 use crate::math3::{add, distance, norm, sub};
+use crate::step_graph::{build_index, entity_id, entity_ref_value};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
@@ -341,6 +339,7 @@ fn rewrite_param(param: &mut Parameter, alias: &HashMap<u64, u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::step_graph::simple_record;
 
     fn point(id: u64, xyz: [f64; 3]) -> EntityInstance {
         EntityInstance::Simple {
@@ -381,7 +380,7 @@ mod tests {
             .get(&curve_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing curve replica #{curve_id}"))?;
-        let record = crate::instances::simple_record(&entities[curve_index])
+        let record = simple_record(&entities[curve_index])
             .ok_or_else(|| anyhow::anyhow!("curve replica #{curve_id} is not a simple record"))?;
         assert_eq!(record.name, "CURVE_REPLICA");
         let Parameter::List(params) = &record.parameter else {
@@ -393,7 +392,7 @@ mod tests {
             .get(&transform_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing transform #{transform_id}"))?;
-        let transform = crate::instances::simple_record(&entities[transform_index])
+        let transform = simple_record(&entities[transform_index])
             .ok_or_else(|| anyhow::anyhow!("transform #{transform_id} is not a simple record"))?;
         assert_eq!(transform.name, "CARTESIAN_TRANSFORMATION_OPERATOR_3D");
         let Parameter::List(tparams) = &transform.parameter else {

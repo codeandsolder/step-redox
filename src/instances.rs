@@ -1,3 +1,6 @@
+use crate::step_graph::{
+    build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record, SubSuperRecord};
 use std::collections::{HashMap, HashSet};
 
@@ -2307,13 +2310,6 @@ pub fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     entity_ref_value(params.get(idx)?)
 }
 
-pub const fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
 pub fn closure_from(
     root: u64,
     entities: &[EntityInstance],
@@ -2438,30 +2434,8 @@ pub fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, HashSet<u64>> 
     inbound
 }
 
-pub fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(idx, entity)| (entity_id(entity), idx))
-        .collect()
-}
-
 pub fn current_index_of(entities: &[EntityInstance], id: u64) -> Option<usize> {
     entities.iter().position(|entity| entity_id(entity) == id)
-}
-
-pub const fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-pub const fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
 }
 
 pub fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64; 3]) -> u64 {
@@ -2496,12 +2470,6 @@ pub fn push_simple(
 
 pub const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
-}
-
-pub const fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
 }
 
 pub fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {

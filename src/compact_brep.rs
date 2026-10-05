@@ -1,5 +1,5 @@
 use crate::brep::{self, BSplineSupport, CurveSupport, FaceLoop, SurfaceSupport};
-use crate::instances::build_index;
+use crate::step_graph::{build_index, simple_record};
 use crate::surface_recovery::{self, BSplineSurfaceSupport};
 use anyhow::{Context, Result, bail};
 use ruststep::ast::EntityInstance;
@@ -2416,7 +2416,7 @@ impl<'a> Builder<'a> {
             let source_kind = self
                 .index
                 .get(&source_entity_id)
-                .and_then(|&idx| crate::instances::simple_record(&self.entities[idx]))
+                .and_then(|&idx| simple_record(&self.entities[idx]))
                 .map(|record| record.name.as_str());
             compact_surface(source_entity_id, source_kind, &support)
         };

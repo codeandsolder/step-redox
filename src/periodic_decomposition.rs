@@ -62,7 +62,7 @@ pub fn decompose_periodic_chain(
         return None;
     }
 
-    let index = crate::instances::build_index(entities);
+    let index = crate::step_graph::build_index(entities);
     let site_signatures = chain
         .site_face_ids
         .iter()

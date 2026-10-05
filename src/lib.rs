@@ -257,7 +257,7 @@ pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<Compact
     }
 
     for section in &exchange.data {
-        let index = instances::build_index(&section.entities);
+        let index = step_graph::build_index(&section.entities);
         if !index.contains_key(&solid_id) {
             continue;
         }

@@ -171,8 +171,8 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
                     .entities
                     .iter()
                     .any(|entity| {
-                        crate::instances::entity_id(entity) == solid.solid_id
-                            && crate::instances::simple_record(entity)
+                        crate::step_graph::entity_id(entity) == solid.solid_id
+                            && crate::step_graph::simple_record(entity)
                                 .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
                     })
                     .then_some(section.entities.as_slice())
@@ -229,16 +229,16 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 }
 
 fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
-    let index = crate::instances::build_index(entities);
+    let index = crate::step_graph::build_index(entities);
     let mut out = Vec::new();
     for entity in entities {
-        let Some(record) = crate::instances::simple_record(entity) else {
+        let Some(record) = crate::step_graph::simple_record(entity) else {
             continue;
         };
         if record.name != "MANIFOLD_SOLID_BREP" {
             continue;
         }
-        let solid_id = crate::instances::entity_id(entity);
+        let solid_id = crate::step_graph::entity_id(entity);
         let closure = crate::instances::semantic_solid_closure(solid_id, entities, &index)
             .unwrap_or_else(|| crate::instances::closure_from(solid_id, entities, &index));
         let mut faces = 0usize;
@@ -247,7 +247,7 @@ fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
             let Some(&entity_index) = index.get(id) else {
                 continue;
             };
-            let Some(child) = crate::instances::simple_record(&entities[entity_index]) else {
+            let Some(child) = crate::step_graph::simple_record(&entities[entity_index]) else {
                 continue;
             };
             match child.name.as_str() {

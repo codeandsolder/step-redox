@@ -3,10 +3,11 @@ use crate::brep::{
     matching_plane_bound, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{
-    build_index, cartesian_point, collect_styles_by_target, entity_id, entity_ref, entity_ref_map,
-    entity_ref_value, face_topology_signature, inbound_map, number, patch_presentation_lists,
-    push_point, push_simple, representation_items_and_context, simple_record, visit_entity_refs,
+    cartesian_point, collect_styles_by_target, entity_ref, entity_ref_map, face_topology_signature,
+    inbound_map, number, patch_presentation_lists, push_point, push_simple,
+    representation_items_and_context, visit_entity_refs,
 };
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
 

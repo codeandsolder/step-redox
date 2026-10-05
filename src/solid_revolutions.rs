@@ -1,8 +1,7 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
-use crate::instances::{
-    build_index, entity_id, entity_ref_value, representation_items_and_context, simple_record,
-};
+use crate::instances::representation_items_and_context;
 use crate::profile_curves::RecoveredProfileCurve;
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};

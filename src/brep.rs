@@ -1,8 +1,8 @@
 use crate::instances::{
-    cartesian_point, entity_ref, entity_ref_value, manifold_solid_face_ids, number,
-    resolve_edge_curve_use, simple_record, simple_record_mut,
+    cartesian_point, entity_ref, manifold_solid_face_ids, number, resolve_edge_curve_use,
 };
 use crate::math3::{dot, mul, sub};
+use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
 use serde::Serialize;
@@ -1188,7 +1188,7 @@ pub fn toggle_tf(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::entity_id;
+    use crate::step_graph::entity_id;
 
     fn wrapped(data: &str) -> String {
         format!(

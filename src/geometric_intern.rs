@@ -1,8 +1,6 @@
-use crate::instances::{
-    build_index, cartesian_point, entity_id, entity_ref_map, entity_ref_value, inbound_map, number,
-    simple_record,
-};
+use crate::instances::{cartesian_point, entity_ref_map, inbound_map, number};
 use crate::math3::{dot, mul, norm, sub};
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Name, Parameter};
 use std::collections::{HashMap, HashSet};
 

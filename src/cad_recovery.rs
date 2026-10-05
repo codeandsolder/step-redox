@@ -132,7 +132,7 @@ pub fn recover_periodic_chain_surface_decomposition_fragment(
     let decomposition = decompose_periodic_chain(chain, entities)
         .ok_or_else(|| anyhow!("periodic chain does not have a complete exact decomposition"))?;
 
-    let index = crate::instances::build_index(entities);
+    let index = crate::step_graph::build_index(entities);
     let mut source_faces = crate::brep::solid_face_ids(chain.solid_id, entities, &index)
         .ok_or_else(|| anyhow!("periodic solid has no readable closed-shell face set"))?;
     source_faces.sort_unstable();

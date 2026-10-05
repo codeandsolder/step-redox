@@ -2,9 +2,9 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
-use crate::instances::{build_index, entity_id, simple_record};
 use crate::math3::{add, cross, distance, dot, mul, norm, sub};
 pub use crate::profile_curves::RecoveredProfileCurve;
+use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};

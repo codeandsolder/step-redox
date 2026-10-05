@@ -1,4 +1,4 @@
-use crate::{instances, units};
+use crate::{instances, step_graph, units};
 use anyhow::{Context, Result, bail};
 use encoding_rs::GBK;
 use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter, Record};
@@ -130,7 +130,7 @@ fn parse_exchange(path: &Path) -> Result<ruststep::ast::Exchange> {
 fn representation_ownership(entities: &[EntityInstance]) -> HashMap<u64, (u64, u64)> {
     let mut owners = HashMap::new();
     for entity in entities {
-        let Some(record) = instances::simple_record(entity) else {
+        let Some(record) = step_graph::simple_record(entity) else {
             continue;
         };
         if record.name != "ADVANCED_BREP_SHAPE_REPRESENTATION"
@@ -141,7 +141,7 @@ fn representation_ownership(entities: &[EntityInstance]) -> HashMap<u64, (u64, u
         let Some((items, context_id)) = instances::representation_items_and_context(entity) else {
             continue;
         };
-        let representation_id = instances::entity_id(entity);
+        let representation_id = step_graph::entity_id(entity);
         for item in items {
             owners
                 .entry(item)
@@ -156,7 +156,7 @@ fn shape_definition_root_for_representation(
     entities: &[EntityInstance],
 ) -> Option<(u64, u64)> {
     entities.iter().find_map(|entity| {
-        let record = instances::simple_record(entity)?;
+        let record = step_graph::simple_record(entity)?;
         if record.name != "SHAPE_DEFINITION_REPRESENTATION" {
             return None;
         }
@@ -166,9 +166,9 @@ fn shape_definition_root_for_representation(
         let [definition, representation] = params.as_slice() else {
             return None;
         };
-        (instances::entity_ref_value(representation)? == representation_id).then_some((
-            instances::entity_id(entity),
-            instances::entity_ref_value(definition)?,
+        (step_graph::entity_ref_value(representation)? == representation_id).then_some((
+            step_graph::entity_id(entity),
+            step_graph::entity_ref_value(definition)?,
         ))
     })
 }
@@ -197,7 +197,7 @@ fn representation_length_scale_mm(
     };
     let mut scales = units
         .iter()
-        .filter_map(instances::entity_ref_value)
+        .filter_map(step_graph::entity_ref_value)
         .filter_map(|unit_id| units::length_unit_scale_mm(unit_id, entities, index));
     let scale = scales.next()?;
     scales.next().is_none().then_some(scale)
@@ -230,7 +230,7 @@ fn solid_basic_stats(
         let Some(&entity_index) = index.get(&id) else {
             continue;
         };
-        let Some(record) = instances::simple_record(&entities[entity_index]) else {
+        let Some(record) = step_graph::simple_record(&entities[entity_index]) else {
             continue;
         };
         match record.name.as_str() {
@@ -253,18 +253,18 @@ fn scan(path: &Path) -> Result<ScanReport> {
     let mut solids_without_shape_representation = 0usize;
 
     for (data_section, section) in exchange.data.iter().enumerate() {
-        let index = instances::build_index(&section.entities);
+        let index = step_graph::build_index(&section.entities);
         let ownership = representation_ownership(&section.entities);
         let mut unit_scale_cache = HashMap::<u64, Option<f64>>::new();
         for entity in &section.entities {
-            let Some(record) = instances::simple_record(entity) else {
+            let Some(record) = step_graph::simple_record(entity) else {
                 continue;
             };
             if record.name != "MANIFOLD_SOLID_BREP" {
                 continue;
             }
             manifold_solids += 1;
-            let solid_id = instances::entity_id(entity);
+            let solid_id = step_graph::entity_id(entity);
             let owning = ownership.get(&solid_id).copied();
             let has_shape_representation = owning.is_some();
             solids_without_shape_representation += usize::from(!has_shape_representation);
@@ -354,7 +354,7 @@ fn parse_selection(raw: &str) -> Result<(usize, u64, String)> {
 }
 
 fn set_shell_faces(entity: &mut EntityInstance, face_ids: &[u64]) -> Result<()> {
-    let record = instances::simple_record_mut(entity).context("shell is complex")?;
+    let record = step_graph::simple_record_mut(entity).context("shell is complex")?;
     if record.name != "CLOSED_SHELL" {
         bail!("expected CLOSED_SHELL, got {}", record.name);
     }
@@ -375,7 +375,7 @@ fn set_shell_faces(entity: &mut EntityInstance, face_ids: &[u64]) -> Result<()> 
 }
 
 fn set_representation_single_item(entity: &mut EntityInstance, solid_id: u64) -> Result<()> {
-    let record = instances::simple_record_mut(entity).context("representation is complex")?;
+    let record = step_graph::simple_record_mut(entity).context("representation is complex")?;
     let Parameter::List(params) = &mut record.parameter else {
         bail!("representation parameters are not a list");
     };
@@ -402,7 +402,7 @@ fn extract_one(
     let &solid_index = index
         .get(&solid_id)
         .with_context(|| format!("missing solid #{solid_id}"))?;
-    let record = instances::simple_record(&section.entities[solid_index])
+    let record = step_graph::simple_record(&section.entities[solid_index])
         .with_context(|| format!("solid #{solid_id} is complex"))?;
     if record.name != "MANIFOLD_SOLID_BREP" {
         bail!("#{solid_id} is {}, not MANIFOLD_SOLID_BREP", record.name);
@@ -438,7 +438,7 @@ fn extract_one(
 
     let mut entities = Vec::with_capacity(keep.len());
     for entity in &section.entities {
-        let id = instances::entity_id(entity);
+        let id = step_graph::entity_id(entity);
         if !keep.contains(&id) {
             continue;
         }
@@ -496,7 +496,7 @@ fn extract(path: &Path, out_dir: &Path, selections: &[String]) -> Result<()> {
     let mut indexes = Vec::with_capacity(exchange.data.len());
     let mut ownership = Vec::with_capacity(exchange.data.len());
     for section in &exchange.data {
-        indexes.push(instances::build_index(&section.entities));
+        indexes.push(step_graph::build_index(&section.entities));
         ownership.push(representation_ownership(&section.entities));
     }
 

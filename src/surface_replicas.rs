@@ -1,8 +1,8 @@
 use crate::instances::{
-    build_index, cartesian_point, closure_from, entity_id, entity_ref, entity_ref_map,
-    entity_ref_value, inbound_map, number, push_simple, simple_record,
+    cartesian_point, closure_from, entity_ref, entity_ref_map, inbound_map, number, push_simple,
 };
 use crate::math3::{distance, norm, sub};
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
