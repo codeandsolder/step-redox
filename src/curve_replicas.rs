@@ -22,12 +22,17 @@ pub struct CurveReplicaStats {
     pub max_residual_mm: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CurvePole {
+    id: u64,
+    xyz: [f64; 3],
+}
+
 #[derive(Debug, Clone)]
 struct CurveInfo {
     id: u64,
     name: Parameter,
-    points: Vec<u64>,
-    xyz: Vec<[f64; 3]>,
+    poles: Vec<CurvePole>,
 }
 
 /// Factor 3-D `B_SPLINE_CURVE_WITH_KNOTS` entities that differ only by one
@@ -87,20 +92,20 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
         let mut accepted = 1usize;
 
         for target in group.into_iter().skip(1) {
-            if target.xyz.len() != canonical.xyz.len() {
+            if target.poles.len() != canonical.poles.len() {
                 continue;
             }
-            let delta = sub(target.xyz[0], canonical.xyz[0]);
+            let delta = sub(target.poles[0].xyz, canonical.poles[0].xyz);
             let mut residual = 0.0f64;
-            for (source, target_point) in canonical.xyz.iter().zip(&target.xyz) {
-                residual = residual.max(distance(add(*source, delta), *target_point));
+            for (source, target_point) in canonical.poles.iter().zip(&target.poles) {
+                residual = residual.max(distance(add(source.xyz, delta), target_point.xyz));
             }
             if residual > GEOMETRY_TOLERANCE_MM {
                 continue;
             }
             stats.max_residual_mm = stats.max_residual_mm.max(residual);
             accepted += 1;
-            old_points.extend(target.points.iter().copied());
+            old_points.extend(target.poles.iter().map(|pole| pole.id));
 
             if norm(delta) <= TRANSFORM_TOLERANCE_MM {
                 aliases.insert(target.id, canonical.id);
@@ -234,33 +239,34 @@ fn parse_curve(
     let Parameter::List(point_params) = params.get(2)? else {
         return None;
     };
-    let points: Option<Vec<u64>> = point_params.iter().map(entity_ref_value).collect();
-    let points = points?;
-    if points.len() < 2 {
+    let poles: Option<Vec<CurvePole>> = point_params
+        .iter()
+        .map(|param| {
+            let id = entity_ref_value(param)?;
+            let xyz = cartesian_point(id, entities, index)?;
+            Some(CurvePole { id, xyz })
+        })
+        .collect();
+    let poles = poles?;
+    if poles.len() < 2 {
         return None;
     }
-    let xyz: Option<Vec<[f64; 3]>> = points
-        .iter()
-        .map(|&p| cartesian_point(p, entities, index))
-        .collect();
-    let xyz = xyz?;
     // Geometry class = exact non-pole parameters + relative pole positions
     // quantized to the global 1e-5 mm equivalence floor. Hash structurally and
     // verify equality inside each hash bucket, avoiding a serialized String key.
-    let key_hash = curve_key_hash(params, &xyz);
+    let key_hash = curve_key_hash(params, &poles);
 
     Some((
         key_hash,
         CurveInfo {
             id: *id,
             name: params[0].clone(),
-            points,
-            xyz,
+            poles,
         },
     ))
 }
 
-fn curve_key_hash(params: &[Parameter], xyz: &[[f64; 3]]) -> u64 {
+fn curve_key_hash(params: &[Parameter], poles: &[CurvePole]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for (index, param) in params.iter().enumerate() {
         if index == 0 || index == 2 {
@@ -269,10 +275,10 @@ fn curve_key_hash(params: &[Parameter], xyz: &[[f64; 3]]) -> u64 {
         index.hash(&mut hasher);
         hash_parameter(param, &mut hasher);
     }
-    xyz.len().hash(&mut hasher);
-    let origin = xyz[0];
-    for point in xyz {
-        let relative = sub(*point, origin);
+    poles.len().hash(&mut hasher);
+    let origin = poles[0].xyz;
+    for pole in poles {
+        let relative = sub(pole.xyz, origin);
         [quant(relative[0]), quant(relative[1]), quant(relative[2])].hash(&mut hasher);
     }
     hasher.finish()
@@ -284,7 +290,7 @@ fn curve_keys_equal(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> bool {
-    if left.xyz.len() != right.xyz.len() {
+    if left.poles.len() != right.poles.len() {
         return false;
     }
     let Some(left_params) = curve_params(left.id, entities, index) else {
@@ -305,11 +311,11 @@ fn curve_keys_equal(
         return false;
     }
 
-    let left_origin = left.xyz[0];
-    let right_origin = right.xyz[0];
-    left.xyz.iter().zip(&right.xyz).all(|(left, right)| {
-        let left = sub(*left, left_origin);
-        let right = sub(*right, right_origin);
+    let left_origin = left.poles[0].xyz;
+    let right_origin = right.poles[0].xyz;
+    left.poles.iter().zip(&right.poles).all(|(left, right)| {
+        let left = sub(left.xyz, left_origin);
+        let right = sub(right.xyz, right_origin);
         [quant(left[0]), quant(left[1]), quant(left[2])]
             == [quant(right[0]), quant(right[1]), quant(right[2])]
     })
