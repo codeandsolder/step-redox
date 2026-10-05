@@ -231,7 +231,7 @@ fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
             continue;
         }
         let solid_id = crate::step_graph::entity_id(entity);
-        let closure = crate::instances::semantic_solid_closure(solid_id, entities, &index)
+        let closure = crate::shape_identity::semantic_solid_closure(solid_id, entities, &index)
             .unwrap_or_else(|| crate::step_entities::closure_from(solid_id, entities, &index));
         let mut faces = 0usize;
         let mut edges = 0usize;

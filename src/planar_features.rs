@@ -2,13 +2,12 @@ use crate::brep::{
     append_refs_to_list_param, bound_loop_edges, face_edge_curves, face_loops, face_sense,
     face_surface, manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
-use crate::instances::{
-    StyleRef, collect_styles_by_target, face_topology_signature, oriented_edge_signature,
-};
+use crate::instances::{StyleRef, collect_styles_by_target};
 use crate::math3::{add, distance, sub};
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
 };
+use crate::shape_identity::{face_topology_signature, oriented_edge_signature};
 use crate::step_entities::{
     cartesian_point, entity_ref, patch_presentation_lists, push_point, push_simple,
     representation_items_and_context,

@@ -1,5 +1,5 @@
-use crate::instances::{manifold_solid_face_ids, resolve_edge_curve_use};
 use crate::math3::{dot, mul, sub};
+use crate::shape_identity::{manifold_solid_face_ids, resolve_edge_curve_use};
 use crate::step_entities::{cartesian_point, entity_ref, number};
 use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;

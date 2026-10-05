@@ -1,4 +1,4 @@
-use crate::{instances, step_entities, step_graph, step_io::ParsedExchange, units};
+use crate::{shape_identity, step_entities, step_graph, step_io::ParsedExchange, units};
 use anyhow::{Context, Result, bail};
 use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter, Record};
 use serde::Serialize;
@@ -75,7 +75,7 @@ fn feed_bytes(hashers: &mut [Fnv64; 2], value: &[u8]) {
     }
 }
 
-fn fingerprint(value: &instances::ShapeKey) -> String {
+fn fingerprint(value: &shape_identity::ShapeKey) -> String {
     let mut hashers = [
         Fnv64::seeded(0xcbf29ce484222325),
         Fnv64::seeded(0x84222325cbf29ce4),
@@ -204,7 +204,7 @@ fn solid_basic_stats(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> BasicSolidStats {
-    let closure = instances::semantic_solid_closure(root, entities, index)
+    let closure = shape_identity::semantic_solid_closure(root, entities, index)
         .unwrap_or_else(|| step_entities::closure_from(root, entities, index));
     let mut stats = BasicSolidStats {
         closure_entities: closure.len(),
@@ -261,7 +261,7 @@ fn scan(path: &Path) -> Result<ScanReport> {
                 })
             });
 
-            let canonical = instances::solid_shape_key(solid_id, &section.entities, &index);
+            let canonical = shape_identity::solid_shape_key(solid_id, &section.entities, &index);
             let (
                 geometry_fingerprint,
                 identity_kind,
@@ -397,9 +397,9 @@ fn extract_one(
 
     let shell_id = step_entities::nth_entity_ref(&record.parameter, 1)
         .context("solid has no shell reference")?;
-    let face_ids = instances::manifold_solid_face_ids(solid_id, &section.entities, index)
+    let face_ids = shape_identity::manifold_solid_face_ids(solid_id, &section.entities, index)
         .context("solid has no semantic face list")?;
-    let mut keep = instances::semantic_solid_closure(solid_id, &section.entities, index)
+    let mut keep = shape_identity::semantic_solid_closure(solid_id, &section.entities, index)
         .context("cannot build semantic solid closure")?;
     keep.extend(step_entities::closure_from(
         context_id,

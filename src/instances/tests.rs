@@ -1,4 +1,10 @@
 use super::*;
+use crate::shape_identity::{
+    canonical_axis_offset, canonical_z90_points, centroid, circle_support_signature,
+    cylindrical_surface_signature, manifold_solid_face_ids, semantic_solid_closure,
+    solid_shape_key, support_entity_signature,
+};
+use crate::step_entities::closure_from;
 
 #[test]
 fn auxiliary_shape_representations_are_retargeted_conservatively() {

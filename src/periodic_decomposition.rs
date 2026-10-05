@@ -167,7 +167,7 @@ fn patch_signature(
     origin[axis] = origin_mm;
     let mut signatures = Vec::with_capacity(faces.len());
     for &face in faces {
-        signatures.push(crate::instances::face_topology_signature(
+        signatures.push(crate::shape_identity::face_topology_signature(
             face, entities, index, origin, 0,
         )?);
     }
