@@ -1,3 +1,4 @@
+use crate::math3::{add, cross, dot, norm, scale};
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
@@ -3364,30 +3365,6 @@ fn quantize_coord(point: [f64; 3]) -> [i64; 3] {
         (point[1] / COORD_TOL_MM).round() as i64,
         (point[2] / COORD_TOL_MM).round() as i64,
     ]
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(v: [f64; 3], scalar: f64) -> [f64; 3] {
-    [v[0] * scalar, v[1] * scalar, v[2] * scalar]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {

@@ -1,3 +1,4 @@
+use crate::math3::{cross, norm};
 use serde::Serialize;
 
 use crate::patterns::InstancePattern;
@@ -161,21 +162,9 @@ fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
     axis
 }
 
-fn norm(v: [f64; 3]) -> f64 {
-    v[2].mul_add(v[2], v[1].mul_add(v[1], v[0] * v[0])).sqrt()
-}
-
 fn normalized(v: [f64; 3]) -> Option<[f64; 3]> {
     let n = norm(v);
     (n.is_finite() && n > 1.0e-15).then(|| [v[0] / n, v[1] / n, v[2] / n])
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
 }
 
 #[cfg(test)]

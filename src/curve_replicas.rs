@@ -2,6 +2,7 @@ use crate::instances::{
     build_index, cartesian_point, entity_id, entity_ref, entity_ref_map, entity_ref_value,
     inbound_map, push_simple,
 };
+use crate::math3::{add, distance, norm, sub};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
@@ -307,22 +308,6 @@ fn quant(v: f64) -> i64 {
 
 fn quant_transform(v: f64) -> i64 {
     (v / TRANSFORM_TOLERANCE_MM).round() as i64
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    v[2].mul_add(v[2], v[1].mul_add(v[1], v[0] * v[0])).sqrt()
-}
-
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    norm(sub(a, b))
 }
 
 fn rewrite_refs(entity: &mut EntityInstance, alias: &HashMap<u64, u64>) {

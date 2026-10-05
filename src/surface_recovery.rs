@@ -2,6 +2,7 @@ use crate::instances::{
     build_index, cartesian_point, entity_id, entity_ref, entity_ref_value, number, push_simple,
     simple_record, visit_entity_refs,
 };
+use crate::math3::{cross, distance, dot, norm, sub};
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -879,30 +880,6 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
         return None;
     }
     Some([vector[0] / length, vector[1] / length, vector[2] / length])
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn norm(a: [f64; 3]) -> f64 {
-    a[2].mul_add(a[2], a[1].mul_add(a[1], a[0] * a[0])).sqrt()
-}
-
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    norm(sub(a, b))
 }
 
 #[cfg(test)]

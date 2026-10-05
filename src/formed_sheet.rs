@@ -1,3 +1,4 @@
+use crate::math3::{add, cross, distance, dot, mul, norm, sub};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -1651,38 +1652,6 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
         return None;
     }
     Some([vector[0] / length, vector[1] / length, vector[2] / length])
-}
-
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    norm(sub(a, b))
-}
-
-fn norm(vector: [f64; 3]) -> f64 {
-    dot(vector, vector).sqrt()
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(vector: [f64; 3], scalar: f64) -> [f64; 3] {
-    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
 }
 
 fn quantize_mm(value: f64) -> i64 {

@@ -1,3 +1,4 @@
+use crate::math3::{cross, dot, norm, scale};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -582,26 +583,6 @@ fn canonicalize_axis(axis: &mut [f64; 3]) {
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     norm(cross(a, b)) <= 1.0e-8
-}
-
-fn scale(v: [f64; 3], s: f64) -> [f64; 3] {
-    [v[0] * s, v[1] * s, v[2] * s]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {

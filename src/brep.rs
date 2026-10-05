@@ -2,6 +2,7 @@ use crate::instances::{
     cartesian_point, entity_ref, entity_ref_value, manifold_solid_face_ids, number,
     resolve_edge_curve_use, simple_record, simple_record_mut,
 };
+use crate::math3::{dot, mul, sub};
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
 use serde::Serialize;
@@ -1011,18 +1012,6 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
         return None;
     }
     Some(mul(vector, 1.0 / length))
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f64; 3], scalar: f64) -> [f64; 3] {
-    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
 }
 
 pub fn manifold_shell(

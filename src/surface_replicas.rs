@@ -2,6 +2,7 @@ use crate::instances::{
     build_index, cartesian_point, closure_from, entity_id, entity_ref, entity_ref_map,
     entity_ref_value, inbound_map, number, push_simple, simple_record,
 };
+use crate::math3::{distance, norm, sub};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
@@ -310,20 +311,6 @@ fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64
 
 fn quant_transform(value: f64) -> i64 {
     (value / TRANSFORM_TOLERANCE_MM).round() as i64
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn norm(value: [f64; 3]) -> f64 {
-    value[2]
-        .mul_add(value[2], value[1].mul_add(value[1], value[0] * value[0]))
-        .sqrt()
-}
-
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    norm(sub(a, b))
 }
 
 #[cfg(test)]

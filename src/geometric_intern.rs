@@ -2,6 +2,7 @@ use crate::instances::{
     build_index, cartesian_point, entity_id, entity_ref_map, entity_ref_value, inbound_map, number,
     simple_record,
 };
+use crate::math3::{dot, mul, norm, sub};
 use ruststep::ast::{EntityInstance, Name, Parameter};
 use std::collections::{HashMap, HashSet};
 
@@ -317,10 +318,6 @@ fn point_line_distance(point: [f64; 3], origin: [f64; 3], direction: [f64; 3]) -
     norm(sub(delta, mul(direction, axial)))
 }
 
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
-}
-
 fn axis3(
     id: u64,
     entities: &[EntityInstance],
@@ -377,18 +374,6 @@ fn nth_number(parameter: &Parameter, idx: usize) -> Option<f64> {
 
 fn q(v: f64, tol: f64) -> i64 {
     (v / tol).round() as i64
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
 }
 
 fn unit(v: [f64; 3]) -> Option<[f64; 3]> {

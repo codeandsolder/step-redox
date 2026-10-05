@@ -1,3 +1,4 @@
+use crate::math3::{add, dot, norm, scale, sub};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -555,26 +556,6 @@ fn push_simple(
         },
     });
     id
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(v: [f64; 3], factor: f64) -> [f64; 3] {
-    [v[0] * factor, v[1] * factor, v[2] * factor]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
 }
 
 fn point_line_distance(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {

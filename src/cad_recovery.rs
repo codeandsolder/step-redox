@@ -2,6 +2,7 @@ use crate::cad_ir::{
     Axis3, BooleanOp, BrepFallback, CadModel, CadNode, Curve2d, FusedPeriodicChain, IndexedCount,
     NodeId, PatternSpec, Profile2d, ProfileLoop, ProofStatus, Provenance, RigidTransform,
 };
+use crate::math3::{cross, dot, norm, sub};
 use crate::numeric::exact_usize_to_f64;
 use crate::patterns::InstancePattern;
 use crate::periodic_chains::PeriodicChainPattern;
@@ -1454,10 +1455,6 @@ fn canonicalize_step(step: [f64; 3], span: usize, budget_mm: f64) -> Result<([f6
     Ok((step, 0.0))
 }
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
 fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
     if occupancy.len() != nu.saturating_mul(nv) {
         return false;
@@ -1480,33 +1477,12 @@ fn covers_full_grid(occupancy: &[[i64; 2]], nu: usize, nv: usize) -> bool {
     actual == expected
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[2].mul_add(-b[1], a[1] * b[2]),
-        a[0].mul_add(-b[2], a[2] * b[0]),
-        a[1].mul_add(-b[0], a[0] * b[1]),
-    ]
-}
-
 fn normalize3(vector: [f64; 3]) -> Result<[f64; 3]> {
     let length = norm(vector);
     if !length.is_finite() || length <= 1.0e-12 {
         bail!("cannot normalize zero or non-finite CAD frame vector");
     }
     Ok([vector[0] / length, vector[1] / length, vector[2] / length])
-}
-
-fn norm(vector: [f64; 3]) -> f64 {
-    vector[2]
-        .mul_add(
-            vector[2],
-            vector[1].mul_add(vector[1], vector[0] * vector[0]),
-        )
-        .sqrt()
 }
 
 #[cfg(test)]
