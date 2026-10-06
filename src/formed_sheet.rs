@@ -1,4 +1,7 @@
-use crate::math3::{add, cross, distance, dot, mul, norm, normalize as normalize3, sub};
+use crate::math3::{
+    add, canonical_direction, closest_point_on_unit_line_to_origin, cross, distance, dot, mul,
+    norm, normalize as normalize3, point_to_unit_line_distance, sub,
+};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -345,7 +348,7 @@ fn coaxial_radius_differences(cylinders: &[CylinderFace]) -> Vec<SheetCylinderPa
             if !parallel(a.axis, b.axis) {
                 continue;
             }
-            if axis_line_distance(a.origin, a.axis, b.origin) > GEOM_TOL_MM {
+            if point_to_unit_line_distance(b.origin, a.origin, a.axis) > GEOM_TOL_MM {
                 continue;
             }
             let (inner, outer) = if a.radius_mm <= b.radius_mm {
@@ -357,14 +360,14 @@ fn coaxial_radius_differences(cylinders: &[CylinderFace]) -> Vec<SheetCylinderPa
             if thickness <= GEOM_TOL_MM {
                 continue;
             }
-            let axis = canonical_axis(inner.axis);
+            let axis = canonical_direction(inner.axis);
             out.push(SheetCylinderPair {
                 inner_face_id: inner.face_id,
                 outer_face_id: outer.face_id,
                 inner_radius_mm: inner.radius_mm,
                 outer_radius_mm: outer.radius_mm,
                 mid_radius_mm: (inner.radius_mm + outer.radius_mm) * 0.5,
-                axis_origin_mm: canonical_line_origin(inner.origin, axis),
+                axis_origin_mm: closest_point_on_unit_line_to_origin(inner.origin, axis),
                 axis,
             });
         }
@@ -405,7 +408,7 @@ fn parallel_plane_separations(planes: &[PlaneFace]) -> Vec<f64> {
             if !parallel(a.normal, b.normal) {
                 continue;
             }
-            let normal = canonical_axis(a.normal);
+            let normal = canonical_direction(a.normal);
             let separation = (dot(normal, b.origin) - dot(normal, a.origin)).abs();
             if separation > GEOM_TOL_MM && separation.is_finite() {
                 out.push(separation);
@@ -424,7 +427,7 @@ fn select_plane_pairs(planes: &[PlaneFace], thickness_mm: f64) -> Vec<SheetPlane
             if !parallel(a.normal, b.normal) {
                 continue;
             }
-            let normal = canonical_axis(a.normal);
+            let normal = canonical_direction(a.normal);
             let separation = (dot(normal, b.origin) - dot(normal, a.origin)).abs();
             if (separation - thickness_mm).abs() > GEOM_TOL_MM {
                 continue;
@@ -467,7 +470,7 @@ fn select_plane_pairs(planes: &[PlaneFace], thickness_mm: f64) -> Vec<SheetPlane
             continue;
         }
 
-        let normal = canonical_axis(a.normal);
+        let normal = canonical_direction(a.normal);
         let da = dot(normal, a.origin);
         let db = dot(normal, b.origin);
         let (negative_face_id, positive_face_id, negative_offset, positive_offset) = if da <= db {
@@ -1045,9 +1048,11 @@ fn reference_ellipse_seam(
 
     let samples = rational_single_span_samples(curve_id, entities, index)?;
     for sample in &samples {
-        if (axis_line_distance(first_pair.axis_origin_mm, first_axis, *sample) - first_radius).abs()
+        if (point_to_unit_line_distance(*sample, first_pair.axis_origin_mm, first_axis)
+            - first_radius)
+            .abs()
             > GEOM_TOL_MM * 5.0
-            || (axis_line_distance(second_pair.axis_origin_mm, second_axis, *sample)
+            || (point_to_unit_line_distance(*sample, second_pair.axis_origin_mm, second_axis)
                 - second_radius)
                 .abs()
                 > GEOM_TOL_MM * 5.0
@@ -1624,26 +1629,6 @@ fn direction(
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     (dot(a, b).abs() - 1.0).abs() <= DIR_TOL
-}
-
-fn axis_line_distance(origin: [f64; 3], axis: [f64; 3], other: [f64; 3]) -> f64 {
-    norm(cross(sub(other, origin), axis))
-}
-
-fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
-    for value in axis {
-        if value.abs() > DIR_TOL {
-            if value < 0.0 {
-                axis = [-axis[0], -axis[1], -axis[2]];
-            }
-            break;
-        }
-    }
-    axis
-}
-
-fn canonical_line_origin(origin: [f64; 3], axis: [f64; 3]) -> [f64; 3] {
-    sub(origin, mul(axis, dot(origin, axis)))
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {

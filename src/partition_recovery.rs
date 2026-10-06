@@ -1,4 +1,4 @@
-use crate::math3::{dot, normalize as normalize3};
+use crate::math3::{canonical_direction, canonical_unit_direction, dot, normalize as normalize3};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
     visit_entity_refs,
@@ -710,7 +710,7 @@ fn edge_key(
             let (center, axis) = axis_location_and_axis(placement, entities, index)?;
             Some(EdgeKey::Circle {
                 center: point_key(center)?,
-                axis: direction_key(canonical_axis(axis)?)?,
+                axis: direction_key(canonical_unit_direction(axis, 1.0e-15)?)?,
                 radius: quantize(radius, POINT_Q)?,
                 ends,
             })
@@ -734,7 +734,7 @@ fn plane_key(
     let placement = entity_ref_value(params.get(1)?)?;
     let (point, normal) = axis_location_and_axis(placement, entities, index)?;
     let raw = normalize(normal)?;
-    let canonical = canonical_axis(raw)?;
+    let canonical = canonical_direction(raw);
     Some((
         direction_key(canonical)?,
         quantize(dot(canonical, point), POINT_Q)?,
@@ -1053,19 +1053,6 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(v, 1.0e-15)
 }
 
-fn canonical_axis(v: [f64; 3]) -> Option<[f64; 3]> {
-    let mut v = normalize(v)?;
-    for x in v {
-        if x.abs() > 1.0e-12 {
-            if x < 0.0 {
-                v = v.map(|q| -q);
-            }
-            break;
-        }
-    }
-    Some(v)
-}
-
 fn push_simple(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
@@ -1092,11 +1079,11 @@ mod tests {
     fn canonical_axis_ignores_sign() -> anyhow::Result<()> {
         assert_eq!(
             direction_key(
-                canonical_axis([1.0, 0.0, 0.0])
+                canonical_unit_direction([1.0, 0.0, 0.0], 1.0e-15)
                     .ok_or_else(|| anyhow::anyhow!("expected test value"))?
             ),
             direction_key(
-                canonical_axis([-1.0, 0.0, 0.0])
+                canonical_unit_direction([-1.0, 0.0, 0.0], 1.0e-15)
                     .ok_or_else(|| anyhow::anyhow!("expected test value"))?
             )
         );

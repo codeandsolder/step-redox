@@ -1,5 +1,8 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
-use crate::math3::{add, cross, dot, mul, norm, normalize as normalize3, sub};
+use crate::math3::{
+    add, canonical_direction, closest_point_on_unit_line_to_origin, cross, dot, mul, norm,
+    normalize as normalize3, point_to_unit_line_distance, sub,
+};
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::step_entities::representation_items_and_context;
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
@@ -524,9 +527,9 @@ fn detect_one_solid(
             }
             _ => None,
         })?;
-    let axis_direction = canonical_axis(axis_reference_direction);
+    let axis_direction = canonical_direction(axis_reference_direction);
     let axis_origin_mm =
-        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+        closest_point_on_unit_line_to_origin(axis_reference_origin_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
 
     let mut max_residual_mm = 0.0_f64;
@@ -614,25 +617,31 @@ fn detect_one_radial_slot(
             SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
             _ => None,
         })?;
-    let axis_direction = canonical_axis(axis_reference_direction);
+    let axis_direction = canonical_direction(axis_reference_direction);
     let axis_origin_mm =
-        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+        closest_point_on_unit_line_to_origin(axis_reference_origin_mm, axis_direction);
 
     let mut radial_plane_indices = Vec::<usize>::new();
     for (face_index, face) in faces.iter().enumerate() {
         match face.surface {
             SurfaceSupport::Cylinder(cylinder) => {
                 if !parallel(cylinder.axis, axis_direction)
-                    || axis_distance(cylinder.axis_origin_mm, axis_origin_mm, axis_direction)
-                        > GEOM_TOL_MM
+                    || point_to_unit_line_distance(
+                        cylinder.axis_origin_mm,
+                        axis_origin_mm,
+                        axis_direction,
+                    ) > GEOM_TOL_MM
                 {
                     return None;
                 }
             }
             SurfaceSupport::Cone(cone) => {
                 if !parallel(cone.axis, axis_direction)
-                    || axis_distance(cone.reference_origin_mm, axis_origin_mm, axis_direction)
-                        > GEOM_TOL_MM
+                    || point_to_unit_line_distance(
+                        cone.reference_origin_mm,
+                        axis_origin_mm,
+                        axis_direction,
+                    ) > GEOM_TOL_MM
                 {
                     return None;
                 }
@@ -690,8 +699,8 @@ fn detect_one_radial_slot(
     let SurfaceSupport::Plane(side_plane_b) = faces[*side_b].surface else {
         return None;
     };
-    let back_normal = canonical_axis(back_plane.normal);
-    let side_direction = canonical_axis(side_plane_a.normal);
+    let back_normal = canonical_direction(back_plane.normal);
+    let side_direction = canonical_direction(side_plane_a.normal);
     if !parallel(side_plane_a.normal, side_plane_b.normal)
         || dot(back_normal, side_direction).abs() > DIR_TOL
         || dot(back_normal, axis_direction).abs() > DIR_TOL
@@ -1010,11 +1019,12 @@ fn detect_full_ring_torus(
         return None;
     }
 
-    let axis_direction = canonical_axis(first.axis);
-    let axis_origin_mm = closest_axis_point_to_global_origin(first.center_mm, axis_direction);
+    let axis_direction = canonical_direction(first.axis);
+    let axis_origin_mm = closest_point_on_unit_line_to_origin(first.center_mm, axis_direction);
     let center_t = axial_coordinate(first.center_mm, axis_origin_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
-    let mut max_residual_mm = axis_distance(first.center_mm, axis_origin_mm, axis_direction);
+    let mut max_residual_mm =
+        point_to_unit_line_distance(first.center_mm, axis_origin_mm, axis_direction);
 
     for face in faces {
         let SurfaceSupport::Torus(torus) = face.surface else {
@@ -1109,9 +1119,9 @@ fn detect_spherical_cap(
         return None;
     }
 
-    let axis_direction = canonical_axis(normalize(plane.normal)?);
+    let axis_direction = canonical_direction(normalize(plane.normal)?);
     let axis_origin_mm =
-        closest_axis_point_to_global_origin(first_sphere.center_mm, axis_direction);
+        closest_point_on_unit_line_to_origin(first_sphere.center_mm, axis_direction);
     let center_t = axial_coordinate(first_sphere.center_mm, axis_origin_mm, axis_direction);
     let plane_t = axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction);
     let plane_offset = plane_t - center_t;
@@ -1196,7 +1206,8 @@ fn detect_spherical_cap(
             for point in [edge.start_mm, edge.end_mm] {
                 if (axial_coordinate(point, axis_origin_mm, axis_direction) - pole_t).abs()
                     <= GEOM_TOL_MM
-                    && point_axis_distance(point, axis_origin_mm, axis_direction) <= GEOM_TOL_MM
+                    && point_to_unit_line_distance(point, axis_origin_mm, axis_direction)
+                        <= GEOM_TOL_MM
                 {
                     reached_pole = true;
                 }
@@ -1295,9 +1306,9 @@ fn detect_hemispherical_end(
         return None;
     }
 
-    let axis_direction = canonical_axis(normalize(first_cylinder.axis)?);
+    let axis_direction = canonical_direction(normalize(first_cylinder.axis)?);
     let axis_origin_mm =
-        closest_axis_point_to_global_origin(first_sphere.center_mm, axis_direction);
+        closest_point_on_unit_line_to_origin(first_sphere.center_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
     let center_t = axial_coordinate(first_sphere.center_mm, axis_origin_mm, axis_direction);
     let plane_t = axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction);
@@ -1311,17 +1322,17 @@ fn detect_hemispherical_end(
         .max((first_cylinder.radius_mm - radius_mm).abs())
         .max(norm(sub(sphere_b.center_mm, first_sphere.center_mm)))
         .max((sphere_b.radius_mm - radius_mm).abs())
-        .max(axis_distance(
+        .max(point_to_unit_line_distance(
             first_sphere.center_mm,
             axis_origin_mm,
             axis_direction,
         ))
-        .max(axis_distance(
+        .max(point_to_unit_line_distance(
             first_cylinder.axis_origin_mm,
             axis_origin_mm,
             axis_direction,
         ))
-        .max(axis_distance(
+        .max(point_to_unit_line_distance(
             cylinder_b.axis_origin_mm,
             axis_origin_mm,
             axis_direction,
@@ -1425,7 +1436,8 @@ fn detect_hemispherical_end(
                 }
                 if (axial_coordinate(point, axis_origin_mm, axis_direction) - pole_t).abs()
                     <= GEOM_TOL_MM
-                    && point_axis_distance(point, axis_origin_mm, axis_direction) <= GEOM_TOL_MM
+                    && point_to_unit_line_distance(point, axis_origin_mm, axis_direction)
+                        <= GEOM_TOL_MM
                 {
                     reached_pole = true;
                 }
@@ -1550,9 +1562,9 @@ fn detect_mixed_curved_revolution(
             SurfaceSupport::Torus(torus) => Some((torus.center_mm, torus.axis)),
             _ => None,
         })?;
-    let axis_direction = canonical_axis(normalize(axis_reference_direction)?);
+    let axis_direction = canonical_direction(normalize(axis_reference_direction)?);
     let axis_origin_mm =
-        closest_axis_point_to_global_origin(axis_reference_origin_mm, axis_direction);
+        closest_point_on_unit_line_to_origin(axis_reference_origin_mm, axis_direction);
     let radial_direction = radial_basis(axis_direction)?;
 
     let mut max_residual_mm = 0.0_f64;
@@ -1593,7 +1605,8 @@ fn detect_mixed_curved_revolution(
             || torus.minor_radius_mm <= GEOM_TOL_MM
             || torus.major_radius_mm <= GEOM_TOL_MM
             || !parallel(torus.axis, axis_direction)
-            || axis_distance(torus.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+            || point_to_unit_line_distance(torus.center_mm, axis_origin_mm, axis_direction)
+                > GEOM_TOL_MM
         {
             return None;
         }
@@ -1613,7 +1626,8 @@ fn detect_mixed_curved_revolution(
     for (face_index, sphere) in sphere_faces {
         if !sphere.radius_mm.is_finite()
             || sphere.radius_mm <= GEOM_TOL_MM
-            || axis_distance(sphere.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+            || point_to_unit_line_distance(sphere.center_mm, axis_origin_mm, axis_direction)
+                > GEOM_TOL_MM
         {
             return None;
         }
@@ -1696,7 +1710,8 @@ fn sphere_profile_arc(
     if face_indices.is_empty()
         || !sphere.radius_mm.is_finite()
         || sphere.radius_mm <= GEOM_TOL_MM
-        || axis_distance(sphere.center_mm, axis_origin_mm, axis_direction) > GEOM_TOL_MM
+        || point_to_unit_line_distance(sphere.center_mm, axis_origin_mm, axis_direction)
+            > GEOM_TOL_MM
     {
         return None;
     }
@@ -1706,7 +1721,8 @@ fn sphere_profile_arc(
     let mut boundary_points = Vec::<[f64; 2]>::new();
     let mut witness_points = Vec::<[f64; 2]>::new();
     let mut source_edge_ids = Vec::<u64>::new();
-    let mut max_residual_mm = axis_distance(sphere.center_mm, axis_origin_mm, axis_direction);
+    let mut max_residual_mm =
+        point_to_unit_line_distance(sphere.center_mm, axis_origin_mm, axis_direction);
 
     for &face_index in face_indices {
         let face = faces.get(face_index)?;
@@ -1742,7 +1758,7 @@ fn sphere_profile_arc(
                     push_unique_point(
                         &mut witness_points,
                         [
-                            point_axis_distance(midpoint, axis_origin_mm, axis_direction),
+                            point_to_unit_line_distance(midpoint, axis_origin_mm, axis_direction),
                             axial_coordinate(midpoint, axis_origin_mm, axis_direction),
                         ],
                     );
@@ -1832,7 +1848,7 @@ fn sphere_parallel_boundary_point(
         return None;
     }
     let axial = axial_coordinate(circle.center_mm, axis_origin_mm, axis_direction);
-    let residual = sphere_circle_residual(circle, sphere)?.max(axis_distance(
+    let residual = sphere_circle_residual(circle, sphere)?.max(point_to_unit_line_distance(
         circle.center_mm,
         axis_origin_mm,
         axis_direction,
@@ -1887,7 +1903,8 @@ fn torus_profile_arc(
     let mut boundary_points = Vec::<[f64; 2]>::new();
     let mut witness_points = Vec::<[f64; 2]>::new();
     let mut source_edge_ids = Vec::<u64>::new();
-    let mut max_residual_mm = axis_distance(torus.center_mm, axis_origin_mm, axis_direction);
+    let mut max_residual_mm =
+        point_to_unit_line_distance(torus.center_mm, axis_origin_mm, axis_direction);
 
     for &face_index in face_indices {
         let face = faces.get(face_index)?;
@@ -1924,7 +1941,7 @@ fn torus_profile_arc(
                     push_unique_point(
                         &mut witness_points,
                         [
-                            point_axis_distance(midpoint, axis_origin_mm, axis_direction),
+                            point_to_unit_line_distance(midpoint, axis_origin_mm, axis_direction),
                             axial_coordinate(midpoint, axis_origin_mm, axis_direction),
                         ],
                     );
@@ -2012,7 +2029,7 @@ fn torus_parallel_boundary_point(
     let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
     let meridian_residual =
         ((radial - torus.major_radius_mm).hypot(axial - center_t) - torus.minor_radius_mm).abs();
-    let residual = axis_distance(circle.center_mm, axis_origin_mm, axis_direction)
+    let residual = point_to_unit_line_distance(circle.center_mm, axis_origin_mm, axis_direction)
         .max(meridian_residual)
         .max((norm(circle.normal) - 1.0).abs());
     (residual <= GEOM_TOL_MM).then_some(([radial, axial], residual))
@@ -2035,7 +2052,7 @@ fn torus_meridian_circle_residual(
         .abs()
         .max((axial_coordinate(circle.center_mm, axis_origin_mm, axis_direction) - center_t).abs())
         .max(
-            (point_axis_distance(circle.center_mm, axis_origin_mm, axis_direction)
+            (point_to_unit_line_distance(circle.center_mm, axis_origin_mm, axis_direction)
                 - torus.major_radius_mm)
                 .abs(),
         )
@@ -2142,7 +2159,7 @@ fn cylinder_profile_segment_with_angular_trims(
     } = segment_context;
     if face.loops.len() != 1
         || !parallel(cylinder.axis, axis)
-        || axis_distance(cylinder.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || point_to_unit_line_distance(cylinder.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
         || !cylinder.radius_mm.is_finite()
         || cylinder.radius_mm <= GEOM_TOL_MM
     {
@@ -2151,12 +2168,13 @@ fn cylinder_profile_segment_with_angular_trims(
 
     let mut boundary_t = Vec::<f64>::new();
     let mut raw_t = Vec::<f64>::new();
-    let mut geometry_residual = axis_distance(cylinder.axis_origin_mm, axis_origin, axis);
+    let mut geometry_residual =
+        point_to_unit_line_distance(cylinder.axis_origin_mm, axis_origin, axis);
     let mut source_support_residual = 0.0_f64;
 
     for edge in &face.loops[0].edges {
         for point in [edge.start_mm, edge.end_mm] {
-            let radius = point_axis_distance(point, axis_origin, axis);
+            let radius = point_to_unit_line_distance(point, axis_origin, axis);
             let t = axial_coordinate(point, axis_origin, axis);
             if !radius.is_finite() || !t.is_finite() {
                 return None;
@@ -2180,7 +2198,8 @@ fn cylinder_profile_segment_with_angular_trims(
                     return None;
                 }
                 source_support_residual = source_support_residual.max(
-                    (point_axis_distance(line.origin_mm, axis_origin, axis) - cylinder.radius_mm)
+                    (point_to_unit_line_distance(line.origin_mm, axis_origin, axis)
+                        - cylinder.radius_mm)
                         .abs(),
                 );
                 let direction = normalize(line.direction)?;
@@ -2191,7 +2210,8 @@ fn cylinder_profile_segment_with_angular_trims(
             }
             CurveSupport::Circle(circle) => {
                 if !parallel(circle.normal, axis)
-                    || axis_distance(circle.center_mm, axis_origin, axis) > GEOM_TOL_MM
+                    || point_to_unit_line_distance(circle.center_mm, axis_origin, axis)
+                        > GEOM_TOL_MM
                     || (circle.radius_mm - cylinder.radius_mm).abs() > GEOM_TOL_MM
                 {
                     return None;
@@ -2223,7 +2243,8 @@ fn cylinder_profile_segment_with_angular_trims(
                     source_support_residual = source_support_residual
                         .max((axial_coordinate(point, axis_origin, axis) - plane_t).abs())
                         .max(
-                            (point_axis_distance(point, axis_origin, axis) - cylinder.radius_mm)
+                            (point_to_unit_line_distance(point, axis_origin, axis)
+                                - cylinder.radius_mm)
                                 .abs(),
                         );
                 }
@@ -2301,7 +2322,7 @@ fn cone_profile_segment_with_angular_trims_inner(
     } = segment_context;
     if face.loops.len() != 1
         || !parallel(cone.axis, axis)
-        || axis_distance(cone.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || point_to_unit_line_distance(cone.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
         || !cone.reference_radius_mm.is_finite()
         || cone.reference_radius_mm < 0.0
         || !cone.semi_angle_rad.is_finite()
@@ -2327,7 +2348,8 @@ fn cone_profile_segment_with_angular_trims_inner(
     let mut boundary_samples = Vec::<[f64; 2]>::new();
     let mut raw_samples = Vec::<[f64; 2]>::new();
     let mut apex_vertices = HashMap::<u64, (usize, [f64; 2])>::new();
-    let mut source_support_residual = axis_distance(cone.reference_origin_mm, axis_origin, axis);
+    let mut source_support_residual =
+        point_to_unit_line_distance(cone.reference_origin_mm, axis_origin, axis);
 
     for edge in &face.loops[0].edges {
         let angular_trim = angular_trim_faces.is_some_and(|trim_faces| {
@@ -2339,7 +2361,7 @@ fn cone_profile_segment_with_angular_trims_inner(
             (edge.end_vertex, edge.end_mm),
         ] {
             let sample = [
-                point_axis_distance(point, axis_origin, axis),
+                point_to_unit_line_distance(point, axis_origin, axis),
                 axial_coordinate(point, axis_origin, axis),
             ];
             if !sample[0].is_finite() || !sample[1].is_finite() {
@@ -2400,7 +2422,8 @@ fn cone_profile_segment_with_angular_trims_inner(
                 if !circle.radius_mm.is_finite()
                     || circle.radius_mm <= GEOM_TOL_MM
                     || !parallel(circle.normal, axis)
-                    || axis_distance(circle.center_mm, axis_origin, axis) > GEOM_TOL_MM
+                    || point_to_unit_line_distance(circle.center_mm, axis_origin, axis)
+                        > GEOM_TOL_MM
                 {
                     return None;
                 }
@@ -2429,8 +2452,11 @@ fn cone_profile_segment_with_angular_trims_inner(
                         }
                         SurfaceSupport::Cylinder(cylinder) => {
                             if !parallel(cylinder.axis, axis)
-                                || axis_distance(cylinder.axis_origin_mm, axis_origin, axis)
-                                    > GEOM_TOL_MM
+                                || point_to_unit_line_distance(
+                                    cylinder.axis_origin_mm,
+                                    axis_origin,
+                                    axis,
+                                ) > GEOM_TOL_MM
                                 || !cylinder.radius_mm.is_finite()
                                 || cylinder.radius_mm <= GEOM_TOL_MM
                             {
@@ -2472,7 +2498,10 @@ fn cone_profile_segment_with_angular_trims_inner(
                 for point in [edge.start_mm, edge.end_mm] {
                     source_support_residual = source_support_residual
                         .max((axial_coordinate(point, axis_origin, axis) - t).abs())
-                        .max((point_axis_distance(point, axis_origin, axis) - source_radius).abs());
+                        .max(
+                            (point_to_unit_line_distance(point, axis_origin, axis) - source_radius)
+                                .abs(),
+                        );
                 }
                 source_support_residual = source_support_residual.max(plane.max_residual_mm);
                 push_unique_point(&mut boundary_samples, [source_radius.max(0.0), t]);
@@ -2599,8 +2628,8 @@ fn same_cone_meridian_support(
     axis_origin: [f64; 3],
     axis: [f64; 3],
 ) -> bool {
-    if axis_distance(first.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
-        || axis_distance(second.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+    if point_to_unit_line_distance(first.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || point_to_unit_line_distance(second.reference_origin_mm, axis_origin, axis) > GEOM_TOL_MM
     {
         return false;
     }
@@ -2674,7 +2703,7 @@ fn revolution_line_profile_segment(
     for edge in &face.loops[0].edges {
         for point in [edge.start_mm, edge.end_mm] {
             let t = axial_coordinate(point, axis_origin, axis);
-            let radius = point_axis_distance(point, axis_origin, axis);
+            let radius = point_to_unit_line_distance(point, axis_origin, axis);
             let expected_radius = linear_radius_at(support, t)?;
             if !t.is_finite() || !radius.is_finite() {
                 return None;
@@ -2714,7 +2743,11 @@ fn revolution_line_profile_segment(
                 }
                 let t = axial_coordinate(circle.center_mm, axis_origin, axis);
                 max_residual = max_residual
-                    .max(axis_distance(circle.center_mm, axis_origin, axis))
+                    .max(point_to_unit_line_distance(
+                        circle.center_mm,
+                        axis_origin,
+                        axis,
+                    ))
                     .max((circle.radius_mm - linear_radius_at(support, t)?).abs());
             }
             CurveSupport::BSpline(_) => {
@@ -2728,7 +2761,7 @@ fn revolution_line_profile_segment(
                 let plane_t = axial_coordinate(plane.origin_mm, axis_origin, axis);
                 for point in [edge.start_mm, edge.end_mm] {
                     let t = axial_coordinate(point, axis_origin, axis);
-                    let radius = point_axis_distance(point, axis_origin, axis);
+                    let radius = point_to_unit_line_distance(point, axis_origin, axis);
                     max_residual = max_residual
                         .max((t - plane_t).abs())
                         .max((radius - linear_radius_at(support, t)?).abs());
@@ -2758,7 +2791,7 @@ fn revolution_linear_support(
     index: &HashMap<u64, usize>,
 ) -> Option<(LinearMeridianSupport, f64)> {
     if !parallel(revolution.axis, axis)
-        || axis_distance(revolution.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
+        || point_to_unit_line_distance(revolution.axis_origin_mm, axis_origin, axis) > GEOM_TOL_MM
     {
         return None;
     }
@@ -2769,7 +2802,7 @@ fn revolution_linear_support(
     let support = linear_meridian_support(line, axis_origin, axis)?;
     Some((
         support,
-        axis_distance(revolution.axis_origin_mm, axis_origin, axis),
+        point_to_unit_line_distance(revolution.axis_origin_mm, axis_origin, axis),
     ))
 }
 
@@ -2788,7 +2821,10 @@ fn linear_meridian_support(
     let perpendicular = sub(direction, mul(axis, axial));
     let radial_direction_magnitude = norm(perpendicular);
     let (reference_signed_radius, slope) = if radial_direction_magnitude <= DIR_TOL {
-        (point_axis_distance(line.origin_mm, axis_origin, axis), 0.0)
+        (
+            point_to_unit_line_distance(line.origin_mm, axis_origin, axis),
+            0.0,
+        )
     } else {
         let radial_direction = mul(perpendicular, 1.0 / radial_direction_magnitude);
         let meridian_normal = normalize(cross(axis, radial_direction))?;
@@ -2858,7 +2894,7 @@ fn plane_profile_segment_with_angular_trims(
         for edge in &loop_.edges {
             for point in [edge.start_mm, edge.end_mm] {
                 let axial_residual = (axial_coordinate(point, axis_origin, axis) - t).abs();
-                let radius = point_axis_distance(point, axis_origin, axis);
+                let radius = point_to_unit_line_distance(point, axis_origin, axis);
                 if !axial_residual.is_finite() || !radius.is_finite() {
                     return None;
                 }
@@ -2880,14 +2916,18 @@ fn plane_profile_segment_with_angular_trims(
                     if !circle.radius_mm.is_finite()
                         || circle.radius_mm <= GEOM_TOL_MM
                         || !parallel(circle.normal, axis)
-                        || axis_distance(circle.center_mm, axis_origin, axis) > GEOM_TOL_MM
+                        || point_to_unit_line_distance(circle.center_mm, axis_origin, axis)
+                            > GEOM_TOL_MM
                     {
                         return None;
                     }
                     let circle_t = axial_coordinate(circle.center_mm, axis_origin, axis);
                     source_support_residual = source_support_residual.max((circle_t - t).abs());
-                    geometry_residual =
-                        geometry_residual.max(axis_distance(circle.center_mm, axis_origin, axis));
+                    geometry_residual = geometry_residual.max(point_to_unit_line_distance(
+                        circle.center_mm,
+                        axis_origin,
+                        axis,
+                    ));
                     for point in [edge.start_mm, edge.end_mm] {
                         source_support_residual =
                             source_support_residual.max(circle_point_residual(point, *circle));
@@ -2941,12 +2981,15 @@ fn plane_profile_segment_with_angular_trims(
                     let expected_radius = match neighbor_face.surface {
                         SurfaceSupport::Cylinder(cylinder) => {
                             if !parallel(cylinder.axis, axis)
-                                || axis_distance(cylinder.axis_origin_mm, axis_origin, axis)
-                                    > GEOM_TOL_MM
+                                || point_to_unit_line_distance(
+                                    cylinder.axis_origin_mm,
+                                    axis_origin,
+                                    axis,
+                                ) > GEOM_TOL_MM
                             {
                                 return None;
                             }
-                            geometry_residual = geometry_residual.max(axis_distance(
+                            geometry_residual = geometry_residual.max(point_to_unit_line_distance(
                                 cylinder.axis_origin_mm,
                                 axis_origin,
                                 axis,
@@ -2983,7 +3026,9 @@ fn plane_profile_segment_with_angular_trims(
                     }
                     for point in [edge.start_mm, edge.end_mm] {
                         source_support_residual = source_support_residual.max(
-                            (point_axis_distance(point, axis_origin, axis) - expected_radius).abs(),
+                            (point_to_unit_line_distance(point, axis_origin, axis)
+                                - expected_radius)
+                                .abs(),
                         );
                     }
                     push_unique_scalar(&mut support_radii, expected_radius.max(0.0));
@@ -3040,21 +3085,6 @@ fn plane_profile_segment_with_angular_trims(
     ))
 }
 
-fn canonical_axis(axis: [f64; 3]) -> [f64; 3] {
-    let index = (0..3)
-        .max_by(|&a, &b| axis[a].abs().total_cmp(&axis[b].abs()))
-        .unwrap_or(0);
-    if axis[index] < 0.0 {
-        mul(axis, -1.0)
-    } else {
-        axis
-    }
-}
-
-fn closest_axis_point_to_global_origin(origin: [f64; 3], axis: [f64; 3]) -> [f64; 3] {
-    sub(origin, mul(axis, dot(origin, axis)))
-}
-
 fn radial_basis(axis: [f64; 3]) -> Option<[f64; 3]> {
     let reference = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         .into_iter()
@@ -3101,7 +3131,7 @@ fn cap_circle_residual(
         return None;
     }
     Some(
-        axis_distance(circle.center_mm, axis_origin, axis)
+        point_to_unit_line_distance(circle.center_mm, axis_origin, axis)
             .max((axial_coordinate(circle.center_mm, axis_origin, axis) - plane_t).abs())
             .max((circle.radius_mm - radius).abs()),
     )
@@ -3121,14 +3151,6 @@ fn torus_point_residual(point: [f64; 3], torus: brep::TorusSupport, axis: [f64; 
 
 fn axial_coordinate(point: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f64 {
     dot(sub(point, axis_origin), axis)
-}
-
-fn point_axis_distance(point: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f64 {
-    norm(cross(sub(point, axis_origin), axis))
-}
-
-fn axis_distance(origin: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f64 {
-    point_axis_distance(origin, axis_origin, axis)
 }
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {

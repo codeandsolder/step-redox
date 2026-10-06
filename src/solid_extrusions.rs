@@ -2,7 +2,10 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
-use crate::math3::{add, cross, distance, dot, mul, norm, normalize as normalize3, sub};
+use crate::math3::{
+    add, canonical_direction, cross, distance, dot, mul, norm, normalize as normalize3,
+    point_to_unit_line_distance, sub,
+};
 pub use crate::profile_curves::RecoveredProfileCurve;
 use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
@@ -173,7 +176,7 @@ fn cap_pair_candidate(
         return None;
     }
 
-    let z_axis = canonical_axis(first_plane.normal);
+    let z_axis = canonical_direction(first_plane.normal);
     let first_offset = dot(z_axis, first_plane.origin_mm);
     let second_offset = dot(z_axis, second_plane.origin_mm);
     let separation = second_offset - first_offset;
@@ -842,9 +845,12 @@ fn side_support_residual(
             {
                 return None;
             }
-            let residual =
-                axis_line_distance(cylinder.axis_origin_mm, cylinder.axis, circle.center_mm)
-                    .max((circle.radius_mm - cylinder.radius_mm).abs());
+            let residual = point_to_unit_line_distance(
+                circle.center_mm,
+                cylinder.axis_origin_mm,
+                cylinder.axis,
+            )
+            .max((circle.radius_mm - cylinder.radius_mm).abs());
             (residual <= GEOM_TOL_MM).then_some(residual)
         }
         (CurveSupport::BSpline(profile), SurfaceSupport::SplineExtrusion(surface)) => {
@@ -1541,28 +1547,12 @@ fn project2(point: [f64; 3], origin: [f64; 3], x_axis: [f64; 3], y_axis: [f64; 3
     result
 }
 
-fn axis_line_distance(origin: [f64; 3], axis: [f64; 3], point: [f64; 3]) -> f64 {
-    norm(cross(sub(point, origin), axis))
-}
-
 fn point_plane_distance(point: [f64; 3], plane: PlaneSupport) -> f64 {
     dot(plane.normal, sub(point, plane.origin_mm)).abs()
 }
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     (dot(a, b).abs() - 1.0).abs() <= DIR_TOL
-}
-
-fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
-    for value in axis {
-        if value.abs() > DIR_TOL {
-            if value < 0.0 {
-                axis = mul(axis, -1.0);
-            }
-            break;
-        }
-    }
-    axis
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
@@ -1627,8 +1617,8 @@ mod tests {
 
     #[test]
     fn canonical_axis_has_deterministic_sign() {
-        assert_eq!(canonical_axis([-1.0, 0.0, 0.0]), [1.0, -0.0, -0.0]);
-        assert_eq!(canonical_axis([0.0, -1.0, 0.0]), [-0.0, 1.0, -0.0]);
+        assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(canonical_direction([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
     }
 
     #[test]

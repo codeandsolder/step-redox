@@ -1,4 +1,4 @@
-use crate::math3::{cross, norm};
+use crate::math3::{canonical_direction, cross, norm, normalize as normalize3};
 use serde::Serialize;
 
 use crate::patterns::InstancePattern;
@@ -61,7 +61,7 @@ pub fn detect_count_parameters(
         out.push(RecoveredCountParameter {
             sites: body.sites,
             pitch_mm: body.pitch_mm,
-            axis: canonical_axis(body.axis),
+            axis: canonical_direction(body.axis),
             parent_representation,
             instance_patterns: indices.clone(),
             periodic_bodies: vec![body_index],
@@ -82,7 +82,7 @@ pub fn detect_count_parameters(
             continue;
         }
         let p = &patterns[index];
-        let axis = canonical_axis(normalized(p.basis[0]).unwrap_or([1.0, 0.0, 0.0]));
+        let axis = canonical_direction(normalize3(p.basis[0], 1.0e-15).unwrap_or([1.0, 0.0, 0.0]));
         let pitch = norm(p.basis[0]);
         let sites = p.item_ids.len();
 
@@ -98,7 +98,8 @@ pub fn detect_count_parameters(
             {
                 continue;
             }
-            let q_axis = canonical_axis(normalized(q.basis[0]).unwrap_or([1.0, 0.0, 0.0]));
+            let q_axis =
+                canonical_direction(normalize3(q.basis[0], 1.0e-15).unwrap_or([1.0, 0.0, 0.0]));
             if norm(cross(axis, q_axis)) > 1.0e-8 {
                 continue;
             }
@@ -150,30 +151,13 @@ fn eligible(pattern: &InstancePattern) -> bool {
         && (pattern.fill_ratio - 1.0).abs() <= 1.0e-12
 }
 
-fn canonical_axis(mut axis: [f64; 3]) -> [f64; 3] {
-    for value in axis {
-        if value.abs() > 1.0e-12 {
-            if value < 0.0 {
-                axis = [-axis[0], -axis[1], -axis[2]];
-            }
-            break;
-        }
-    }
-    axis
-}
-
-fn normalized(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = norm(v);
-    (n.is_finite() && n > 1.0e-15).then(|| [v[0] / n, v[1] / n, v[2] / n])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn canonical_axis_is_sign_stable() {
-        assert_eq!(canonical_axis([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
-        assert_eq!(canonical_axis([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
+        assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(canonical_direction([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
     }
 }

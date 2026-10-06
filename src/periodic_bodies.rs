@@ -1,4 +1,4 @@
-use crate::math3::{cross, dot, norm, normalize as normalize3, scale};
+use crate::math3::{canonical_direction, cross, dot, norm, normalize as normalize3};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -256,10 +256,10 @@ fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
         {
             continue;
         }
-        let Some(mut axis) = normalize(pattern.basis[0]) else {
+        let Some(axis) = normalize(pattern.basis[0]) else {
             continue;
         };
-        canonicalize_axis(&mut axis);
+        let axis = canonical_direction(axis);
         let pitch = norm(pattern.basis[0]);
         if !pitch.is_finite() || pitch <= GEOM_TOL_MM {
             continue;
@@ -578,17 +578,6 @@ fn numeric_value(param: &Parameter) -> Option<f64> {
     }
 }
 
-fn canonicalize_axis(axis: &mut [f64; 3]) {
-    for value in axis.iter() {
-        if value.abs() > 1.0e-12 {
-            if *value < 0.0 {
-                *axis = scale(*axis, -1.0);
-            }
-            return;
-        }
-    }
-}
-
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     norm(cross(a, b)) <= 1.0e-8
 }
@@ -603,9 +592,7 @@ mod tests {
 
     #[test]
     fn canonical_axis_has_stable_sign() {
-        let mut axis = [-1.0, 0.0, 0.0];
-        canonicalize_axis(&mut axis);
-        assert_eq!(axis, [1.0, 0.0, 0.0]);
+        assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
     }
 
     #[test]

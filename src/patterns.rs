@@ -1,4 +1,6 @@
-use crate::math3::{add, cross, dot, norm, normalize as normalize3, scale, sub};
+use crate::math3::{
+    add, canonical_direction, cross, dot, norm, normalize as normalize3, scale, sub,
+};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
@@ -159,7 +161,7 @@ fn motif_candidate_vectors(points: &[[f64; 3]], tolerance_mm: f64, limit: usize)
             if norm(vector) <= tolerance_mm {
                 continue;
             }
-            canonicalize_vector(&mut vector);
+            vector = canonical_direction(vector);
             let key = [
                 (vector[0] / quant).round() as i64,
                 (vector[1] / quant).round() as i64,
@@ -842,7 +844,7 @@ fn lattice_candidate_vectors(points: &[[f64; 3]], tol: f64, limit: usize) -> Vec
     let mut seen = std::collections::HashSet::<[i64; 3]>::new();
     let mut out = Vec::new();
     for (mut vector, _) in pair_differences(points) {
-        canonicalize_vector(&mut vector);
+        vector = canonical_direction(vector);
         let key = [
             (vector[0] / quant).round() as i64,
             (vector[1] / quant).round() as i64,
@@ -948,8 +950,8 @@ fn fit_grid(points: &[[f64; 3]], tol: f64) -> Option<Fit> {
         for ib in (ia + 1)..candidates.len() {
             let mut a = candidates[ia];
             let mut b = candidates[ib];
-            canonicalize_vector(&mut a);
-            canonicalize_vector(&mut b);
+            a = canonical_direction(a);
+            b = canonical_direction(b);
 
             let aa = dot(a, a);
             let ab = dot(a, b);
@@ -1195,17 +1197,6 @@ fn quantize_matrix(matrix: [[f64; 3]; 3]) -> Option<[i64; 9]> {
         out[idx] = scaled as i64;
     }
     Some(out)
-}
-
-fn canonicalize_vector(v: &mut [f64; 3]) {
-    for value in *v {
-        if value.abs() > 1.0e-12 {
-            if value < 0.0 {
-                *v = scale(*v, -1.0);
-            }
-            break;
-        }
-    }
 }
 
 const fn entity_ref(id: u64) -> Parameter {
