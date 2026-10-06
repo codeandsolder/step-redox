@@ -1,3 +1,4 @@
+use crate::math2::{cross, distance, dot, sub};
 use crate::profile_curves::RecoveredProfileCurve;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -699,22 +700,6 @@ fn arc_arc_has_extra_intersection(
         }
         !(first.has_endpoint(point, tolerance) && second.has_endpoint(point, tolerance))
     })
-}
-
-fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-
-fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0].mul_add(b[0], a[1] * b[1])
-}
-
-fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0].mul_add(b[1], -a[1] * b[0])
-}
-
-fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
 #[cfg(test)]

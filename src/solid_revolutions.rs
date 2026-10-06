@@ -1,4 +1,5 @@
 use crate::brep::{self, CurveSupport, SurfaceSupport};
+use crate::math2::{distance as distance2, sub as sub2};
 use crate::math3::{
     add, canonical_direction, closest_point_on_unit_line_to_origin, cross, dot, mul, norm,
     normalize as normalize3, point_to_unit_line_distance, sub,
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod profile_graph;
 use profile_graph::{
-    between, push_unique_segment, segment_radius_at_axial, shell_faces_connected, sub2,
+    between, push_unique_segment, segment_radius_at_axial, shell_faces_connected,
     unique_neighbor_face,
 };
 
@@ -3155,10 +3156,6 @@ fn axial_coordinate(point: [f64; 3], axis_origin: [f64; 3], axis: [f64; 3]) -> f
 
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     1.0 - dot(a, b).abs() <= DIR_TOL
-}
-
-fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {

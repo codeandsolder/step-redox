@@ -2,6 +2,9 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
+use crate::math2::{
+    cross as cross2, distance as distance2, dot as dot2, normalize as normalize2, sub as sub2,
+};
 use crate::math3::{
     add, canonical_direction, cross, distance, dot, mul, norm, normalize as normalize3,
     point_to_unit_line_distance, sub,
@@ -526,8 +529,8 @@ fn convex_line_polygon(curves: &[RecoveredProfileCurve]) -> Option<(Vec<[f64; 2]
         let a = points[index];
         let b = points[(index + 1) % points.len()];
         let c = points[(index + 2) % points.len()];
-        let first = normalize2(sub2(b, a))?;
-        let second = normalize2(sub2(c, b))?;
+        let first = normalize2(sub2(b, a), DIR_TOL)?;
+        let second = normalize2(sub2(c, b), DIR_TOL)?;
         let turn = cross2(first, second) * orientation;
         if turn < -DIR_TOL {
             return None;
@@ -569,7 +572,7 @@ fn point_inside_convex_polygon(point: [f64; 2], polygon: &[[f64; 2]], orientatio
     polygon.iter().enumerate().all(|(index, &a)| {
         let b = polygon[(index + 1) % polygon.len()];
         let edge = sub2(b, a);
-        let Some(direction) = normalize2(edge) else {
+        let Some(direction) = normalize2(edge, DIR_TOL) else {
             return false;
         };
         orientation * cross2(direction, sub2(point, a)) > GEOM_TOL_MM
@@ -587,7 +590,7 @@ fn circle_inside_convex_polygon(
         && polygon.iter().enumerate().all(|(index, &a)| {
             let b = polygon[(index + 1) % polygon.len()];
             let edge = sub2(b, a);
-            let Some(direction) = normalize2(edge) else {
+            let Some(direction) = normalize2(edge, DIR_TOL) else {
                 return false;
             };
             orientation.mul_add(cross2(direction, sub2(center, a)), -radius) > GEOM_TOL_MM
@@ -1355,8 +1358,8 @@ fn merge_profile_curves(
                 end_mm,
             },
         ) => {
-            let first_direction = normalize2(sub2(*first_end, *start_mm))?;
-            let second_direction = normalize2(sub2(*end_mm, *second_start))?;
+            let first_direction = normalize2(sub2(*first_end, *start_mm), DIR_TOL)?;
+            let second_direction = normalize2(sub2(*end_mm, *second_start), DIR_TOL)?;
             if cross2(first_direction, second_direction).abs() > DIR_TOL
                 || dot2(first_direction, second_direction) < 1.0 - DIR_TOL
             {
@@ -1516,30 +1519,6 @@ fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(vector, DIR_TOL)
-}
-
-fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
-}
-
-fn sub2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-
-fn dot2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[1].mul_add(b[1], a[0] * b[0])
-}
-
-fn cross2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[1].mul_add(-b[0], a[0] * b[1])
-}
-
-fn normalize2(vector: [f64; 2]) -> Option<[f64; 2]> {
-    let length = vector[0].hypot(vector[1]);
-    if !length.is_finite() || length <= DIR_TOL {
-        return None;
-    }
-    Some([vector[0] / length, vector[1] / length])
 }
 
 #[cfg(test)]

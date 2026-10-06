@@ -1,4 +1,5 @@
-use super::{GEOM_TOL_MM, Segment2, distance2};
+use super::{GEOM_TOL_MM, Segment2};
+use crate::math2::distance;
 use std::collections::HashMap;
 
 pub(super) fn segment_radius_at_axial(segment: Segment2, axial: f64) -> Option<f64> {
@@ -67,15 +68,11 @@ pub(super) fn between(value: f64, a: f64, b: f64) -> bool {
     value >= a.min(b) - GEOM_TOL_MM && value <= a.max(b) + GEOM_TOL_MM
 }
 
-pub(super) fn sub2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-
 pub(super) fn push_unique_segment(segments: &mut Vec<Segment2>, mut candidate: Segment2) {
     canonicalize_segment(&mut candidate);
     if segments.iter().any(|existing| {
-        distance2(existing.a, candidate.a) <= GEOM_TOL_MM
-            && distance2(existing.b, candidate.b) <= GEOM_TOL_MM
+        distance(existing.a, candidate.a) <= GEOM_TOL_MM
+            && distance(existing.b, candidate.b) <= GEOM_TOL_MM
     }) {
         return;
     }
