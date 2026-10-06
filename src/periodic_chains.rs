@@ -95,6 +95,13 @@ struct Partition {
 #[must_use]
 pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainPattern> {
     let index = build_index(entities);
+    detect_periodic_chains_with_index(entities, &index)
+}
+
+pub(crate) fn detect_periodic_chains_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<PeriodicChainPattern> {
     let solids = entities
         .iter()
         .filter_map(|entity| {
@@ -105,7 +112,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 
     let mut out = Vec::new();
     for solid in solids {
-        let Some(face_ids) = solid_faces(solid, entities, &index) else {
+        let Some(face_ids) = solid_faces(solid, entities, index) else {
             continue;
         };
         if face_ids.len() < 16 {
@@ -114,7 +121,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 
         let mut geoms = HashMap::<u64, FaceGeom>::new();
         for &face in &face_ids {
-            if let Some(geom) = face_geometry(face, entities, &index) {
+            if let Some(geom) = face_geometry(face, entities, index) {
                 geoms.insert(face, geom);
             }
         }

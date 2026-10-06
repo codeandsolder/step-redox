@@ -320,6 +320,13 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
 
 pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<SolidSurfaceSignature> {
     let index = build_index(entities);
+    detect_solid_surface_signatures_with_index(entities, &index)
+}
+
+pub(crate) fn detect_solid_surface_signatures_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<SolidSurfaceSignature> {
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = simple_record(entity) else {
@@ -329,16 +336,16 @@ pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<Solid
             continue;
         }
         let solid_id = entity_id(entity);
-        let Some(face_ids) = brep::solid_face_ids(solid_id, entities, &index) else {
+        let Some(face_ids) = brep::solid_face_ids(solid_id, entities, index) else {
             continue;
         };
         let Some(faces) = face_ids
             .iter()
             .copied()
             .map(|face_id| {
-                let surface_id = brep::face_surface(face_id, entities, &index)?;
-                let surface = brep::surface_support(surface_id, entities, &index);
-                let loops = brep::face_loops(face_id, entities, &index)?;
+                let surface_id = brep::face_surface(face_id, entities, index)?;
+                let surface = brep::surface_support(surface_id, entities, index);
+                let loops = brep::face_loops(face_id, entities, index)?;
                 Some((face_id, surface, loops))
             })
             .collect::<Option<Vec<_>>>()
@@ -399,7 +406,14 @@ pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<Solid
 
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
     let index = build_index(entities);
-    let source_tolerances = source_tolerance_by_representation_item(entities, &index);
+    detect_solid_revolutions_with_index(entities, &index)
+}
+
+pub(crate) fn detect_solid_revolutions_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidRevolution> {
+    let source_tolerances = source_tolerance_by_representation_item(entities, index);
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = simple_record(entity) else {
@@ -413,7 +427,7 @@ pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSol
             .get(&solid_id)
             .copied()
             .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
-        if let Some(candidate) = detect_one_solid(solid_id, entities, &index, source_tolerance_mm) {
+        if let Some(candidate) = detect_one_solid(solid_id, entities, index, source_tolerance_mm) {
             out.push(candidate);
         }
     }
@@ -425,7 +439,14 @@ pub fn detect_radial_slot_revolutions(
     entities: &[EntityInstance],
 ) -> Vec<RecoveredRadialSlotRevolution> {
     let index = build_index(entities);
-    let source_tolerances = source_tolerance_by_representation_item(entities, &index);
+    detect_radial_slot_revolutions_with_index(entities, &index)
+}
+
+pub(crate) fn detect_radial_slot_revolutions_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredRadialSlotRevolution> {
+    let source_tolerances = source_tolerance_by_representation_item(entities, index);
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = simple_record(entity) else {
@@ -440,7 +461,7 @@ pub fn detect_radial_slot_revolutions(
             .copied()
             .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
         if let Some(candidate) =
-            detect_one_radial_slot(solid_id, entities, &index, source_tolerance_mm)
+            detect_one_radial_slot(solid_id, entities, index, source_tolerance_mm)
         {
             out.push(candidate);
         }

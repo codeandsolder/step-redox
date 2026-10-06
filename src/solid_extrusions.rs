@@ -79,6 +79,13 @@ struct CanonicalProfile {
 #[must_use]
 pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSolidExtrusion> {
     let index = build_index(entities);
+    detect_solid_extrusions_with_index(entities, &index)
+}
+
+pub(crate) fn detect_solid_extrusions_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
     let mut out = Vec::new();
 
     for entity in entities {
@@ -89,7 +96,7 @@ pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSoli
             continue;
         }
         let solid_id = entity_id(entity);
-        if let Some(candidate) = detect_one_solid(solid_id, entities, &index) {
+        if let Some(candidate) = detect_one_solid(solid_id, entities, index) {
             out.push(candidate);
         }
     }
