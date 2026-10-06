@@ -1,9 +1,9 @@
 use crate::cad_recovery::{
-    CadFragment, CadFragmentSource, recover_brep_fallback_fragment,
-    recover_instance_pattern_fragments, recover_periodic_chain_fragments,
+    CadFragment, CadFragmentSource, recover_periodic_chain_fragments,
     recover_radial_slot_revolution_fragments, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragments,
 };
+use crate::patterns::InstancePattern;
 use crate::solid_revolutions::SolidSurfaceSignature;
 use crate::{Options, OutputProfile, Stats};
 use anyhow::{Result, bail};
@@ -11,7 +11,7 @@ use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v3";
+pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -37,7 +37,7 @@ impl From<&SolidSurfaceSignature> for SurfaceSignatureSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SolidBrepSummary {
+pub struct SourceSolidSummary {
     pub solid_id: u64,
     pub faces: usize,
     pub edges: usize,
@@ -46,7 +46,7 @@ pub struct SolidBrepSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BodyScanSummary {
-    pub solids: Vec<SolidBrepSummary>,
+    pub solids: Vec<SourceSolidSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,29 +55,29 @@ pub struct CompleteIr {
     pub idempotent_compact_rewrite: bool,
     pub compact_second_pass_stats: Stats,
     pub surface_signature_summaries: Vec<SurfaceSignatureSummary>,
-    pub instance_patterns: Vec<CadFragment>,
+    pub instance_pattern_diagnostics: Vec<InstancePattern>,
     pub solid_extrusions: Vec<CadFragment>,
     pub solid_revolutions: Vec<CadFragment>,
     pub radial_slot_revolutions: Vec<CadFragment>,
     pub periodic_chains: Vec<CadFragment>,
-    pub brep_fallbacks: Vec<CadFragment>,
+    pub unrecovered_solids: Vec<SourceSolidSummary>,
     pub body_scan: BodyScanSummary,
     pub body_count: usize,
     pub constructively_recovered_solid_count: usize,
     pub semantically_recovered_solid_count: usize,
-    pub brep_fallback_solid_count: usize,
+    pub unrecovered_solid_count: usize,
 }
 
 /// Build the compact complete semantic IR for a normalized STEP exchange.
 ///
-/// This report deliberately separates compact canonical IR from detailed detector
-/// diagnostics. Every manifold solid is represented exactly once by the cheapest
-/// proven whole-solid semantic fragment, or by an exact source-BREP fallback.
-/// Instance-pattern fragments are additional assembly semantics and never suppress
-/// the owning solid's fallback.
+/// This report deliberately separates compact canonical IR from source diagnostics.
+/// Every recovered manifold solid is represented by the cheapest proven whole-solid
+/// semantic fragment. Bodies without a proven constructive representation are listed
+/// explicitly in `unrecovered_solids` and never enter `cad_ir`. Instance-pattern
+/// evidence remains diagnostic until its repeated child can be linked to proven CAD IR.
 ///
 /// # Errors
-/// Returns an error if STEP parsing fails, duplicate solid IDs make fallback ownership
+/// Returns an error if STEP parsing fails, duplicate solid IDs make body ownership
 /// ambiguous, or a detector's proven result cannot be converted into valid CAD IR.
 pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
@@ -105,7 +105,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         periodic_chains.extend(crate::periodic_chains::detect_periodic_chains(
             &section.entities,
         ));
-        body_scan.extend(scan_solid_breps(&section.entities));
+        body_scan.extend(scan_source_solids(&section.entities));
     }
 
     body_scan.sort_by_key(|solid| solid.solid_id);
@@ -125,7 +125,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         .collect::<Vec<_>>();
 
     let (patterns, _, _) = crate::detect_exchange_semantics(&exchange);
-    let instance_patterns = recover_instance_pattern_fragments(&patterns)?;
+    let instance_pattern_diagnostics = patterns;
     let solid_extrusions = recover_solid_extrusion_fragments(&extrusions)?;
     let solid_revolutions = recover_solid_revolution_fragments(&revolutions)?;
     let radial_slot_revolutions = recover_radial_slot_revolution_fragments(&radial_slots)?;
@@ -150,18 +150,11 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         }
     }
 
-    let mut brep_fallbacks = Vec::new();
-    for solid in &body_scan {
-        if recovered_ids.contains(&solid.solid_id) {
-            continue;
-        }
-        brep_fallbacks.push(recover_brep_fallback_fragment(
-            solid.solid_id,
-            solid.faces,
-            solid.edges,
-            0,
-        )?);
-    }
+    let unrecovered_solids = body_scan
+        .iter()
+        .filter(|solid| !recovered_ids.contains(&solid.solid_id))
+        .cloned()
+        .collect::<Vec<_>>();
 
     let selected_constructive = selected
         .values()
@@ -183,7 +176,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         idempotent_compact_rewrite,
         compact_second_pass_stats: second.stats,
         surface_signature_summaries,
-        instance_patterns,
+        instance_pattern_diagnostics,
         solid_extrusions: selected_category(&selected, |source| {
             matches!(source, CadFragmentSource::SolidExtrusion { .. })
         }),
@@ -196,16 +189,16 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         periodic_chains: selected_category(&selected, |source| {
             matches!(source, CadFragmentSource::PeriodicChain { .. })
         }),
-        brep_fallback_solid_count: brep_fallbacks.len(),
+        unrecovered_solid_count: unrecovered_solids.len(),
         body_count: body_scan.len(),
         constructively_recovered_solid_count: selected_constructive,
         semantically_recovered_solid_count: selected.len(),
         body_scan: BodyScanSummary { solids: body_scan },
-        brep_fallbacks,
+        unrecovered_solids,
     })
 }
 
-fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
+fn scan_source_solids(entities: &[EntityInstance]) -> Vec<SourceSolidSummary> {
     let index = crate::step_graph::build_index(entities);
     let mut out = Vec::new();
     for entity in entities {
@@ -233,7 +226,7 @@ fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
                 _ => {}
             }
         }
-        out.push(SolidBrepSummary {
+        out.push(SourceSolidSummary {
             solid_id,
             faces,
             edges,
@@ -243,14 +236,12 @@ fn scan_solid_breps(entities: &[EntityInstance]) -> Vec<SolidBrepSummary> {
     out
 }
 
-fn source_solid_id(source: &CadFragmentSource) -> Option<u64> {
+fn source_solid_id(source: &CadFragmentSource) -> u64 {
     match source {
         CadFragmentSource::SolidExtrusion { solid_id, .. }
         | CadFragmentSource::SolidRevolution { solid_id, .. }
         | CadFragmentSource::RadialSlotRevolution { solid_id, .. }
-        | CadFragmentSource::PeriodicChain { solid_id, .. }
-        | CadFragmentSource::BrepFallback { solid_id } => Some(*solid_id),
-        CadFragmentSource::InstancePattern { .. } => None,
+        | CadFragmentSource::PeriodicChain { solid_id, .. } => *solid_id,
     }
 }
 
@@ -259,9 +250,7 @@ fn select_cheapest_whole_solid_fragments<'a>(
 ) -> Result<BTreeMap<u64, &'a CadFragment>> {
     let mut selected = BTreeMap::<u64, (&CadFragment, u64)>::new();
     for &fragment in candidates {
-        let Some(solid_id) = source_solid_id(&fragment.source) else {
-            continue;
-        };
+        let solid_id = source_solid_id(&fragment.source);
         let complexity = fragment.model.complexity_score(fragment.root)?;
         match selected.get(&solid_id) {
             Some((_, existing)) if *existing <= complexity => {}
@@ -290,37 +279,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cad_ir::{BrepFallback, CadModel, CadNode, NodeId, ProofStatus, Provenance};
+    use crate::cad_ir::{CadModel, CadNode, Primitive};
 
-    fn fallback_fragment(solid_id: u64, faces: usize) -> CadFragment {
+    fn constructive_fragment(solid_id: u64, boxes: usize) -> CadFragment {
+        assert!(boxes > 0);
         let mut model = CadModel::new();
-        let root = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
-            vec![solid_id],
-            faces,
-            0,
-            0,
-        )));
-        model
-            .set_provenance(
-                root,
-                Provenance {
-                    source_entity_ids: vec![solid_id],
-                    proof: ProofStatus::Exact,
-                    max_residual_mm: Some(0.0),
-                },
-            )
-            .expect("test provenance");
+        let children = (0..boxes)
+            .map(|_| {
+                model.add_node(CadNode::Primitive(Primitive::Box {
+                    size_mm: [1.0, 1.0, 1.0],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let root = if children.len() == 1 {
+            children[0]
+        } else {
+            model.add_node(CadNode::Assembly { children })
+        };
+        model.add_root(root).expect("test root");
         CadFragment {
-            source: CadFragmentSource::BrepFallback { solid_id },
+            source: CadFragmentSource::SolidExtrusion {
+                solid_id,
+                cap_face_ids: [1, 2],
+                side_face_ids: Vec::new(),
+            },
             model,
-            root: NodeId(root.0),
+            root,
         }
     }
 
     #[test]
     fn cheapest_whole_solid_candidate_wins() -> Result<()> {
-        let expensive = fallback_fragment(7, 100);
-        let cheap = fallback_fragment(7, 1);
+        let expensive = constructive_fragment(7, 4);
+        let cheap = constructive_fragment(7, 1);
         let selected = select_cheapest_whole_solid_fragments(&[&expensive, &cheap])?;
         assert_eq!(selected.len(), 1);
         assert!(std::ptr::eq(selected[&7], &cheap));

@@ -80,8 +80,9 @@ periodic-body growth/shrink are implemented in `periodic_resize.rs`.
 The long-term representation is a backend-neutral constructive DAG rather than an
 ever-smarter mutable STEP entity graph. `cad_ir` now provides the first slice of that
 model: analytic/curve profiles, extrude/revolve/sweep/boolean/transform/pattern nodes,
-assemblies, explicit provenance/proof status, exact B-rep fallbacks, and a structural
-complexity score that counts shared DAG nodes once. KCL is the intended human-editable
+assemblies, explicit provenance/proof status, and a structural complexity score that counts
+shared DAG nodes once. Unrecovered source bodies stay outside `cad_ir` as explicit
+diagnostics rather than opaque geometry leaves. KCL is the intended human-editable
 serialization; the emitter currently lowers only proven polygon extrusion, translation,
 and linear-pattern subsets and fails closed on everything else.
 

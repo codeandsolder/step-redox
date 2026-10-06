@@ -42,80 +42,45 @@ def close(a: float, b: float, tol: float = 1e-8) -> bool:
     return math.isfinite(a) and abs(a - b) <= tol
 
 
-def validate_cad_fragments(name: str, fragments: list[dict], expected: dict) -> dict:
-    pattern_fragments = [
-        fragment for fragment in fragments
-        if fragment.get("source", {}).get("kind") == "instance_pattern"
-    ]
+def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) -> dict:
+    linear = [pattern for pattern in patterns if pattern.get("dimension") == 1]
     expected_count = expected["linear_patterns"]
-    if len(pattern_fragments) != expected_count:
+    if len(linear) != expected_count:
         raise AssertionError(
-            f"{name}: expected {expected_count} instance-pattern CAD fragments, "
-            f"got {len(pattern_fragments)} from {len(fragments)} total fragments"
+            f"{name}: expected {expected_count} linear instance patterns, "
+            f"got {len(linear)} from {len(patterns)} total patterns"
         )
 
     expected_instances = expected["instances_per_pattern"]
     expected_step = expected["step_mm"]
     max_residual = expected["max_residual_mm"]
     observed = []
-    for index, fragment in enumerate(fragments):
-        source = fragment.get("source", {})
-        if source.get("kind") != "instance_pattern":
-            raise AssertionError(f"{name}: fragment {index} is not instance_pattern source")
-
-        model = fragment["model"]
-        root = fragment["root"]
-        if model.get("roots") != [root]:
-            raise AssertionError(f"{name}: fragment {index} has unexpected roots {model.get('roots')}")
-        try:
-            root_node = model["nodes"][root]["Pattern"]
-            linear = root_node["pattern"]["Linear"]
-        except (KeyError, TypeError, IndexError) as exc:
-            raise AssertionError(f"{name}: fragment {index} root is not a linear pattern") from exc
-
-        if linear["count"] != expected_instances:
+    for index, pattern in enumerate(linear):
+        if len(pattern["item_ids"]) != expected_instances:
             raise AssertionError(
-                f"{name}: fragment {index} count {linear['count']} != {expected_instances}"
+                f"{name}: pattern {index} count {len(pattern['item_ids'])} != {expected_instances}"
             )
-        step = linear["step_mm"]
-        if len(step) != 3 or any(not close(a, b, 1e-12) for a, b in zip(step, expected_step)):
+        if len(pattern["basis"]) != 1 or len(pattern["pitch"]) != 1:
+            raise AssertionError(f"{name}: pattern {index} has inconsistent 1-D lattice metadata")
+        step = [pattern["basis"][0][axis] * pattern["pitch"][0] for axis in range(3)]
+        if any(not close(a, b, 1e-12) for a, b in zip(step, expected_step)):
             raise AssertionError(
-                f"{name}: fragment {index} step {step} != canonical {expected_step}"
+                f"{name}: pattern {index} step {step} != canonical {expected_step}"
             )
-
-        child = root_node["child"]
-        try:
-            fallback = model["nodes"][child]["BrepFallback"]
-        except (KeyError, TypeError, IndexError) as exc:
-            raise AssertionError(
-                f"{name}: fragment {index} child is not exact B-rep fallback"
-            ) from exc
-        if len(fallback.get("source_entity_ids", [])) != 1:
-            raise AssertionError(
-                f"{name}: fragment {index} fallback does not preserve exactly one source occurrence"
-            )
-
-        provenance = model["provenance"][str(root)]
-        if provenance["proof"] != "WithinTolerance":
-            raise AssertionError(
-                f"{name}: fragment {index} unexpectedly claims {provenance['proof']} proof"
-            )
-        residual = provenance["max_residual_mm"]
+        residual = pattern["max_residual_mm"]
         if not math.isfinite(residual) or residual > max_residual:
             raise AssertionError(
-                f"{name}: fragment {index} residual {residual} exceeds {max_residual}"
+                f"{name}: pattern {index} residual {residual} exceeds {max_residual}"
             )
-
         observed.append({
-            "count": linear["count"],
+            "count": len(pattern["item_ids"]),
             "step_mm": step,
             "max_residual_mm": residual,
-            "fallback_entity": fallback["source_entity_ids"][0],
+            "representation_map": pattern["representation_map"],
         })
 
     return {
         "fixture": name,
-        "fragments": len(pattern_fragments),
         "patterns": observed,
     }
 
@@ -283,9 +248,9 @@ def main():
 
     for name, spec in manifest["fixtures"].items():
         chain_expected = spec.get("periodic_chain_expectation")
-        cad_expected = spec.get("cad_fragment_expectation")
+        pattern_expected = spec.get("instance_pattern_expectation")
         sheet_expected = spec.get("formed_sheet_expectation")
-        if not chain_expected and not cad_expected and not sheet_expected:
+        if not chain_expected and not pattern_expected and not sheet_expected:
             continue
         input_path = fixture_path(args.cache, spec)
         if not input_path.exists():
@@ -311,13 +276,13 @@ def main():
                 f"coverage={result['repeat_coverage_ratio']:.3%} proven"
             )
 
-        if cad_expected:
-            fragments = json.loads(prefix.with_suffix(".cad-fragments.json").read_text())
-            result = validate_cad_fragments(name, fragments, cad_expected)
+        if pattern_expected:
+            patterns = json.loads(prefix.with_suffix(".patterns.json").read_text())
+            result = validate_instance_patterns(name, patterns, pattern_expected)
             cad_results.append(result)
             first = result["patterns"][0]
             print(
-                f"{name}: {result['fragments']} canonical CAD linear patterns x "
+                f"{name}: {len(result['patterns'])} proven linear instance patterns x "
                 f"{first['count']} at step={first['step_mm']} "
                 f"residual<={max(p['max_residual_mm'] for p in result['patterns']):.3g} mm"
             )

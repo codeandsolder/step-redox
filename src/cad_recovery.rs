@@ -1,13 +1,9 @@
 use crate::cad_ir::{
-    BrepFallback, CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus,
-    Provenance,
+    CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus, Provenance,
 };
 use crate::periodic_chains::PeriodicChainPattern;
 use anyhow::{Result, bail};
 use serde::Serialize;
-
-mod instance_pattern;
-pub use instance_pattern::{recover_instance_pattern_fragment, recover_instance_pattern_fragments};
 
 mod solid;
 pub use solid::{
@@ -26,11 +22,6 @@ pub struct CadFragment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CadFragmentSource {
-    InstancePattern {
-        parent_representation: u64,
-        representation_map: u64,
-        item_ids: Vec<u64>,
-    },
     SolidExtrusion {
         solid_id: u64,
         cap_face_ids: [u64; 2],
@@ -49,54 +40,6 @@ pub enum CadFragmentSource {
         solid_id: u64,
         sites: usize,
     },
-    BrepFallback {
-        solid_id: u64,
-    },
-}
-
-/// Admit any source solid into CAD IR without pretending it has been
-/// constructively recovered yet.
-///
-/// The fallback is exact by provenance: it names the original B-rep root and
-/// carries only complexity estimates. Later recovery passes can replace this
-/// leaf with an Extrude/Revolve/Boolean/etc. without changing the rule that
-/// every parseable source body is representable from day one.
-///
-/// # Errors
-/// Returns an error if the source solid id is invalid or the fallback CAD fragment cannot be validated.
-pub fn recover_brep_fallback_fragment(
-    solid_id: u64,
-    estimated_faces: usize,
-    estimated_edges: usize,
-    estimated_control_points: usize,
-) -> Result<CadFragment> {
-    if solid_id == 0 {
-        bail!("B-rep fallback solid id must be nonzero");
-    }
-
-    let mut model = CadModel::new();
-    let root = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
-        vec![solid_id],
-        estimated_faces,
-        estimated_edges,
-        estimated_control_points,
-    )));
-    model.set_provenance(
-        root,
-        Provenance {
-            source_entity_ids: vec![solid_id],
-            proof: ProofStatus::Exact,
-            max_residual_mm: Some(0.0),
-        },
-    )?;
-    model.add_root(root)?;
-    model.validate()?;
-
-    Ok(CadFragment {
-        source: CadFragmentSource::BrepFallback { solid_id },
-        model,
-        root,
-    })
 }
 
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.
@@ -288,32 +231,6 @@ fn validate_periodic_chain(chain: &PeriodicChainPattern) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn arbitrary_solid_can_enter_cad_ir_as_exact_brep_fallback() -> Result<()> {
-        let fragment = recover_brep_fallback_fragment(74952, 132, 395, 8)?;
-        assert_eq!(
-            fragment.source,
-            CadFragmentSource::BrepFallback { solid_id: 74952 }
-        );
-        let CadNode::BrepFallback(fallback) = fragment.model.node(fragment.root)? else {
-            bail!("expected B-rep fallback root");
-        };
-        assert_eq!(fallback.source_entity_ids, vec![74952]);
-        assert_eq!(fallback.estimated_faces, 132);
-        assert_eq!(fallback.estimated_edges, 395);
-        assert_eq!(fallback.estimated_control_points, 8);
-        assert_eq!(
-            fragment.model.provenance[&fragment.root].proof,
-            ProofStatus::Exact
-        );
-        assert_eq!(
-            fragment.model.provenance[&fragment.root].max_residual_mm,
-            Some(0.0)
-        );
-        assert!(recover_brep_fallback_fragment(0, 0, 0, 0).is_err());
-        Ok(())
-    }
 
     fn periodic_chain_fixture() -> PeriodicChainPattern {
         PeriodicChainPattern {

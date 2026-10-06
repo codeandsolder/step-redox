@@ -195,7 +195,6 @@ pub enum CadNode {
         children: Vec<NodeId>,
     },
     PeriodicChain(FusedPeriodicChain),
-    BrepFallback(BrepFallback),
 }
 
 impl CadNode {
@@ -221,7 +220,6 @@ impl CadNode {
             Self::Transform { .. } => 2,
             Self::Pattern { pattern, .. } => 2 + pattern.complexity(),
             Self::PeriodicChain(chain) => chain.complexity(),
-            Self::BrepFallback(fallback) => fallback.complexity(),
         }
     }
 }
@@ -593,36 +591,6 @@ fn validate_count_overrides(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct BrepFallback {
-    pub source_entity_ids: Vec<u64>,
-    pub estimated_faces: usize,
-    pub estimated_edges: usize,
-    pub estimated_control_points: usize,
-}
-
-impl BrepFallback {
-    pub fn source_reference(
-        source_entity_ids: Vec<u64>,
-        estimated_faces: usize,
-        estimated_edges: usize,
-        estimated_control_points: usize,
-    ) -> Self {
-        Self {
-            source_entity_ids,
-            estimated_faces,
-            estimated_edges,
-            estimated_control_points,
-        }
-    }
-
-    const fn complexity(&self) -> u64 {
-        100 + self.estimated_faces as u64 * 8
-            + self.estimated_edges as u64 * 3
-            + self.estimated_control_points as u64
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Provenance {
     pub source_entity_ids: Vec<u64>,
     pub proof: ProofStatus,
@@ -848,20 +816,6 @@ mod tests {
         });
         model.add_root(root)?;
         assert_eq!(model.complexity_score(root)?, 4);
-        Ok(())
-    }
-
-    #[test]
-    fn fallback_is_deliberately_expensive() -> Result<()> {
-        let mut model = CadModel::new();
-        let fallback = model.add_node(CadNode::BrepFallback(BrepFallback::source_reference(
-            vec![1, 2, 3],
-            100,
-            300,
-            1_000,
-        )));
-        model.add_root(fallback)?;
-        assert!(model.complexity_score(fallback)? > 2_000);
         Ok(())
     }
 

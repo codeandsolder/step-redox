@@ -7,12 +7,6 @@
       "filename": "jlc-header-2x24-2mm.step",
       "bundled_gzip": "fixtures/bundled/jlc-header-2x24-2mm.step.gz",
       "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_48P-P2.00-V-F-R2-C24-S2.00",
-      "cad_fragment_expectation": {
-        "linear_patterns": 2,
-        "instances_per_pattern": 24,
-        "step_mm": [2.0, 0.0, 0.0],
-        "max_residual_mm": 1.0e-7
-      },
       "formed_sheet_expectation": {
         "candidates": 2,
         "thickness_mm": 0.2,
@@ -20,6 +14,16 @@
         "paired_cylindrical_faces": 16,
         "coaxial_radius_pairs": 8,
         "parallel_plane_pairs": 9
+      },
+      "instance_pattern_expectation": {
+        "linear_patterns": 2,
+        "instances_per_pattern": 24,
+        "step_mm": [
+          2.0,
+          0.0,
+          0.0
+        ],
+        "max_residual_mm": 1e-07
       }
     },
     "jlc_header_2x36_2mm": {
@@ -28,12 +32,6 @@
       "filename": "jlc-header-2x36-2mm.step",
       "bundled_gzip": "fixtures/bundled/jlc-header-2x36-2mm.step.gz",
       "source_note": "Public EasyEDA/JLC model endpoint; HDR-TH_72P-P2.00-V-F-R2-C36-S2.00",
-      "cad_fragment_expectation": {
-        "linear_patterns": 2,
-        "instances_per_pattern": 36,
-        "step_mm": [2.0, 0.0, 0.0],
-        "max_residual_mm": 1.0e-7
-      },
       "formed_sheet_expectation": {
         "candidates": 2,
         "thickness_mm": 0.2,
@@ -41,11 +39,23 @@
         "paired_cylindrical_faces": 16,
         "coaxial_radius_pairs": 8,
         "parallel_plane_pairs": 9
+      },
+      "instance_pattern_expectation": {
+        "linear_patterns": 2,
+        "instances_per_pattern": 36,
+        "step_mm": [
+          2.0,
+          0.0,
+          0.0
+        ],
+        "max_residual_mm": 1e-07
       }
     },
     "te_3_353293_4": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4",
-      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4"],
+      "fallback_urls": [
+        "https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-4&DocType=Customer+View+Model&PartCntxt=3-353293-4"
+      ],
       "archive": "zip",
       "archive_filename": "te-3-353293-4.zip",
       "bundled_archive": "fixtures/bundled/te-3-353293-4.zip",
@@ -72,7 +82,9 @@
     },
     "te_3_353293_5": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5",
-      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5"],
+      "fallback_urls": [
+        "https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-5&DocType=Customer+View+Model&PartCntxt=3-353293-5"
+      ],
       "archive": "zip",
       "archive_filename": "te-3-353293-5.zip",
       "bundled_archive": "fixtures/bundled/te-3-353293-5.zip",
@@ -99,7 +111,9 @@
     },
     "te_3_353293_8": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8",
-      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8"],
+      "fallback_urls": [
+        "https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_3-353293-8&DocType=Customer+View+Model&PartCntxt=3-353293-8"
+      ],
       "archive": "zip",
       "archive_filename": "te-3-353293-8.zip",
       "bundled_archive": "fixtures/bundled/te-3-353293-8.zip",
@@ -126,7 +140,9 @@
     },
     "te_dsub_9_t2111092004_000": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000",
-      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000"],
+      "fallback_urls": [
+        "https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_T2111092004-000&DocType=Customer+View+Model&PartCntxt=T2111092004-000"
+      ],
       "archive": "zip",
       "archive_filename": "te-T2111092004-000.zip",
       "bundled_archive": "fixtures/bundled/te-T2111092004-000.zip",
@@ -139,7 +155,9 @@
     },
     "te_2513069_1_heavy": {
       "url": "https://www.te.com/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_2513069-1&DocType=Customer+View+Model&PartCntxt=2513069-1",
-      "fallback_urls": ["https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_2513069-1&DocType=Customer+View+Model&PartCntxt=2513069-1"],
+      "fallback_urls": [
+        "https://www.te.com.cn/commerce/DocumentDelivery/DDEController?Action=srchrtrv&DocFormat=3d_stp.zip&DocLang=English&DocNm=CVM_2513069-1&DocType=Customer+View+Model&PartCntxt=2513069-1"
+      ],
       "archive": "zip",
       "archive_filename": "te-2513069-1.zip",
       "bundled_archive": "fixtures/bundled/te-2513069-1.zip",

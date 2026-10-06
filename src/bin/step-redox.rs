@@ -142,7 +142,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write compact complete semantic CAD IR with exact B-rep fallbacks"
+        help = "Write complete semantic CAD IR plus explicit unrecovered-body diagnostics"
     )]
     complete_ir_json: Option<PathBuf>,
 
@@ -239,12 +239,16 @@ fn main() -> Result<()> {
             .with_context(|| format!("write complete CAD IR {}", path.display()))?;
     }
     if let Some(path) = &cli.cad_fragments_json {
-        let mut fragments =
-            step_redox::cad_recovery::recover_instance_pattern_fragments(&cleaned.patterns)?;
         let extrusions = step_redox::detect_solid_extrusions_bytes(&cleaned.bytes)?;
-        fragments.extend(step_redox::cad_recovery::recover_solid_extrusion_fragments(
-            &extrusions,
-        )?);
+        let revolutions = step_redox::detect_solid_revolutions_bytes(&cleaned.bytes)?;
+        let radial_slots = step_redox::detect_radial_slot_revolutions_bytes(&cleaned.bytes)?;
+        let mut fragments =
+            step_redox::cad_recovery::recover_solid_extrusion_fragments(&extrusions)?;
+        fragments
+            .extend(step_redox::cad_recovery::recover_solid_revolution_fragments(&revolutions)?);
+        fragments.extend(
+            step_redox::cad_recovery::recover_radial_slot_revolution_fragments(&radial_slots)?,
+        );
         if let Some(chains) = &periodic_chains {
             fragments.extend(step_redox::cad_recovery::recover_periodic_chain_fragments(
                 chains,
