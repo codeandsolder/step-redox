@@ -25,7 +25,7 @@ pub fn recover_solid_extrusion_fragment(
     validate_solid_extrusion(extrusion)?;
 
     let mut model = CadModel::new();
-    let profile = recovered_extrusion_profile(extrusion)?;
+    let profile = recovered_extrusion_profile(extrusion);
     let body = model.add_node(CadNode::Extrude {
         profile,
         vector_mm: [0.0, 0.0, extrusion.height_mm],
@@ -364,7 +364,7 @@ fn validate_radial_slot_revolution(slotted: &RecoveredRadialSlotRevolution) -> R
     Ok(())
 }
 
-fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Profile2d> {
+fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Profile2d {
     let loops = extrusion
         .profile_loops()
         .map(|curves| {
@@ -375,7 +375,7 @@ fn recovered_extrusion_profile(extrusion: &RecoveredSolidExtrusion) -> Result<Pr
             ProfileLoop { curves }
         })
         .collect::<Vec<_>>();
-    Ok(Profile2d { loops })
+    Profile2d { loops }
 }
 
 fn recovered_profile_curve_to_ir(curve: &RecoveredProfileCurve) -> Curve2d {
@@ -565,13 +565,22 @@ fn validate_recovered_profile_curve(curve: &RecoveredProfileCurve) -> Result<()>
     validate_profile_curve_geometry(curve)
 }
 
+fn same_f64(left: f64, right: f64) -> bool {
+    left.partial_cmp(&right)
+        .is_some_and(std::cmp::Ordering::is_eq)
+}
+
 fn validate_profile_curve_geometry(curve: &RecoveredProfileCurve) -> Result<()> {
     let finite_point = |point: &[f64; 2]| point.iter().all(|value| value.is_finite());
     match curve {
         RecoveredProfileCurve::Line {
             start_mm, end_mm, ..
         } => {
-            if !finite_point(start_mm) || !finite_point(end_mm) || start_mm == end_mm {
+            let identical_endpoints = start_mm
+                .iter()
+                .zip(end_mm)
+                .all(|(&start, &end)| same_f64(start, end));
+            if !finite_point(start_mm) || !finite_point(end_mm) || identical_endpoints {
                 bail!("recovered line has invalid endpoints");
             }
         }
@@ -616,10 +625,10 @@ fn validate_profile_curve_geometry(curve: &RecoveredProfileCurve) -> Result<()> 
                 knots.len() >= min_knots
                     && knots[..min_control_points]
                         .iter()
-                        .all(|knot| *knot == knots[0])
+                        .all(|knot| same_f64(*knot, knots[0]))
                     && knots[knots.len() - min_control_points..]
                         .iter()
-                        .all(|knot| *knot == knots[knots.len() - 1])
+                        .all(|knot| same_f64(*knot, knots[knots.len() - 1]))
             });
             if *degree == 0
                 || control_points_mm.len() < min_control_points
