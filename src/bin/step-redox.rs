@@ -242,6 +242,7 @@ fn main() -> Result<()> {
         let extrusions = step_redox::detect_solid_extrusions_bytes(&cleaned.bytes)?;
         let revolutions = step_redox::detect_solid_revolutions_bytes(&cleaned.bytes)?;
         let radial_slots = step_redox::detect_radial_slot_revolutions_bytes(&cleaned.bytes)?;
+        let sweeps = step_redox::detect_closed_round_sweeps_bytes(&cleaned.bytes)?;
         let mut fragments =
             step_redox::cad_recovery::recover_solid_extrusion_fragments(&extrusions)?;
         fragments
@@ -249,6 +250,7 @@ fn main() -> Result<()> {
         fragments.extend(
             step_redox::cad_recovery::recover_radial_slot_revolution_fragments(&radial_slots)?,
         );
+        fragments.extend(step_redox::cad_recovery::recover_closed_round_sweep_fragments(&sweeps)?);
         if let Some(chains) = &periodic_chains {
             fragments.extend(step_redox::cad_recovery::recover_periodic_chain_fragments(
                 chains,

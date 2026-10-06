@@ -7,6 +7,7 @@ use serde::Serialize;
 
 mod solid;
 pub use solid::{
+    recover_closed_round_sweep_fragment, recover_closed_round_sweep_fragments,
     recover_radial_slot_revolution_fragment, recover_radial_slot_revolution_fragments,
     recover_solid_extrusion_fragment, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragment, recover_solid_revolution_fragments,
@@ -35,6 +36,11 @@ pub enum CadFragmentSource {
         solid_id: u64,
         base_face_ids: Vec<u64>,
         slot_face_ids: [u64; 3],
+    },
+    SolidSweep {
+        solid_id: u64,
+        face_ids: Vec<u64>,
+        closed: bool,
     },
     PeriodicChain {
         solid_id: u64,

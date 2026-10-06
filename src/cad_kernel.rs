@@ -36,6 +36,7 @@ pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{
         Axis3, BooleanOp, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform,
+        SweepPath3d, SweepSegment3d,
     };
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
@@ -72,6 +73,36 @@ pub mod monstertruck {
 
     fn revolve_profile(profile: &Profile2d, axis: Axis3, angle_rad: f64) -> Result<Solid> {
         revolve_wires(profile_wires(profile)?, axis, angle_rad)
+    }
+
+    fn sweep_profile(profile: &Profile2d, path: &SweepPath3d) -> Result<Solid> {
+        if path.segments.is_empty() {
+            bail!("sweep path must contain at least one segment");
+        }
+        let face = profile::attach_plane_normalized(profile_wires(profile)?)?;
+        let face = builder::transformed(&face, rigid_matrix(&path.initial_transform));
+        let segments = path.segments.iter().map(|segment| match segment {
+            SweepSegment3d::Translation { vector_mm } => {
+                builder::CompositeSweepSegment::Translation(Vector3::new(
+                    vector_mm[0],
+                    vector_mm[1],
+                    vector_mm[2],
+                ))
+            }
+            SweepSegment3d::Rotation { axis, angle_rad } => {
+                builder::CompositeSweepSegment::Rotation {
+                    origin: Point3::new(axis.origin_mm[0], axis.origin_mm[1], axis.origin_mm[2]),
+                    axis: Vector3::new(axis.direction[0], axis.direction[1], axis.direction[2]),
+                    angle: Rad(*angle_rad),
+                    division: 1,
+                }
+            }
+        });
+        if path.closed {
+            Ok(builder::composite_closed_sweep(&face, segments)?)
+        } else {
+            Ok(builder::composite_sweep(&face, segments)?)
+        }
     }
 
     fn revolve_profile_transformed(
@@ -461,6 +492,7 @@ pub mod monstertruck {
                 axis,
                 angle_rad,
             } => revolve_profile(profile, *axis, *angle_rad),
+            CadNode::Sweep { profile, path } => sweep_profile(profile, path),
             CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
@@ -515,7 +547,10 @@ pub mod monstertruck {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::cad_ir::{Axis3, CadNode, Curve2d, Profile2d, ProfileLoop};
+        use crate::cad_ir::{
+            Axis3, CadNode, Curve2d, Profile2d, ProfileLoop, RigidTransform, SweepPath3d,
+            SweepSegment3d,
+        };
 
         fn box_model() -> Result<(CadModel, NodeId)> {
             let mut model = CadModel::new();
@@ -564,6 +599,51 @@ pub mod monstertruck {
 
             let step = kernel.to_step(&evaluated)?;
             assert!(step.contains(expected_step_fragment));
+            ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_exact_line_arc_line_sweep() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile = Profile2d::polygon(vec![
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ])?;
+            let root = model.add_node(CadNode::Sweep {
+                profile,
+                path: SweepPath3d {
+                    initial_transform: RigidTransform::translation_mm([2.0, 0.0, 4.0]),
+                    closed: false,
+                    segments: vec![
+                        SweepSegment3d::Translation {
+                            vector_mm: [0.0, 0.0, -4.0],
+                        },
+                        SweepSegment3d::Rotation {
+                            axis: Axis3 {
+                                origin_mm: [0.0, 0.0, 0.0],
+                                direction: [0.0, 1.0, 0.0],
+                            },
+                            angle_rad: std::f64::consts::FRAC_PI_2,
+                        },
+                        SweepSegment3d::Translation {
+                            vector_mm: [-4.0, 0.0, 0.0],
+                        },
+                    ],
+                },
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert_eq!(summary.faces, 14);
+
+            let step = kernel.to_step(&evaluated)?;
             ruststep::parser::parse(&step)?;
             Ok(())
         }

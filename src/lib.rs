@@ -35,6 +35,7 @@ pub mod profile_curves;
 mod shape_identity;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
+pub mod solid_sweeps;
 mod spherical_caps;
 mod step_entities;
 mod step_graph;
@@ -550,6 +551,25 @@ pub fn detect_solid_extrusions_bytes(
         .data
         .iter()
         .flat_map(|section| solid_extrusions::detect_solid_extrusions(&section.entities))
+        .collect())
+}
+
+/// Detect closed round-profile composite sweeps such as bent wire frames.
+///
+/// The current grammar is deliberately narrow: one planar four-run/four-bend loop
+/// with a constant circular section, proven from matching cylinder and torus supports.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_closed_round_sweeps_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredClosedRoundSweep>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_closed_round_sweeps(&section.entities))
         .collect())
 }
 

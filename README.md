@@ -86,13 +86,15 @@ diagnostics rather than opaque geometry leaves. KCL is the intended human-editab
 serialization; the emitter currently lowers only proven polygon extrusion, translation,
 and linear-pattern subsets and fails closed on everything else.
 
-The first local evaluation backend is upstream Rust-native Truck pinned to a known-good
-git revision behind the optional `cad-kernel-truck` feature. Truck topology is wrapped in
-an opaque evaluated-shape type and does not escape the adapter. The backend currently
-evaluates only a single polygonal Z extrusion; extending the IR and extending a backend
-are intentionally separate operations. A 10 x 6 x 2 mm smoke model independently
-validated in OpenCascade as one valid six-face solid with 120 mm^3 volume and 184 mm^2
-surface area. The architecture spike is in `experiments/kcl-truck-spike/`.
+The local evaluation backend is Rust-native Monstertruck behind the optional
+`cad-kernel-monstertruck` feature. Kernel topology is wrapped in an opaque evaluated-shape
+type and does not escape the adapter. The backend evaluates proven profile extrusions,
+full/partial revolutions, transforms, booleans, and exact composite sweeps whose path is a
+sequence of straight translations and circular rotations; unsupported nodes fail closed.
+Closed composite paths join the final section directly back to the first, so rounded wire
+loops do not acquire coincident end caps. STEP emitted by the backend is independently
+checked with OpenCascade during development. The architecture spike is in
+`experiments/kcl-monstertruck-spike/`.
 
 ## Validation and CI
 

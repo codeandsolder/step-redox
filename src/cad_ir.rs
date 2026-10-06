@@ -78,6 +78,9 @@ impl CadModel {
             if let CadNode::PeriodicChain(chain) = node {
                 chain.validate()?;
             }
+            if let CadNode::Sweep { path, .. } = node {
+                path.validate()?;
+            }
             if let Some(provenance) = self.provenance.get(&id) {
                 if let Some(residual) = provenance.max_residual_mm
                     && (!residual.is_finite() || residual < 0.0)
@@ -176,8 +179,7 @@ pub enum CadNode {
     },
     Sweep {
         profile: Profile2d,
-        path: Path3d,
-        frame: SweepFrame,
+        path: SweepPath3d,
     },
     Boolean {
         op: BooleanOp,
@@ -345,47 +347,69 @@ impl Curve2d {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum Path3d {
-    Polyline {
-        points_mm: Vec<[f64; 3]>,
-    },
-    BSpline {
-        degree: usize,
-        control_points_mm: Vec<[f64; 3]>,
-        knots: Vec<f64>,
-        weights: Option<Vec<f64>>,
-    },
+pub struct SweepPath3d {
+    /// Places the profile in world space before the first path segment.
+    pub initial_transform: RigidTransform,
+    /// Exact rigid motions applied in order. Straight runs are translations; bends are rotations.
+    pub segments: Vec<SweepSegment3d>,
+    /// The final segment returns to the initial section and the sweep has no end caps.
+    pub closed: bool,
 }
 
-impl Path3d {
+impl SweepPath3d {
     fn complexity(&self) -> u64 {
-        match self {
-            Self::Polyline { points_mm } => 1 + points_mm.len() as u64,
-            Self::BSpline {
-                control_points_mm,
-                knots,
-                weights,
-                ..
-            } => {
-                4 + control_points_mm.len() as u64
-                    + knots.len() as u64
-                    + weights.as_ref().map_or(0, |values| values.len() as u64)
+        1 + self.segments.len() as u64
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.segments.is_empty() {
+            bail!("sweep path needs at least one segment");
+        }
+        if self
+            .initial_transform
+            .matrix
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            bail!("sweep initial transform must be finite");
+        }
+        for segment in &self.segments {
+            match segment {
+                SweepSegment3d::Translation { vector_mm } => {
+                    if vector_mm.iter().any(|value| !value.is_finite())
+                        || vector_mm.iter().all(|value| *value == 0.0)
+                    {
+                        bail!("sweep translation must be finite and nonzero");
+                    }
+                }
+                SweepSegment3d::Rotation { axis, angle_rad } => {
+                    if axis.origin_mm.iter().any(|value| !value.is_finite())
+                        || axis.direction.iter().any(|value| !value.is_finite())
+                        || axis.direction.iter().all(|value| *value == 0.0)
+                        || !angle_rad.is_finite()
+                        || *angle_rad == 0.0
+                        || angle_rad.abs() >= std::f64::consts::TAU
+                    {
+                        bail!("sweep rotation must have a finite nonzero axis and partial angle");
+                    }
+                }
             }
         }
+        Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum SweepSegment3d {
+    Translation { vector_mm: [f64; 3] },
+    Rotation { axis: Axis3, angle_rad: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Axis3 {
     pub origin_mm: [f64; 3],
     pub direction: [f64; 3],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SweepFrame {
-    Fixed,
-    ParallelTransport,
-    Frenet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -835,6 +859,47 @@ mod tests {
             provenance: BTreeMap::new(),
         };
         assert!(model.validate().is_err());
+    }
+
+    #[test]
+    fn model_rejects_invalid_sweep_paths() -> Result<()> {
+        let profile = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])?;
+        for path in [
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: Vec::new(),
+                closed: false,
+            },
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: vec![SweepSegment3d::Translation {
+                    vector_mm: [0.0, 0.0, 0.0],
+                }],
+                closed: false,
+            },
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: vec![SweepSegment3d::Rotation {
+                    axis: Axis3 {
+                        origin_mm: [0.0, 0.0, 0.0],
+                        direction: [0.0, 0.0, 0.0],
+                    },
+                    angle_rad: 1.0,
+                }],
+                closed: false,
+            },
+        ] {
+            let model = CadModel {
+                nodes: vec![CadNode::Sweep {
+                    profile: profile.clone(),
+                    path,
+                }],
+                roots: vec![NodeId(0)],
+                provenance: BTreeMap::new(),
+            };
+            assert!(model.validate().is_err());
+        }
+        Ok(())
     }
 
     #[test]

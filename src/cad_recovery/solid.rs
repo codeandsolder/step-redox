@@ -1,7 +1,7 @@
 use super::{CadFragment, CadFragmentSource};
 use crate::cad_ir::{
     Axis3, BooleanOp, CadModel, CadNode, Curve2d, Profile2d, ProfileLoop, ProofStatus, Provenance,
-    RigidTransform,
+    RigidTransform, SweepPath3d, SweepSegment3d,
 };
 use crate::math3::{cross, dot, norm};
 use crate::profile_curves::RecoveredProfileCurve;
@@ -10,6 +10,7 @@ use crate::solid_revolutions::{
     MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     RecoveredRadialSlotRevolution, RecoveredSolidRevolution,
 };
+use crate::solid_sweeps::{RecoveredClosedRoundSweep, RecoveredSweepSegment};
 use anyhow::{Result, bail};
 
 /// Recover a constructive CAD fragment from a geometrically-proven solid extrusion.
@@ -90,6 +91,137 @@ pub fn recover_solid_extrusion_fragments(
     extrusions
         .iter()
         .map(recover_solid_extrusion_fragment)
+        .collect()
+}
+
+/// Recover a proven constant-round-section closed composite sweep.
+///
+/// The detector has already proven a planar cycle of exact cylinder and torus
+/// supports. The CAD node keeps that proof as a circular profile plus exact
+/// rigid translation/rotation path segments; no tessellation enters the IR.
+///
+/// # Errors
+/// Returns an error if the recovered frame/path is malformed or cannot form valid CAD IR.
+pub fn recover_closed_round_sweep_fragment(
+    sweep: &RecoveredClosedRoundSweep,
+) -> Result<CadFragment> {
+    if sweep.solid_id == 0
+        || !sweep.profile_radius_mm.is_finite()
+        || sweep.profile_radius_mm <= 0.0
+        || !sweep.max_residual_mm.is_finite()
+        || sweep.max_residual_mm > 1.0e-6
+        || sweep.segments.is_empty()
+    {
+        bail!("closed round sweep proof is invalid");
+    }
+    for axis in [
+        sweep.profile_x_axis,
+        sweep.profile_y_axis,
+        sweep.path_tangent,
+    ] {
+        if (norm(axis) - 1.0).abs() > 1.0e-8 {
+            bail!("closed round sweep frame is not orthonormal");
+        }
+    }
+    if dot(sweep.profile_x_axis, sweep.profile_y_axis).abs() > 1.0e-8
+        || dot(sweep.profile_x_axis, sweep.path_tangent).abs() > 1.0e-8
+        || dot(sweep.profile_y_axis, sweep.path_tangent).abs() > 1.0e-8
+    {
+        bail!("closed round sweep frame axes are not perpendicular");
+    }
+
+    let profile = Profile2d {
+        loops: vec![ProfileLoop {
+            curves: vec![
+                Curve2d::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: sweep.profile_radius_mm,
+                    start_angle_rad: 0.0,
+                    end_angle_rad: std::f64::consts::PI,
+                },
+                Curve2d::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: sweep.profile_radius_mm,
+                    start_angle_rad: std::f64::consts::PI,
+                    end_angle_rad: std::f64::consts::TAU,
+                },
+            ],
+        }],
+    };
+
+    let segments = sweep
+        .segments
+        .iter()
+        .map(|segment| match segment {
+            RecoveredSweepSegment::Translation { vector_mm } => SweepSegment3d::Translation {
+                vector_mm: *vector_mm,
+            },
+            RecoveredSweepSegment::Rotation {
+                axis_origin_mm,
+                axis_direction,
+                angle_rad,
+            } => SweepSegment3d::Rotation {
+                axis: Axis3 {
+                    origin_mm: *axis_origin_mm,
+                    direction: *axis_direction,
+                },
+                angle_rad: *angle_rad,
+            },
+        })
+        .collect::<Vec<_>>();
+
+    let mut model = CadModel::new();
+    let root = model.add_node(CadNode::Sweep {
+        profile,
+        path: SweepPath3d {
+            initial_transform: local_frame_transform(
+                sweep.path_start_mm,
+                sweep.profile_x_axis,
+                sweep.profile_y_axis,
+                sweep.path_tangent,
+            ),
+            segments,
+            closed: true,
+        },
+    });
+
+    let mut source_entity_ids = Vec::with_capacity(sweep.source_face_ids.len() + 1);
+    source_entity_ids.push(sweep.solid_id);
+    source_entity_ids.extend(sweep.source_face_ids.iter().copied());
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids,
+            proof: ProofStatus::WithinTolerance,
+            max_residual_mm: Some(sweep.max_residual_mm),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::SolidSweep {
+            solid_id: sweep.solid_id,
+            face_ids: sweep.source_face_ids.clone(),
+            closed: true,
+        },
+        model,
+        root,
+    })
+}
+
+/// Lower every proven closed round sweep into CAD IR.
+///
+/// # Errors
+/// Returns the first malformed detector result.
+pub fn recover_closed_round_sweep_fragments(
+    sweeps: &[RecoveredClosedRoundSweep],
+) -> Result<Vec<CadFragment>> {
+    sweeps
+        .iter()
+        .map(recover_closed_round_sweep_fragment)
         .collect()
 }
 
