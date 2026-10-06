@@ -1,4 +1,3 @@
-use crate::compact_brep::PackedBrep;
 use anyhow::{Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -599,8 +598,6 @@ pub struct BrepFallback {
     pub estimated_faces: usize,
     pub estimated_edges: usize,
     pub estimated_control_points: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) packed: Option<Box<PackedBrep>>,
 }
 
 impl BrepFallback {
@@ -615,34 +612,7 @@ impl BrepFallback {
             estimated_faces,
             estimated_edges,
             estimated_control_points,
-            packed: None,
         }
-    }
-
-    pub(crate) fn from_packed(source_entity_ids: Vec<u64>, packed: PackedBrep) -> Self {
-        Self {
-            estimated_faces: packed.face_count(),
-            estimated_edges: packed.edge_count(),
-            estimated_control_points: packed.control_point_count(),
-            source_entity_ids,
-            packed: Some(Box::new(packed)),
-        }
-    }
-
-    pub fn is_self_contained(&self) -> bool {
-        self.packed
-            .as_deref()
-            .is_some_and(PackedBrep::self_contained)
-    }
-
-    pub fn packed_core_bytes(&self) -> Option<usize> {
-        self.packed.as_deref().map(PackedBrep::core_payload_bytes)
-    }
-
-    pub fn packed_provenance_bytes(&self) -> Option<usize> {
-        self.packed
-            .as_deref()
-            .map(PackedBrep::provenance_payload_bytes)
     }
 
     const fn complexity(&self) -> u64 {

@@ -1,6 +1,6 @@
 use crate::cad_recovery::{
-    CadFragment, CadFragmentSource, recover_instance_pattern_fragments,
-    recover_packed_brep_fallback_fragment, recover_periodic_chain_fragments,
+    CadFragment, CadFragmentSource, recover_brep_fallback_fragment,
+    recover_instance_pattern_fragments, recover_periodic_chain_fragments,
     recover_radial_slot_revolution_fragments, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragments,
 };
@@ -155,26 +155,11 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
         if recovered_ids.contains(&solid.solid_id) {
             continue;
         }
-        let entities = exchange
-            .data
-            .iter()
-            .find_map(|section| {
-                section
-                    .entities
-                    .iter()
-                    .any(|entity| {
-                        crate::step_graph::entity_id(entity) == solid.solid_id
-                            && crate::step_graph::simple_record(entity)
-                                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
-                    })
-                    .then_some(section.entities.as_slice())
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!("solid #{} has no owning DATA section", solid.solid_id)
-            })?;
-        brep_fallbacks.push(recover_packed_brep_fallback_fragment(
+        brep_fallbacks.push(recover_brep_fallback_fragment(
             solid.solid_id,
-            entities,
+            solid.faces,
+            solid.edges,
+            0,
         )?);
     }
 
@@ -264,7 +249,6 @@ fn source_solid_id(source: &CadFragmentSource) -> Option<u64> {
         | CadFragmentSource::SolidRevolution { solid_id, .. }
         | CadFragmentSource::RadialSlotRevolution { solid_id, .. }
         | CadFragmentSource::PeriodicChain { solid_id, .. }
-        | CadFragmentSource::PeriodicChainSurfaceDecomposition { solid_id, .. }
         | CadFragmentSource::BrepFallback { solid_id } => Some(*solid_id),
         CadFragmentSource::InstancePattern { .. } => None,
     }

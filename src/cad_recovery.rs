@@ -6,7 +6,6 @@ use crate::math3::{cross, dot, norm, sub};
 use crate::numeric::exact_usize_to_f64;
 use crate::patterns::InstancePattern;
 use crate::periodic_chains::PeriodicChainPattern;
-use crate::periodic_decomposition::decompose_periodic_chain;
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
 use crate::solid_revolutions::{
@@ -49,182 +48,9 @@ pub enum CadFragmentSource {
         solid_id: u64,
         sites: usize,
     },
-    PeriodicChainSurfaceDecomposition {
-        solid_id: u64,
-        sites: usize,
-        motif_period_sites: usize,
-    },
     BrepFallback {
         solid_id: u64,
     },
-}
-
-fn add_packed_face_patch(
-    model: &mut CadModel,
-    solid_id: u64,
-    face_ids: &[u64],
-    entities: &[ruststep::ast::EntityInstance],
-) -> Result<NodeId> {
-    if face_ids.is_empty() {
-        bail!("periodic decomposition patch must contain at least one face");
-    }
-    let packed = crate::compact_brep::build_packed_brep_faces(solid_id, face_ids, entities)?;
-    let node = model.add_node(CadNode::BrepFallback(BrepFallback::from_packed(
-        face_ids.to_vec(),
-        packed,
-    )));
-    model.set_provenance(
-        node,
-        Provenance {
-            source_entity_ids: face_ids.to_vec(),
-            proof: ProofStatus::Exact,
-            max_residual_mm: Some(0.0),
-        },
-    )?;
-    Ok(node)
-}
-
-fn add_linear_face_pattern(
-    model: &mut CadModel,
-    solid_id: u64,
-    source_face_ids: &[u64],
-    repeat_count: usize,
-    step_mm: [f64; 3],
-    all_source_face_ids: Vec<u64>,
-    entities: &[ruststep::ast::EntityInstance],
-) -> Result<NodeId> {
-    let child = add_packed_face_patch(model, solid_id, source_face_ids, entities)?;
-    if repeat_count == 1 {
-        return Ok(child);
-    }
-    if repeat_count == 0 || step_mm.iter().any(|value| !value.is_finite()) {
-        bail!("invalid periodic face-pattern metadata");
-    }
-    let root = model.add_node(CadNode::Pattern {
-        pattern: PatternSpec::Linear {
-            count: repeat_count,
-            step_mm,
-        },
-        child,
-    });
-    model.set_provenance(
-        root,
-        Provenance {
-            source_entity_ids: all_source_face_ids,
-            proof: ProofStatus::WithinTolerance,
-            max_residual_mm: Some(1.0e-5),
-        },
-    )?;
-    Ok(root)
-}
-
-/// Lower a proven periodic fused solid into exact packed source patches plus
-/// translation-pattern nodes. The result is an assembly of surface patches,
-/// not a claim that constructive boolean/manifold history has been recovered.
-///
-/// # Errors
-/// Returns an error if the periodic proof cannot be exactly decomposed, packed,
-/// or shown to cover the source solid's face set exactly once.
-pub fn recover_periodic_chain_surface_decomposition_fragment(
-    chain: &PeriodicChainPattern,
-    entities: &[ruststep::ast::EntityInstance],
-) -> Result<CadFragment> {
-    let decomposition = decompose_periodic_chain(chain, entities)
-        .ok_or_else(|| anyhow!("periodic chain does not have a complete exact decomposition"))?;
-
-    let index = crate::step_graph::build_index(entities);
-    let mut source_faces = crate::brep::solid_face_ids(chain.solid_id, entities, &index)
-        .ok_or_else(|| anyhow!("periodic solid has no readable closed-shell face set"))?;
-    source_faces.sort_unstable();
-    source_faces.dedup();
-
-    let mut represented_faces = Vec::<u64>::new();
-    let mut model = CadModel::new();
-    let mut children = Vec::<NodeId>::new();
-
-    for pattern in &decomposition.site_patterns {
-        let all_faces = (pattern.source_index..chain.site_face_ids.len())
-            .step_by(decomposition.motif_period_sites)
-            .flat_map(|index| chain.site_face_ids[index].iter().copied())
-            .collect::<Vec<_>>();
-        represented_faces.extend(all_faces.iter().copied());
-        children.push(add_linear_face_pattern(
-            &mut model,
-            chain.solid_id,
-            &pattern.source_face_ids,
-            pattern.repeat_count,
-            pattern.step_mm,
-            all_faces,
-            entities,
-        )?);
-    }
-
-    for pattern in &decomposition.gap_patterns {
-        let all_faces = (pattern.source_index..chain.gap_face_ids.len())
-            .step_by(decomposition.motif_period_sites)
-            .flat_map(|index| chain.gap_face_ids[index].iter().copied())
-            .collect::<Vec<_>>();
-        represented_faces.extend(all_faces.iter().copied());
-        children.push(add_linear_face_pattern(
-            &mut model,
-            chain.solid_id,
-            &pattern.source_face_ids,
-            pattern.repeat_count,
-            pattern.step_mm,
-            all_faces,
-            entities,
-        )?);
-    }
-
-    if !decomposition.residual_face_ids.is_empty() {
-        represented_faces.extend(decomposition.residual_face_ids.iter().copied());
-        children.push(add_packed_face_patch(
-            &mut model,
-            chain.solid_id,
-            &decomposition.residual_face_ids,
-            entities,
-        )?);
-    }
-
-    represented_faces.sort_unstable();
-    if represented_faces.windows(2).any(|pair| pair[0] == pair[1]) {
-        bail!("periodic decomposition represents a source face more than once");
-    }
-    if represented_faces != source_faces {
-        bail!(
-            "periodic decomposition/source face-set mismatch: represented={} source={}",
-            represented_faces.len(),
-            source_faces.len()
-        );
-    }
-    if represented_faces.len() != decomposition.covered_face_count {
-        bail!("periodic decomposition covered-face count is inconsistent");
-    }
-    if children.is_empty() {
-        bail!("periodic decomposition produced no CAD nodes");
-    }
-
-    let root = model.add_node(CadNode::Assembly { children });
-    model.set_provenance(
-        root,
-        Provenance {
-            source_entity_ids: vec![chain.solid_id],
-            proof: ProofStatus::WithinTolerance,
-            max_residual_mm: Some(1.0e-5),
-        },
-    )?;
-    model.add_root(root)?;
-    model.validate()?;
-
-    Ok(CadFragment {
-        source: CadFragmentSource::PeriodicChainSurfaceDecomposition {
-            solid_id: chain.solid_id,
-            sites: chain.sites,
-            motif_period_sites: decomposition.motif_period_sites,
-        },
-        model,
-        root,
-    })
 }
 
 /// Admit any source solid into CAD IR without pretending it has been
@@ -253,46 +79,6 @@ pub fn recover_brep_fallback_fragment(
         estimated_faces,
         estimated_edges,
         estimated_control_points,
-    )));
-    model.set_provenance(
-        root,
-        Provenance {
-            source_entity_ids: vec![solid_id],
-            proof: ProofStatus::Exact,
-            max_residual_mm: Some(0.0),
-        },
-    )?;
-    model.add_root(root)?;
-    model.validate()?;
-
-    Ok(CadFragment {
-        source: CadFragmentSource::BrepFallback { solid_id },
-        model,
-        root,
-    })
-}
-
-/// Build an exact compact fallback from the parsed source B-rep.
-///
-/// The packed payload carries indexed topology and geometry in the CAD IR itself.
-/// If every source geometry kind is supported, `BrepFallback::is_self_contained`
-/// is true and the fragment no longer depends on the original STEP entity graph.
-///
-/// # Errors
-/// Returns an error if the source solid id is invalid or its B-rep cannot be packed.
-pub fn recover_packed_brep_fallback_fragment(
-    solid_id: u64,
-    entities: &[ruststep::ast::EntityInstance],
-) -> Result<CadFragment> {
-    if solid_id == 0 {
-        bail!("B-rep fallback solid id must be nonzero");
-    }
-
-    let packed = crate::compact_brep::build_packed_brep(solid_id, entities)?;
-    let mut model = CadModel::new();
-    let root = model.add_node(CadNode::BrepFallback(BrepFallback::from_packed(
-        vec![solid_id],
-        packed,
     )));
     model.set_provenance(
         root,
@@ -1631,65 +1417,6 @@ mod tests {
         diagnostic.read_only_proven = false;
         let fragments = recover_periodic_chain_fragments(&[periodic_chain_fixture(), diagnostic])?;
         assert_eq!(fragments.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn packed_brep_fallback_is_self_contained() -> Result<()> {
-        let src = b"ISO-10303-21;
-HEADER;
-FILE_DESCRIPTION(('x'),'1');
-FILE_NAME('a','b',(''),(''),'x','y','');
-FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
-ENDSEC;
-DATA;
-#1=CARTESIAN_POINT('',(0.,0.,0.));
-#2=CARTESIAN_POINT('',(1.,0.,0.));
-#3=CARTESIAN_POINT('',(0.,1.,0.));
-#4=VERTEX_POINT('',#1);
-#5=VERTEX_POINT('',#2);
-#6=VERTEX_POINT('',#3);
-#7=DIRECTION('',(1.,0.,0.));
-#8=VECTOR('',#7,1.);
-#9=LINE('',#1,#8);
-#10=DIRECTION('',(-1.,1.,0.));
-#11=VECTOR('',#10,1.4142135623730951);
-#12=LINE('',#2,#11);
-#13=DIRECTION('',(0.,-1.,0.));
-#14=VECTOR('',#13,1.);
-#15=LINE('',#3,#14);
-#16=EDGE_CURVE('',#4,#5,#9,.T.);
-#17=EDGE_CURVE('',#5,#6,#12,.T.);
-#18=EDGE_CURVE('',#6,#4,#15,.T.);
-#19=ORIENTED_EDGE('',*,*,#16,.T.);
-#20=ORIENTED_EDGE('',*,*,#17,.T.);
-#21=ORIENTED_EDGE('',*,*,#18,.T.);
-#22=EDGE_LOOP('',(#19,#20,#21));
-#23=FACE_OUTER_BOUND('',#22,.T.);
-#24=DIRECTION('',(0.,0.,1.));
-#25=DIRECTION('',(1.,0.,0.));
-#26=AXIS2_PLACEMENT_3D('',#1,#24,#25);
-#27=PLANE('',#26);
-#28=ADVANCED_FACE('',(#23),#27,.T.);
-#29=CLOSED_SHELL('',(#28));
-#30=MANIFOLD_SOLID_BREP('',#29);
-ENDSEC;
-END-ISO-10303-21;
-";
-        let exchange = ruststep::parser::parse(std::str::from_utf8(src)?)?;
-        let fragment = recover_packed_brep_fallback_fragment(30, &exchange.data[0].entities)?;
-        let CadNode::BrepFallback(fallback) = fragment.model.node(fragment.root)? else {
-            panic!("expected B-rep fallback root");
-        };
-        assert!(fallback.is_self_contained());
-        assert_eq!(fallback.estimated_faces, 1);
-        assert_eq!(fallback.estimated_edges, 3);
-        assert!(fallback.packed_core_bytes().is_some_and(|bytes| bytes > 0));
-        assert!(
-            fallback
-                .packed_provenance_bytes()
-                .is_some_and(|bytes| bytes > 0)
-        );
         Ok(())
     }
 

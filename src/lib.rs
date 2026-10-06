@@ -7,8 +7,6 @@ mod bezier_recovery;
 #[doc(hidden)]
 pub mod body_corpus;
 mod brep;
-mod compact_brep;
-pub use compact_brep::CompactBrepStats;
 pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
@@ -29,7 +27,6 @@ mod partition_recovery;
 pub mod patterns;
 pub mod periodic_bodies;
 pub mod periodic_chains;
-pub mod periodic_decomposition;
 pub mod periodic_resize;
 mod planar_features;
 pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
@@ -244,38 +241,6 @@ pub struct PeriodicChainEditOutput {
     pub resize: periodic_resize::PeriodicChainResizeStats,
     pub periodic_chains: Vec<periodic_chains::PeriodicChainPattern>,
     pub compatibility: compatibility::CompatibilityAudit,
-}
-
-/// Build the exact compact indexed B-rep fallback for one source solid and
-/// report its retained topology/geometry size.
-///
-/// This is a lossless IR compaction diagnostic, not constructive recovery.
-///
-/// # Errors
-/// Returns an error if the STEP exchange cannot be decoded/parsed, contains
-/// unsupported sections, or the requested solid cannot be packed.
-pub fn analyze_compact_brep_bytes(input: &[u8], solid_id: u64) -> Result<CompactBrepStats> {
-    let exchange = ParsedExchange::parse(input)?.exchange;
-
-    for section in &exchange.data {
-        let index = step_graph::build_index(&section.entities);
-        if !index.contains_key(&solid_id) {
-            continue;
-        }
-        let compact =
-            compact_brep::build_compact_brep_with_index(solid_id, &section.entities, &index)?;
-        let closure =
-            compact_brep::closure_entity_count_with_index(solid_id, &section.entities, &index);
-        let mut stats = compact.stats(closure);
-        stats.serialized_json_bytes = serde_json::to_vec(&compact)?.len();
-        let packed = compact.into_packed()?;
-        stats.packed_actual_core_bytes = packed.core_payload_bytes();
-        stats.packed_actual_provenance_bytes = packed.provenance_payload_bytes();
-        stats.packed_actual_json_bytes = serde_json::to_vec(&packed)?.len();
-        stats.packed_self_contained = packed.self_contained();
-        return Ok(stats);
-    }
-    bail!("solid #{solid_id} not found")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -606,36 +571,6 @@ pub fn detect_periodic_chains_bytes(
         .iter()
         .flat_map(|section| periodic_chains::detect_periodic_chains(&section.entities))
         .collect())
-}
-
-/// Recover a self-contained periodic surface decomposition for one fused solid.
-///
-/// Repeated site/gap patches are stored once and referenced through CAD-IR
-/// Pattern nodes. One-off rails/end geometry remains as exact packed face
-/// patches. The root is intentionally an Assembly rather than an editable solid.
-///
-/// # Errors
-/// Returns an error if the input cannot be parsed, the chain index is invalid,
-/// or the selected chain cannot be decomposed and packed exactly.
-pub fn recover_periodic_chain_surface_decomposition_bytes(
-    input: &[u8],
-    chain_index: usize,
-) -> Result<cad_recovery::CadFragment> {
-    let exchange = ParsedExchange::parse(input)?.exchange;
-
-    let mut current = 0usize;
-    for section in &exchange.data {
-        for chain in periodic_chains::detect_periodic_chains(&section.entities) {
-            if current == chain_index {
-                return cad_recovery::recover_periodic_chain_surface_decomposition_fragment(
-                    &chain,
-                    &section.entities,
-                );
-            }
-            current += 1;
-        }
-    }
-    bail!("periodic chain index {chain_index} not found")
 }
 
 /// Resize one proven periodic fused-solid chain while keeping its start fixed.
