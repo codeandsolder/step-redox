@@ -1,5 +1,5 @@
 use crate::math3::{dot, mul, norm, sub};
-use crate::step_entities::{cartesian_point, number};
+use crate::step_entities::{cartesian_point, direction_components as direction, number};
 use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Name, Parameter};
 use std::collections::{HashMap, HashSet};
@@ -341,31 +341,6 @@ fn axis3(
     let z = direction(nth_ref(&record.parameter, 2)?, entities, index)?;
     let x = direction(nth_ref(&record.parameter, 3)?, entities, index)?;
     Some((origin, z, x))
-}
-
-fn direction(
-    id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        number(&coords[0])?,
-        number(&coords[1])?,
-        number(&coords[2])?,
-    ])
 }
 
 fn nth_ref(parameter: &Parameter, idx: usize) -> Option<u64> {

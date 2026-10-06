@@ -36,6 +36,54 @@ pub(super) fn number(param: &Parameter) -> Option<f64> {
     }
 }
 
+pub(super) fn direction_components(
+    id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[f64; 3]> {
+    let record = simple_record(&entities[*index.get(&id)?])?;
+    if record.name != "DIRECTION" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    let Parameter::List(values) = params.get(1)? else {
+        return None;
+    };
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        number(&values[0])?,
+        number(&values[1])?,
+        number(&values[2])?,
+    ])
+}
+
+pub(super) fn vertex_point(
+    vertex_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[f64; 3]> {
+    let record = simple_record(&entities[*index.get(&vertex_id)?])?;
+    if record.name != "VERTEX_POINT" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)
+}
+
+pub(super) fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
+    match parameter {
+        Parameter::Enumeration(value) if value == "T" => Some(true),
+        Parameter::Enumeration(value) if value == "F" => Some(false),
+        _ => None,
+    }
+}
+
 pub(super) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     let Parameter::List(params) = parameter else {
         return None;

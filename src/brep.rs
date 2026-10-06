@@ -1,6 +1,9 @@
 use crate::math3::{dot, mul, normalize as normalize3, sub};
 use crate::shape_identity::{manifold_solid_face_ids, resolve_edge_curve_use};
-use crate::step_entities::{cartesian_point, entity_ref, number};
+use crate::step_entities::{
+    cartesian_point, direction_components as raw_direction_components, entity_ref,
+    enumeration_bool as parse_enumeration_bool, number, vertex_point as parse_vertex_point,
+};
 use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
@@ -952,24 +955,7 @@ pub fn direction_components(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(values) = params.get(1)? else {
-        return None;
-    };
-    if values.len() != 3 {
-        return None;
-    }
-    normalize([
-        number(&values[0])?,
-        number(&values[1])?,
-        number(&values[2])?,
-    ])
+    normalize(raw_direction_components(id, entities, index)?)
 }
 
 pub fn vertex_point(
@@ -977,22 +963,11 @@ pub fn vertex_point(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
-    let vertex = simple_record(&entities[*index.get(&vertex_id)?])?;
-    if vertex.name != "VERTEX_POINT" {
-        return None;
-    }
-    let Parameter::List(params) = &vertex.parameter else {
-        return None;
-    };
-    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)
+    parse_vertex_point(vertex_id, entities, index)
 }
 
 pub fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
-    match parameter {
-        Parameter::Enumeration(value) if value == "T" => Some(true),
-        Parameter::Enumeration(value) if value == "F" => Some(false),
-        _ => None,
-    }
+    parse_enumeration_bool(parameter)
 }
 
 fn default_ref_direction(axis: [f64; 3]) -> [f64; 3] {

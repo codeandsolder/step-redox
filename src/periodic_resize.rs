@@ -1,4 +1,5 @@
 use crate::math3::{add, dot, normalize as normalize3, scale};
+use crate::step_entities::number as numeric_value;
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
@@ -1512,14 +1513,6 @@ fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
         return None;
     };
     items.iter().map(entity_ref_value).collect()
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
 }
 
 fn quantize_coord(point: [f64; 3]) -> [i64; 3] {

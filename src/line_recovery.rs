@@ -1,4 +1,5 @@
 use crate::math3::{add, dot, norm, scale, sub};
+use crate::step_entities::number as numeric_value;
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
@@ -497,14 +498,6 @@ fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
         return None;
     };
     items.iter().map(integer_value).collect()
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
 }
 
 fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {

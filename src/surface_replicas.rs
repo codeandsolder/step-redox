@@ -1,5 +1,7 @@
 use crate::math3::{distance, norm, sub};
-use crate::step_entities::{cartesian_point, closure_from, entity_ref, number, push_simple};
+use crate::step_entities::{
+    cartesian_point, closure_from, direction_components, entity_ref, number, push_simple,
+};
 use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
@@ -270,25 +272,11 @@ fn direction(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(values) = params.get(1)? else {
-        return None;
-    };
-    if values.len() != 3 {
-        return None;
-    }
-    let out = [
-        number(&values[0])?,
-        number(&values[1])?,
-        number(&values[2])?,
-    ];
-    out.iter().all(|value| value.is_finite()).then_some(out)
+    let values = direction_components(id, entities, index)?;
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(values)
 }
 
 fn canonical_bits(value: f64) -> u64 {

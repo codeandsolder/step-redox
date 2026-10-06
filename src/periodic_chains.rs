@@ -1,3 +1,4 @@
+use crate::step_entities::{cartesian_point, number as numeric_value};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -1060,40 +1061,9 @@ fn face_edges(
     Some(out)
 }
 
-fn cartesian_point(
-    point: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(entities.get(*index.get(&point)?)?)?;
-    if record.name != "CARTESIAN_POINT" {
-        return None;
-    }
-    let params = list_params(record)?;
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric_value(&coords[0])?,
-        numeric_value(&coords[1])?,
-        numeric_value(&coords[2])?,
-    ])
-}
-
 fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params),
-        _ => None,
-    }
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        Parameter::Real(value) => Some(*value),
         _ => None,
     }
 }

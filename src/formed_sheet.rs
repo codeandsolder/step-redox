@@ -2,6 +2,10 @@ use crate::math3::{
     add, canonical_direction, closest_point_on_unit_line_to_origin, cross, distance, dot, mul,
     norm, normalize as normalize3, point_to_unit_line_distance, sub,
 };
+use crate::step_entities::{
+    cartesian_point, direction_components as direction, enumeration_bool, number as numeric_value,
+    vertex_point,
+};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -1365,20 +1369,6 @@ fn edge_curve_info(
     Some((start, end, curve, same_sense))
 }
 
-fn vertex_point(
-    vertex_id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let vertex = simple_record(entities.get(*index.get(&vertex_id)?)?)?;
-    if vertex.name != "VERTEX_POINT" {
-        return None;
-    }
-    let params = list_params(vertex)?;
-    let point_id = params.get(1).and_then(entity_ref_value)?;
-    cartesian_point(point_id, entities, index)
-}
-
 fn circle_support(
     curve_id: u64,
     entities: &[EntityInstance],
@@ -1435,14 +1425,6 @@ fn circle_sweep(start: f64, end: f64, forward: bool) -> f64 {
         (end - start).rem_euclid(tau)
     } else {
         -((start - end).rem_euclid(tau))
-    }
-}
-
-fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
-    match parameter {
-        Parameter::Enumeration(value) if value == "T" => Some(true),
-        Parameter::Enumeration(value) if value == "F" => Some(false),
-        _ => None,
     }
 }
 
@@ -1610,52 +1592,6 @@ fn surface_radius(surface: &Record) -> Option<f64> {
     numeric_value(params.get(2)?)
 }
 
-fn cartesian_point(
-    id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(entities.get(*index.get(&id)?)?)?;
-    if record.name != "CARTESIAN_POINT" {
-        return None;
-    }
-    let params = list_params(record)?;
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric_value(&coords[0])?,
-        numeric_value(&coords[1])?,
-        numeric_value(&coords[2])?,
-    ])
-}
-
-fn direction(
-    id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(entities.get(*index.get(&id)?)?)?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let params = list_params(record)?;
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric_value(&coords[0])?,
-        numeric_value(&coords[1])?,
-        numeric_value(&coords[2])?,
-    ])
-}
-
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     (dot(a, b).abs() - 1.0).abs() <= DIR_TOL
 }
@@ -1671,14 +1607,6 @@ fn quantize_mm(value: f64) -> i64 {
 const fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params.as_slice()),
-        _ => None,
-    }
-}
-
-fn numeric_value(parameter: &Parameter) -> Option<f64> {
-    match parameter {
-        Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
         _ => None,
     }
 }

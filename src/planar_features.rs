@@ -9,8 +9,8 @@ use crate::patterns::{
 };
 use crate::shape_identity::{face_topology_signature, oriented_edge_signature};
 use crate::step_entities::{
-    cartesian_point, entity_ref, patch_presentation_lists, push_point, push_simple,
-    representation_items_and_context,
+    cartesian_point, direction_components, entity_ref, patch_presentation_lists, push_point,
+    push_simple, representation_items_and_context,
 };
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
@@ -1614,39 +1614,6 @@ fn plane_frame(
             sign * direction[2] / length,
         ],
     })
-}
-
-fn direction_components(
-    id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric(&coords[0])?,
-        numeric(&coords[1])?,
-        numeric(&coords[2])?,
-    ])
-}
-
-fn numeric(parameter: &Parameter) -> Option<f64> {
-    match parameter {
-        Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        _ => None,
-    }
 }
 
 fn plane_side(points: &[[f64; 3]], frame: &PlaneFrame) -> PlaneSide {
