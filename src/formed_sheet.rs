@@ -366,7 +366,7 @@ fn coaxial_radius_differences(cylinders: &[CylinderFace]) -> Vec<SheetCylinderPa
                 outer_face_id: outer.face_id,
                 inner_radius_mm: inner.radius_mm,
                 outer_radius_mm: outer.radius_mm,
-                mid_radius_mm: (inner.radius_mm + outer.radius_mm) * 0.5,
+                mid_radius_mm: f64::midpoint(inner.radius_mm, outer.radius_mm),
                 axis_origin_mm: closest_point_on_unit_line_to_origin(inner.origin, axis),
                 axis,
             });
@@ -485,7 +485,7 @@ fn select_plane_pairs(planes: &[PlaneFace], thickness_mm: f64) -> Vec<SheetPlane
             negative_face_id,
             positive_face_id,
             normal,
-            mid_offset_mm: (negative_offset + positive_offset) * 0.5,
+            mid_offset_mm: f64::midpoint(negative_offset, positive_offset),
             separation_mm: candidate.separation_mm,
             projected_overlap_ratio: candidate.overlap_ratio,
         });
@@ -1001,7 +1001,7 @@ fn reference_ellipse_seam(
     if (first_radius - second_radius).abs() > GEOM_TOL_MM {
         return None;
     }
-    let radius_mm = (first_radius + second_radius) * 0.5;
+    let radius_mm = f64::midpoint(first_radius, second_radius);
     let first_axis = first_pair.axis;
     let second_axis = second_pair.axis;
     if dot(first_axis, second_axis).abs() > DIR_TOL * 100.0 {
@@ -1093,21 +1093,24 @@ fn closest_axis_intersection(
     second_axis: [f64; 3],
 ) -> Option<([f64; 3], f64)> {
     let b = dot(first_axis, second_axis);
-    let denominator = 1.0 - b * b;
-    if denominator.abs() <= DIR_TOL {
+    let cross_axis = cross(first_axis, second_axis);
+    let denominator = dot(cross_axis, cross_axis);
+    if !denominator.is_finite() || denominator <= DIR_TOL {
         return None;
     }
     let delta = sub(first_origin, second_origin);
     let d = dot(first_axis, delta);
     let e = dot(second_axis, delta);
-    let first_t = (b * e - d) / denominator;
-    let second_t = (e - b * d) / denominator;
+    let first_t = b.mul_add(e, -d) / denominator;
+    let second_t = (-b).mul_add(d, e) / denominator;
     let first_point = add(first_origin, mul(first_axis, first_t));
     let second_point = add(second_origin, mul(second_axis, second_t));
-    Some((
-        mul(add(first_point, second_point), 0.5),
-        distance(first_point, second_point),
-    ))
+    let midpoint = [
+        f64::midpoint(first_point[0], second_point[0]),
+        f64::midpoint(first_point[1], second_point[1]),
+        f64::midpoint(first_point[2], second_point[2]),
+    ];
+    Some((midpoint, distance(first_point, second_point)))
 }
 
 fn ellipse_point(center: [f64; 3], u_axis: [f64; 3], v_axis: [f64; 3], angle: f64) -> [f64; 3] {
@@ -1223,37 +1226,63 @@ fn rational_single_span_samples(
 }
 
 fn rational_bezier_point(poles: &[[f64; 3]], weights: &[f64], parameter: f64) -> Option<[f64; 3]> {
-    if poles.len() != weights.len() || poles.is_empty() {
+    if poles.len() != weights.len()
+        || poles.is_empty()
+        || !parameter.is_finite()
+        || !(0.0..=1.0).contains(&parameter)
+        || poles.iter().flatten().any(|value| !value.is_finite())
+        || weights
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight <= 0.0)
+    {
         return None;
     }
-    let degree = poles.len() - 1;
-    let mut numerator = [0.0; 3];
-    let mut denominator = 0.0;
-    for (index, (&pole, &weight)) in poles.iter().zip(weights).enumerate() {
-        let bernstein = binomial(degree, index) as f64
-            * parameter.powi(index as i32)
-            * (1.0 - parameter).powi((degree - index) as i32);
-        let weighted = bernstein * weight;
-        denominator += weighted;
-        for axis in 0..3 {
-            numerator[axis] += pole[axis] * weighted;
+
+    if parameter == 0.0 {
+        return poles.first().copied();
+    }
+    if parameter == 1.0 {
+        return poles.last().copied();
+    }
+
+    let weight_scale = weights.iter().copied().max_by(|a, b| a.total_cmp(b))?;
+    let mut homogeneous = poles
+        .iter()
+        .zip(weights)
+        .map(|(&pole, &weight)| {
+            let scaled_weight = weight / weight_scale;
+            [
+                pole[0] * scaled_weight,
+                pole[1] * scaled_weight,
+                pole[2] * scaled_weight,
+                scaled_weight,
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let complement = 1.0 - parameter;
+    for level in 1..homogeneous.len() {
+        for index in 0..homogeneous.len() - level {
+            let left = homogeneous[index];
+            let right = homogeneous[index + 1];
+            homogeneous[index] =
+                std::array::from_fn(|axis| complement.mul_add(left[axis], parameter * right[axis]));
         }
     }
-    if denominator.abs() <= 1.0e-15 {
+
+    let denominator = homogeneous[0][3];
+    if !denominator.is_finite() || denominator <= 0.0 {
         return None;
     }
-    Some([
-        numerator[0] / denominator,
-        numerator[1] / denominator,
-        numerator[2] / denominator,
-    ])
-}
-
-fn binomial(n: usize, k: usize) -> usize {
-    let k = k.min(n - k);
-    (0..k).fold(1usize, |accumulator, index| {
-        accumulator * (n - index) / (index + 1)
-    })
+    let point = [
+        homogeneous[0][0] / denominator,
+        homogeneous[0][1] / denominator,
+        homogeneous[0][2] / denominator,
+    ];
+    point
+        .iter()
+        .all(|coordinate| coordinate.is_finite())
+        .then_some(point)
 }
 
 fn select_skin_faces(
@@ -1715,6 +1744,37 @@ mod tests {
         let separations = parallel_plane_separations(&planes);
         assert_eq!(separations.len(), 1);
         assert!((separations[0] - 0.2).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn closest_axis_intersection_handles_near_parallel_axes() {
+        let angle: f64 = 2.0e-5;
+        let second_axis = [angle.cos(), -angle.sin(), 0.0];
+        let (center, gap) = closest_axis_intersection(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            second_axis,
+        )
+        .expect("test lines should have a well-defined closest approach");
+        let expected_x = 1.0 / angle.tan();
+        assert!(gap < 1.0e-9);
+        assert!((center[0] - expected_x).abs() < 1.0e-5);
+        assert!(center[1].abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn rational_bezier_de_casteljau_handles_extreme_weights() {
+        let scale = 1.0e100;
+        let root_half = std::f64::consts::FRAC_1_SQRT_2;
+        let poles = [[scale, 0.0, 0.0], [scale, scale, 0.0], [0.0, scale, 0.0]];
+        let weights = [1.0e300, root_half * 1.0e300, 1.0e300];
+        let point = rational_bezier_point(&poles, &weights, 0.5)
+            .expect("extreme finite weights should remain evaluable");
+        let expected = root_half * scale;
+        assert!(point[0].is_finite() && point[1].is_finite());
+        assert!((point[0] - expected).abs() / scale < 1.0e-14);
+        assert!((point[1] - expected).abs() / scale < 1.0e-14);
     }
 
     #[test]
