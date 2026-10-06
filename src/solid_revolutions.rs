@@ -708,7 +708,7 @@ fn detect_one_radial_slot(
     {
         return None;
     }
-    let slot_half_width_mm = 0.5 * (side_offset_a.abs() + side_offset_b.abs());
+    let slot_half_width_mm = f64::midpoint(side_offset_a.abs(), side_offset_b.abs());
     let mut slot_max_residual_mm = plane_axis_distance(*back_face_index)?
         .max((side_offset_a.abs() - side_offset_b.abs()).abs())
         .max((side_offset_a + side_offset_b).abs());
@@ -1115,7 +1115,8 @@ fn detect_spherical_cap(
     let center_t = axial_coordinate(first_sphere.center_mm, axis_origin_mm, axis_direction);
     let plane_t = axial_coordinate(plane.origin_mm, axis_origin_mm, axis_direction);
     let plane_offset = plane_t - center_t;
-    let cap_radius_squared = first_sphere.radius_mm.powi(2) - plane_offset.powi(2);
+    let cap_radius_squared =
+        (first_sphere.radius_mm - plane_offset) * (first_sphere.radius_mm + plane_offset);
     if !cap_radius_squared.is_finite() || cap_radius_squared <= GEOM_TOL_MM.powi(2) {
         return None;
     }
@@ -1189,7 +1190,7 @@ fn detect_spherical_cap(
     if side == 0 || sphere_cap_edges == 0 || max_residual_mm > GEOM_TOL_MM {
         return None;
     }
-    let pole_t = center_t + f64::from(side) * first_sphere.radius_mm;
+    let pole_t = f64::from(side).mul_add(first_sphere.radius_mm, center_t);
     for (face, _) in &sphere_faces {
         for edge in &face.loops[0].edges {
             for point in [edge.start_mm, edge.end_mm] {
@@ -1375,7 +1376,7 @@ fn detect_hemispherical_end(
 
     let plane_side = if plane_t > center_t { 1_i8 } else { -1_i8 };
     let sphere_side = -plane_side;
-    let pole_t = center_t + f64::from(sphere_side) * radius_mm;
+    let pole_t = f64::from(sphere_side).mul_add(radius_mm, center_t);
     let mut reached_pole = false;
     let mut sphere_cylinder_edges = 0_usize;
     let mut plane_cylinder_edges = 0_usize;
@@ -2010,9 +2011,7 @@ fn torus_parallel_boundary_point(
     let radial = circle.radius_mm;
     let center_t = axial_coordinate(torus.center_mm, axis_origin_mm, axis_direction);
     let meridian_residual =
-        (((radial - torus.major_radius_mm).powi(2) + (axial - center_t).powi(2)).sqrt()
-            - torus.minor_radius_mm)
-            .abs();
+        ((radial - torus.major_radius_mm).hypot(axial - center_t) - torus.minor_radius_mm).abs();
     let residual = axis_distance(circle.center_mm, axis_origin_mm, axis_direction)
         .max(meridian_residual)
         .max((norm(circle.normal) - 1.0).abs());
@@ -2087,7 +2086,7 @@ fn circle_trim_midpoint(
     if delta.abs() <= angle_tol || (std::f64::consts::TAU - delta.abs()) <= angle_tol {
         return None;
     }
-    let midpoint = start + 0.5 * delta;
+    let midpoint = 0.5f64.mul_add(delta, start);
     Some(add(
         circle.center_mm,
         add(
@@ -2323,7 +2322,7 @@ fn cone_profile_segment_with_angular_trims_inner(
         return None;
     }
     let source_radius_at =
-        |t: f64| cone.reference_radius_mm + source_slope * (t - source_reference_t);
+        |t: f64| source_slope.mul_add(t - source_reference_t, cone.reference_radius_mm);
 
     let mut boundary_samples = Vec::<[f64; 2]>::new();
     let mut raw_samples = Vec::<[f64; 2]>::new();
@@ -2564,7 +2563,7 @@ fn cone_profile_segment_with_angular_trims_inner(
     if !slope.is_finite() {
         return None;
     }
-    let radius_at = |t: f64| min_sample[0] + slope * (t - min_sample[1]);
+    let radius_at = |t: f64| slope.mul_add(t - min_sample[1], min_sample[0]);
 
     let mut profile_residual = 0.0_f64;
     for sample in &boundary_samples {
@@ -2621,8 +2620,8 @@ fn same_cone_meridian_support(
     let second_t = axial_coordinate(second.reference_origin_mm, axis_origin, axis);
     let first_slope = first_alignment.signum() * first.semi_angle_rad.tan();
     let second_slope = second_alignment.signum() * second.semi_angle_rad.tan();
-    let first_intercept = first.reference_radius_mm - first_slope * first_t;
-    let second_intercept = second.reference_radius_mm - second_slope * second_t;
+    let first_intercept = first_slope.mul_add(-first_t, first.reference_radius_mm);
+    let second_intercept = second_slope.mul_add(-second_t, second.reference_radius_mm);
     first_slope.is_finite()
         && second_slope.is_finite()
         && first_intercept.is_finite()
@@ -2812,7 +2811,9 @@ fn linear_meridian_support(
 }
 
 fn linear_signed_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
-    let radius = support.reference_signed_radius + support.slope * (axial - support.reference_t);
+    let radius = support
+        .slope
+        .mul_add(axial - support.reference_t, support.reference_signed_radius);
     radius.is_finite().then_some(radius)
 }
 
@@ -3077,7 +3078,7 @@ fn sphere_circle_residual(circle: brep::CircleSupport, sphere: brep::SphereSuppo
     let relative = sub(circle.center_mm, sphere.center_mm);
     let offset = dot(relative, normal);
     let lateral = norm(sub(relative, mul(normal, offset)));
-    let expected_squared = sphere.radius_mm.powi(2) - offset.powi(2);
+    let expected_squared = (sphere.radius_mm - offset) * (sphere.radius_mm + offset);
     if expected_squared < -GEOM_TOL_MM.powi(2) {
         return None;
     }
@@ -3111,8 +3112,8 @@ fn torus_point_residual(point: [f64; 3], torus: brep::TorusSupport, axis: [f64; 
     let axial = dot(relative, axis);
     let radial_vector = sub(relative, mul(axis, axial));
     let radial = norm(radial_vector);
-    let outer_tube_distance = ((radial - torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
-    let inner_tube_distance = ((radial + torus.major_radius_mm).powi(2) + axial.powi(2)).sqrt();
+    let outer_tube_distance = (radial - torus.major_radius_mm).hypot(axial);
+    let inner_tube_distance = (radial + torus.major_radius_mm).hypot(axial);
     (outer_tube_distance - torus.minor_radius_mm)
         .abs()
         .min((inner_tube_distance - torus.minor_radius_mm).abs())
@@ -3135,7 +3136,7 @@ fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
 }
 
 fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
