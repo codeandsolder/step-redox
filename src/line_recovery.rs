@@ -1,9 +1,12 @@
 use crate::math3::{add, dot, norm, scale, sub};
-use crate::step_entities::number as numeric_value;
+use crate::step_entities::{
+    entity_ref, entity_ref_list, integer_list, integer_value, number as numeric_value,
+    numeric_list, push_simple,
+};
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const COLLINEAR_TOL: f64 = 1.0e-12;
@@ -471,62 +474,8 @@ fn point_coords(
     ])
 }
 
-const fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    let refs = items
-        .iter()
-        .map(entity_ref_value)
-        .collect::<Option<Vec<_>>>()?;
-    Some(refs)
-}
-
-const fn integer_value(param: &Parameter) -> Option<i64> {
-    match param {
-        Parameter::Integer(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(integer_value).collect()
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
 fn is_false_logical(param: &Parameter) -> bool {
     matches!(param, Parameter::Enumeration(value) if value == "F")
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
 }
 
 fn point_line_distance(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {

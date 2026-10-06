@@ -60,6 +60,34 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
     }
 }
 
+pub(super) fn rewrite_entity_refs(entity: &mut EntityInstance, aliases: &HashMap<u64, u64>) {
+    fn rewrite_parameter(parameter: &mut Parameter, aliases: &HashMap<u64, u64>) {
+        match parameter {
+            Parameter::Ref(Name::Entity(id)) => {
+                if let Some(&replacement) = aliases.get(id) {
+                    *id = replacement;
+                }
+            }
+            Parameter::List(items) => {
+                for item in items {
+                    rewrite_parameter(item, aliases);
+                }
+            }
+            Parameter::Typed { parameter, .. } => rewrite_parameter(parameter, aliases),
+            _ => {}
+        }
+    }
+
+    match entity {
+        EntityInstance::Simple { record, .. } => rewrite_parameter(&mut record.parameter, aliases),
+        EntityInstance::Complex { subsuper, .. } => {
+            for record in &mut subsuper.0 {
+                rewrite_parameter(&mut record.parameter, aliases);
+            }
+        }
+    }
+}
+
 /// Immutable STEP entity-reference snapshot.
 ///
 /// `forward` preserves reference occurrence order. `inbound` represents unique

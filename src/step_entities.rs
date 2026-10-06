@@ -129,6 +129,115 @@ pub(super) fn representation_items_and_context(entity: &EntityInstance) -> Optio
     Some((item_ids?, entity_ref_value(&params[2])?))
 }
 
+pub(super) fn entity_ref_list(parameter: &Parameter) -> Option<Vec<u64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items.iter().map(entity_ref_value).collect()
+}
+
+pub(super) const fn integer_value(parameter: &Parameter) -> Option<i64> {
+    match parameter {
+        Parameter::Integer(value) => Some(*value),
+        _ => None,
+    }
+}
+
+pub(super) fn integer_list(parameter: &Parameter) -> Option<Vec<i64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items.iter().map(integer_value).collect()
+}
+
+pub(super) fn numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items.iter().map(number).collect()
+}
+
+pub(super) fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
+    let Parameter::List(items) = parameter else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| number(item).filter(|value| value.is_finite()))
+        .collect()
+}
+
+pub(super) fn parameter_number(parameter: &Parameter) -> Option<f64> {
+    match parameter {
+        Parameter::Typed { parameter, .. } => parameter_number(parameter),
+        _ => number(parameter),
+    }
+}
+
+pub(super) fn edge_vertices(
+    edge: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[u64; 2]> {
+    let record = simple_record(entities.get(*index.get(&edge)?)?)?;
+    if record.name != "EDGE_CURVE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    Some([
+        entity_ref_value(params.get(1)?)?,
+        entity_ref_value(params.get(2)?)?,
+    ])
+}
+
+pub(super) fn oriented_edge_element(record: &Record) -> Option<u64> {
+    if record.name != "ORIENTED_EDGE" {
+        return None;
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    entity_ref_value(params.get(3)?)
+}
+
+pub(super) fn oriented_edge_orientation(record: &Record) -> Option<bool> {
+    let Parameter::List(params) = &record.parameter else {
+        return None;
+    };
+    enumeration_bool(params.get(4)?)
+}
+
+pub(super) fn styled_items_by_target(
+    entities: &[EntityInstance],
+) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
+    let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
+    for entity in entities {
+        let id = crate::step_graph::entity_id(entity);
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "STYLED_ITEM" {
+            continue;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            continue;
+        };
+        if params.len() != 3 {
+            continue;
+        }
+        let Some(target) = entity_ref_value(&params[2]) else {
+            continue;
+        };
+        let Some(assignments) = entity_ref_list(&params[1]) else {
+            continue;
+        };
+        out.entry(target).or_default().push((id, assignments));
+    }
+    out
+}
+
 pub(super) fn patch_presentation_lists(
     entities: &mut [EntityInstance],
     remove: &HashSet<u64>,

@@ -1,11 +1,15 @@
 use crate::math3::{
     add, canonical_direction, cross, dot, norm, normalize as normalize3, scale, sub,
 };
+use crate::step_entities::{
+    entity_ref, entity_ref_list, numeric_list, push_simple,
+    styled_items_by_target as style_records_by_target,
+};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
 use anyhow::{Result, bail};
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -1128,33 +1132,6 @@ fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<Vec<u64>>> 
         .collect()
 }
 
-fn style_records_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
-    let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "STYLED_ITEM" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 3 {
-            continue;
-        }
-        let Some(target) = entity_ref_value(&params[2]) else {
-            continue;
-        };
-        let Some(assignments) = entity_ref_list(&params[1]) else {
-            continue;
-        };
-        out.entry(target).or_default().push((id, assignments));
-    }
-    out
-}
-
 fn point_coords(
     point: u64,
     entities: &[EntityInstance],
@@ -1197,50 +1174,6 @@ fn quantize_matrix(matrix: [[f64; 3]; 3]) -> Option<[i64; 9]> {
         out[idx] = scaled as i64;
     }
     Some(out)
-}
-
-const fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
-}
-
-const fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(v) => Some(*v as f64),
-        Parameter::Real(v) => Some(*v),
-        _ => None,
-    }
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
 }
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {

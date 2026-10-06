@@ -1,10 +1,8 @@
 use crate::math3::normalize as normalize3;
-use crate::step_entities::number as numeric_value;
-use crate::step_graph::{
-    ReferenceGraph, entity_id, entity_ref_value, simple_record, visit_entity_refs,
-};
+use crate::step_entities::{entity_ref, entity_ref_list, number as numeric_value};
+use crate::step_graph::{ReferenceGraph, entity_id, simple_record, visit_entity_refs};
 use anyhow::{Result, anyhow, bail};
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
 use crate::instances::StyleRef;
@@ -137,17 +135,6 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
         Parameter::List(params) => Some(params),
         _ => None,
     }
-}
-
-const fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
 }
 
 fn quantize_coord(point: [f64; 3]) -> [i64; 3] {

@@ -3,6 +3,7 @@ use crate::brep::{
     face_surface, manifold_shell, ref_list_param, remove_refs_from_list_param, toggle_tf,
 };
 use crate::instances::{StyleRef, collect_styles_by_target};
+use crate::math2::rotate_quarter_xy as rotate_xy;
 use crate::math3::{add, distance, sub};
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
@@ -1680,16 +1681,6 @@ fn rigid_translation(source_center: [f64; 3], target_center: [f64; 3], quarter: 
         target_center[1] - y,
         target_center[2] - source_center[2],
     ]
-}
-
-fn rotate_xy(x: f64, y: f64, quarter: u8) -> (f64, f64) {
-    match quarter % 4 {
-        0 => (x, y),
-        1 => (-y, x),
-        2 => (-x, -y),
-        3 => (y, -x),
-        _ => unreachable!(),
-    }
 }
 
 #[cfg(test)]

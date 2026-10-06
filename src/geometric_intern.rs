@@ -1,7 +1,9 @@
 use crate::math3::{dot, mul, norm, sub};
 use crate::step_entities::{cartesian_point, direction_components as direction, number};
-use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
-use ruststep::ast::{EntityInstance, Name, Parameter};
+use crate::step_graph::{
+    ReferenceGraph, build_index, entity_id, entity_ref_value, rewrite_entity_refs, simple_record,
+};
+use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
 
 const POS_TOL_MM: f64 = 1.0e-5;
@@ -137,7 +139,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     }
 
     for entity in entities.iter_mut() {
-        rewrite_refs(entity, &alias);
+        rewrite_entity_refs(entity, &alias);
     }
 
     let rewritten_references = ReferenceGraph::new(entities);
@@ -369,38 +371,10 @@ fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
     Some([v[0] / n, v[1] / n, v[2] / n])
 }
 
-fn rewrite_refs(entity: &mut EntityInstance, alias: &HashMap<u64, u64>) {
-    match entity {
-        EntityInstance::Simple { record, .. } => rewrite_param(&mut record.parameter, alias),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &mut subsuper.0 {
-                rewrite_param(&mut record.parameter, alias);
-            }
-        }
-    }
-}
-
-fn rewrite_param(param: &mut Parameter, alias: &HashMap<u64, u64>) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => {
-            if let Some(&new) = alias.get(id) {
-                *id = new;
-            }
-        }
-        Parameter::List(items) => {
-            for item in items {
-                rewrite_param(item, alias);
-            }
-        }
-        Parameter::Typed { parameter, .. } => rewrite_param(parameter, alias),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ruststep::ast::Record;
+    use ruststep::ast::{Name, Record};
 
     fn r(id: u64) -> Parameter {
         Parameter::Ref(Name::Entity(id))

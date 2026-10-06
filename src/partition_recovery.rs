@@ -1,9 +1,14 @@
 use crate::math3::{canonical_direction, canonical_unit_direction, dot, normalize as normalize3};
+use crate::step_entities::{
+    edge_vertices, entity_ref, entity_ref_list, enumeration_bool as logical_bool,
+    number as numeric_value, numeric_list, oriented_edge_element, oriented_edge_orientation,
+    push_simple, styled_items_by_target as styles_by_target,
+};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
     visit_entity_refs,
 };
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const POINT_Q: f64 = 1.0e-8;
@@ -806,41 +811,6 @@ fn direction_coords(
     (xyz.len() == 3).then(|| [xyz[0], xyz[1], xyz[2]])
 }
 
-fn edge_vertices(
-    edge: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[u64; 2]> {
-    let record = simple_record(entities.get(*index.get(&edge)?)?)?;
-    if record.name != "EDGE_CURVE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    Some([
-        entity_ref_value(params.get(1)?)?,
-        entity_ref_value(params.get(2)?)?,
-    ])
-}
-
-fn oriented_edge_element(record: &Record) -> Option<u64> {
-    if record.name != "ORIENTED_EDGE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    entity_ref_value(params.get(3)?)
-}
-
-fn oriented_edge_orientation(record: &Record) -> Option<bool> {
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    logical_bool(params.get(4)?)
-}
-
 fn rewrite_edge_vertices(record: &mut Record, uf: &mut UnionFind) -> Option<()> {
     let Parameter::List(params) = &mut record.parameter else {
         return None;
@@ -942,33 +912,6 @@ fn replace_and_dedup_direct_ref_lists(param: &mut Parameter, mapping: &HashMap<u
     }
 }
 
-fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
-    let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "STYLED_ITEM" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 3 {
-            continue;
-        }
-        let Some(target) = entity_ref_value(&params[2]) else {
-            continue;
-        };
-        let Some(assignments) = entity_ref_list(&params[1]) else {
-            continue;
-        };
-        out.entry(target).or_default().push((id, assignments));
-    }
-    out
-}
-
 fn direct_refs_of_type(
     entity: &EntityInstance,
     entities: &[EntityInstance],
@@ -986,40 +929,6 @@ fn direct_refs_of_type(
         }
     });
     refs
-}
-
-const fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-const fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(v) => Some(*v as f64),
-        Parameter::Real(v) => Some(*v),
-        _ => None,
-    }
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
-fn logical_bool(param: &Parameter) -> Option<bool> {
-    match param {
-        Parameter::Enumeration(v) if v == "T" => Some(true),
-        Parameter::Enumeration(v) if v == "F" => Some(false),
-        _ => None,
-    }
 }
 
 fn point_key(p: [f64; 3]) -> Option<[i64; 3]> {
@@ -1051,24 +960,6 @@ fn quantize(v: f64, q: f64) -> Option<i64> {
 
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(v, 1.0e-15)
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
 }
 
 #[cfg(test)]

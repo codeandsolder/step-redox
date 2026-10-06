@@ -1,3 +1,4 @@
+use crate::math2::rotate_quarter_xy as rotate_xy;
 use crate::step_entities::{cartesian_point, closure_from, nth_entity_ref, number};
 use crate::step_graph::{entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
@@ -921,16 +922,6 @@ fn transform_direction(direction: [f64; 3], quarter: u8) -> [i64; 3] {
         (y * 1.0e9).round() as i64,
         (direction[2] * 1.0e9).round() as i64,
     ]
-}
-
-pub(crate) fn rotate_xy(x: f64, y: f64, quarter: u8) -> (f64, f64) {
-    match quarter % 4 {
-        0 => (x, y),
-        1 => (-y, x),
-        2 => (-x, -y),
-        3 => (y, -x),
-        _ => unreachable!(),
-    }
 }
 
 fn parameter_literal_signature(parameter: &Parameter) -> Option<String> {

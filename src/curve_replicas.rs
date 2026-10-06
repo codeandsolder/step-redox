@@ -1,8 +1,10 @@
 use crate::math3::{add, distance, norm, sub};
 use crate::step_entities::{cartesian_point, entity_ref, push_simple};
-use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
+use crate::step_graph::{
+    ReferenceGraph, build_index, entity_id, entity_ref_value, rewrite_entity_refs, simple_record,
+};
 use crate::step_identity::{IndexBucket, hash_parameter, parameters_equivalent};
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -183,7 +185,7 @@ pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) ->
     // Near-zero translations are cheaper as direct reference aliases.
     if !aliases.is_empty() {
         for entity in entities.iter_mut() {
-            rewrite_refs(entity, &aliases);
+            rewrite_entity_refs(entity, &aliases);
         }
     }
 
@@ -351,34 +353,6 @@ fn quant(v: f64) -> i64 {
 
 fn quant_transform(v: f64) -> i64 {
     (v / TRANSFORM_TOLERANCE_MM).round() as i64
-}
-
-fn rewrite_refs(entity: &mut EntityInstance, alias: &HashMap<u64, u64>) {
-    match entity {
-        EntityInstance::Simple { record, .. } => rewrite_param(&mut record.parameter, alias),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &mut subsuper.0 {
-                rewrite_param(&mut record.parameter, alias);
-            }
-        }
-    }
-}
-
-fn rewrite_param(param: &mut Parameter, alias: &HashMap<u64, u64>) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => {
-            if let Some(&new) = alias.get(id) {
-                *id = new;
-            }
-        }
-        Parameter::List(items) => {
-            for item in items {
-                rewrite_param(item, alias);
-            }
-        }
-        Parameter::Typed { parameter, .. } => rewrite_param(parameter, alias),
-        _ => {}
-    }
 }
 
 #[cfg(test)]

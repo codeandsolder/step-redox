@@ -1,5 +1,6 @@
+use crate::math2::rotate_quarter_xy as rotate_xy;
 use crate::shape_identity::{
-    ShapeKey, normalized_points, rotate_xy, solid_identity, solid_topology_signature,
+    ShapeKey, normalized_points, solid_identity, solid_topology_signature,
 };
 use crate::step_entities::{
     entity_ref, patch_presentation_lists, push_point, push_simple, representation_items_and_context,

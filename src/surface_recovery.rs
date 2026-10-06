@@ -1,5 +1,8 @@
 use crate::math3::{cross, distance, dot, norm, normalize as normalize3, sub};
-use crate::step_entities::{cartesian_point, entity_ref, number, push_simple};
+use crate::step_entities::{
+    cartesian_point, entity_ref, finite_numeric_list as numeric_parameter_list,
+    integer_value as integer, number, push_simple,
+};
 use crate::step_graph::{
     build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
 };
@@ -561,16 +564,6 @@ fn integer_parameter_list(parameter: &Parameter) -> Option<Vec<usize>> {
         .collect()
 }
 
-fn numeric_parameter_list(parameter: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = parameter else {
-        return None;
-    };
-    items
-        .iter()
-        .map(|item| number(item).filter(|value| value.is_finite()))
-        .collect()
-}
-
 fn normalized_expanded_knots(
     degree: usize,
     control_points: usize,
@@ -779,13 +772,6 @@ fn canonical_unit_linear_v(multiplicities: &Parameter, knots: &Parameter) -> Opt
             && v0.abs() <= PARAMETER_TOLERANCE
             && (v1 - 1.0).abs() <= PARAMETER_TOLERANCE,
     )
-}
-
-const fn integer(parameter: &Parameter) -> Option<i64> {
-    match parameter {
-        Parameter::Integer(value) => Some(*value),
-        _ => None,
-    }
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {

@@ -1,7 +1,12 @@
+use crate::step_entities::{
+    edge_vertices, entity_ref, entity_ref_list, enumeration_bool as logical_bool,
+    oriented_edge_element, oriented_edge_orientation, push_simple,
+    styled_items_by_target as styles_by_target,
+};
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 const SURFACE_TYPES: &[&str] = &[
@@ -518,68 +523,6 @@ fn oriented_vertices(
     Some(if forward { (v0, v1) } else { (v1, v0) })
 }
 
-fn edge_vertices(
-    edge: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[u64; 2]> {
-    let record = simple_record(entities.get(*index.get(&edge)?)?)?;
-    if record.name != "EDGE_CURVE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    Some([
-        entity_ref_value(params.get(1)?)?,
-        entity_ref_value(params.get(2)?)?,
-    ])
-}
-
-fn oriented_edge_element(record: &Record) -> Option<u64> {
-    if record.name != "ORIENTED_EDGE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    entity_ref_value(params.get(3)?)
-}
-
-fn oriented_edge_orientation(record: &Record) -> Option<bool> {
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    logical_bool(params.get(4)?)
-}
-
-fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
-    let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "STYLED_ITEM" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 3 {
-            continue;
-        }
-        let Some(target) = entity_ref_value(&params[2]) else {
-            continue;
-        };
-        let Some(assignments) = entity_ref_list(&params[1]) else {
-            continue;
-        };
-        out.entry(target).or_default().push((id, assignments));
-    }
-    out
-}
-
 fn face_shell_owners(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -664,46 +607,10 @@ fn remove_refs_from_direct_lists(param: &mut Parameter, drop: &HashSet<u64>) {
     }
 }
 
-const fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-fn logical_bool(param: &Parameter) -> Option<bool> {
-    match param {
-        Parameter::Enumeration(v) if v == "T" => Some(true),
-        Parameter::Enumeration(v) if v == "F" => Some(false),
-        _ => None,
-    }
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ruststep::ast::Record;
 
     fn simple(id: u64, name: &str, params: Vec<Parameter>) -> EntityInstance {
         EntityInstance::Simple {

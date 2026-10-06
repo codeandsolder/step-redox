@@ -26,9 +26,19 @@ pub(crate) fn normalize(vector: [f64; 2], min_norm: f64) -> Option<[f64; 2]> {
     Some([vector[0] / length, vector[1] / length])
 }
 
+pub(crate) fn rotate_quarter_xy(x: f64, y: f64, quarter: u8) -> (f64, f64) {
+    match quarter % 4 {
+        0 => (x, y),
+        1 => (-y, x),
+        2 => (-x, -y),
+        3 => (y, -x),
+        _ => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cross, distance, dot, norm, normalize, sub};
+    use super::{cross, distance, dot, norm, normalize, rotate_quarter_xy, sub};
 
     #[test]
     fn basic_operations_are_stable() {
@@ -39,5 +49,7 @@ mod tests {
         assert_eq!(distance([3.0, 4.0], [0.0, 0.0]), 5.0);
         assert_eq!(normalize([3.0, 4.0], 1.0e-12), Some([0.6, 0.8]));
         assert_eq!(normalize([0.0, 0.0], 0.0), None);
+        assert_eq!(rotate_quarter_xy(2.0, 3.0, 1), (-3.0, 2.0));
+        assert_eq!(rotate_quarter_xy(2.0, 3.0, 6), (-2.0, -3.0));
     }
 }

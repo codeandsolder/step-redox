@@ -1,6 +1,7 @@
 use crate::math3::{distance, norm, sub};
 use crate::step_entities::{
-    cartesian_point, closure_from, direction_components, entity_ref, number, push_simple,
+    cartesian_point, closure_from, direction_components, entity_ref, number, push_point,
+    push_simple,
 };
 use crate::step_graph::{ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
@@ -281,18 +282,6 @@ fn direction(
 
 fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 { 0 } else { value.to_bits() }
-}
-
-fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64; 3]) -> u64 {
-    push_simple(
-        entities,
-        next_id,
-        "CARTESIAN_POINT",
-        vec![
-            Parameter::String(String::new()),
-            Parameter::List(point.into_iter().map(Parameter::Real).collect()),
-        ],
-    )
 }
 
 fn quant_transform(value: f64) -> i64 {

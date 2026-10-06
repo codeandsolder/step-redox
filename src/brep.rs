@@ -2,7 +2,8 @@ use crate::math3::{dot, mul, normalize as normalize3, sub};
 use crate::shape_identity::{manifold_solid_face_ids, resolve_edge_curve_use};
 use crate::step_entities::{
     cartesian_point, direction_components as raw_direction_components, entity_ref,
-    enumeration_bool as parse_enumeration_bool, number, vertex_point as parse_vertex_point,
+    enumeration_bool as parse_enumeration_bool, finite_numeric_list, number,
+    vertex_point as parse_vertex_point,
 };
 use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;
@@ -692,16 +693,6 @@ fn positive_integer_list(parameter: &Parameter) -> Option<Vec<usize>> {
             Parameter::Integer(value) if *value >= 1 => usize::try_from(*value).ok(),
             _ => None,
         })
-        .collect()
-}
-
-fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = parameter else {
-        return None;
-    };
-    items
-        .iter()
-        .map(|item| number(item).filter(|value| value.is_finite()))
         .collect()
 }
 

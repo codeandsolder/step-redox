@@ -1,4 +1,6 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::step_entities::parameter_number;
+use crate::step_graph::entity_ref_value;
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::HashMap;
 
 const MAX_UNIT_RECURSION: usize = 8;
@@ -111,22 +113,6 @@ fn si_length_unit_scale_mm(record: &Record) -> Option<f64> {
         _ => return None,
     };
     Some(metres * 1000.0)
-}
-
-fn parameter_number(parameter: &Parameter) -> Option<f64> {
-    match parameter {
-        Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        Parameter::Typed { parameter, .. } => parameter_number(parameter),
-        _ => None,
-    }
-}
-
-const fn entity_ref_value(parameter: &Parameter) -> Option<u64> {
-    match parameter {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
 }
 
 fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a Record> {

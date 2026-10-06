@@ -1,6 +1,6 @@
-use crate::step_entities::number as numeric_value;
-use crate::step_graph::visit_entity_refs;
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::step_entities::{entity_ref_list, integer_list, integer_value, numeric_list};
+use crate::step_graph::{entity_id, visit_entity_refs};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone)]
@@ -155,50 +155,10 @@ fn inbound_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-const fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-const fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-const fn integer_value(param: &Parameter) -> Option<i64> {
-    match param {
-        Parameter::Integer(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(integer_value).collect()
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ruststep::ast::Name;
 
     fn r(id: u64) -> Parameter {
         Parameter::Ref(Name::Entity(id))

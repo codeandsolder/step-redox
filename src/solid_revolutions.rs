@@ -5,7 +5,7 @@ use crate::math3::{
     normalize as normalize3, point_to_unit_line_distance, sub,
 };
 use crate::profile_curves::RecoveredProfileCurve;
-use crate::step_entities::representation_items_and_context;
+use crate::step_entities::{parameter_number, representation_items_and_context};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
@@ -315,15 +315,6 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
         EntityInstance::Complex { subsuper, .. } => {
             subsuper.0.iter().find(|record| record.name == name)
         }
-    }
-}
-
-fn parameter_number(parameter: &Parameter) -> Option<f64> {
-    match parameter {
-        Parameter::Real(value) => Some(*value),
-        Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
-        Parameter::Typed { parameter, .. } => parameter_number(parameter),
-        _ => None,
     }
 }
 
