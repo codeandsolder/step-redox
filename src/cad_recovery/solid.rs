@@ -10,7 +10,10 @@ use crate::solid_revolutions::{
     MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM, REVOLUTION_SOURCE_SUPPORT_TOL_MM,
     RecoveredRadialSlotRevolution, RecoveredSolidRevolution,
 };
-use crate::solid_sweeps::{RecoveredClosedRoundSweep, RecoveredSweepSegment};
+use crate::solid_sweeps::{
+    RecoveredClosedRoundSweep, RecoveredOpenRectangularSweep, RecoveredPlanarSweepLeg,
+    RecoveredSweepSegment,
+};
 use anyhow::{Result, bail};
 
 /// Recover a constructive CAD fragment from a geometrically-proven solid extrusion.
@@ -222,6 +225,163 @@ pub fn recover_closed_round_sweep_fragments(
     sweeps
         .iter()
         .map(recover_closed_round_sweep_fragment)
+        .collect()
+}
+
+/// Recover a one-bend rectangular-section body as two exact planar prisms plus
+/// one exact rotational sweep through the source cylindrical sector.
+///
+/// The straight-leg polygons come directly from paired source faces, so terminal
+/// flanges and line-only chamfers remain part of the constructive model rather
+/// than being approximated by a constant-width path.
+///
+/// # Errors
+/// Returns an error if the recovered dimensions/frame are malformed or the
+/// resulting constructive union is not valid CAD IR.
+pub fn recover_open_rectangular_sweep_fragment(
+    sweep: &RecoveredOpenRectangularSweep,
+) -> Result<CadFragment> {
+    if sweep.solid_id == 0
+        || !sweep.profile_width_mm.is_finite()
+        || sweep.profile_width_mm <= 0.0
+        || !sweep.profile_thickness_mm.is_finite()
+        || sweep.profile_thickness_mm <= 0.0
+        || !sweep.max_residual_mm.is_finite()
+        || sweep.max_residual_mm > 1.0e-5
+    {
+        bail!("open rectangular sweep proof is invalid");
+    }
+    for axis in [
+        sweep.bend_profile_x_axis,
+        sweep.bend_profile_y_axis,
+        sweep.bend_path_tangent,
+    ] {
+        if (norm(axis) - 1.0).abs() > 1.0e-8 {
+            bail!("open rectangular sweep frame is not orthonormal");
+        }
+    }
+    if dot(sweep.bend_profile_x_axis, sweep.bend_profile_y_axis).abs() > 1.0e-8
+        || dot(sweep.bend_profile_x_axis, sweep.bend_path_tangent).abs() > 1.0e-8
+        || dot(sweep.bend_profile_y_axis, sweep.bend_path_tangent).abs() > 1.0e-8
+        || dot(
+            cross(sweep.bend_profile_x_axis, sweep.bend_profile_y_axis),
+            sweep.bend_path_tangent,
+        ) < 1.0 - 1.0e-8
+    {
+        bail!("open rectangular sweep frame axes are inconsistent");
+    }
+
+    let mut model = CadModel::new();
+    let leg_roots = sweep
+        .legs
+        .iter()
+        .map(|leg| add_planar_sweep_leg(&mut model, leg))
+        .collect::<Result<Vec<_>>>()?;
+
+    let half_width = sweep.profile_width_mm * 0.5;
+    let half_thickness = sweep.profile_thickness_mm * 0.5;
+    let bend_profile = Profile2d::polygon(vec![
+        [-half_width, -half_thickness],
+        [half_width, -half_thickness],
+        [half_width, half_thickness],
+        [-half_width, half_thickness],
+    ])?;
+    if sweep.bend_segments.len() != 3 {
+        bail!("one-bend rectangular sweep must contain overlap, rotation, overlap");
+    }
+    let bend_segments = sweep
+        .bend_segments
+        .iter()
+        .map(|segment| match segment {
+            RecoveredSweepSegment::Translation { vector_mm } => SweepSegment3d::Translation {
+                vector_mm: *vector_mm,
+            },
+            RecoveredSweepSegment::Rotation {
+                axis_origin_mm,
+                axis_direction,
+                angle_rad,
+            } => SweepSegment3d::Rotation {
+                axis: Axis3 {
+                    origin_mm: *axis_origin_mm,
+                    direction: *axis_direction,
+                },
+                angle_rad: *angle_rad,
+            },
+        })
+        .collect::<Vec<_>>();
+    let bend = model.add_node(CadNode::Sweep {
+        profile: bend_profile,
+        path: SweepPath3d {
+            initial_transform: local_frame_transform(
+                sweep.bend_path_start_mm,
+                sweep.bend_profile_x_axis,
+                sweep.bend_profile_y_axis,
+                sweep.bend_path_tangent,
+            ),
+            segments: bend_segments,
+            closed: false,
+        },
+    });
+
+    let root = model.add_node(CadNode::Boolean {
+        op: BooleanOp::Union,
+        children: vec![leg_roots[0], bend, leg_roots[1]],
+    });
+    let mut source_entity_ids = Vec::with_capacity(sweep.source_face_ids.len() + 1);
+    source_entity_ids.push(sweep.solid_id);
+    source_entity_ids.extend(sweep.source_face_ids.iter().copied());
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids,
+            proof: ProofStatus::WithinTolerance,
+            max_residual_mm: Some(sweep.max_residual_mm),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    Ok(CadFragment {
+        source: CadFragmentSource::SolidSweep {
+            solid_id: sweep.solid_id,
+            face_ids: sweep.source_face_ids.clone(),
+            closed: false,
+        },
+        model,
+        root,
+    })
+}
+
+fn add_planar_sweep_leg(
+    model: &mut CadModel,
+    leg: &RecoveredPlanarSweepLeg,
+) -> Result<crate::cad_ir::NodeId> {
+    if !leg.depth_mm.is_finite() || leg.depth_mm <= 0.0 || leg.profile_points_mm.len() < 3 {
+        bail!("open rectangular sweep leg is malformed");
+    }
+    let profile = Profile2d::polygon(leg.profile_points_mm.clone())?;
+    let body = model.add_node(CadNode::Extrude {
+        profile,
+        vector_mm: [0.0, 0.0, leg.depth_mm],
+    });
+    Ok(model.add_node(CadNode::Transform {
+        transform: local_frame_transform(leg.origin_mm, leg.x_axis, leg.y_axis, leg.z_axis),
+        child: body,
+    }))
+}
+
+/// Lower every proven one-bend rectangular sweep into CAD IR.
+///
+/// # Errors
+/// Returns the first malformed detector result.
+pub fn recover_open_rectangular_sweep_fragments(
+    sweeps: &[RecoveredOpenRectangularSweep],
+) -> Result<Vec<CadFragment>> {
+    sweeps
+        .iter()
+        .map(recover_open_rectangular_sweep_fragment)
         .collect()
 }
 

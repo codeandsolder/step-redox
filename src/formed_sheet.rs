@@ -124,6 +124,27 @@ struct PlanePairCandidate {
 
 #[must_use]
 pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSheetEvidence> {
+    detect_formed_sheet_evidence_with_min_pairs(
+        entities,
+        MIN_COAXIAL_PAIRS,
+        MIN_PARALLEL_PLANE_PAIRS,
+    )
+}
+
+/// Analyze formed-sheet candidates with caller-selected evidence thresholds.
+///
+/// This keeps the public high-confidence diagnostic policy separate from
+/// constructive recovery, whose own grammar may legitimately prove a body from
+/// a single bend pair plus independent topology/trim evidence.
+#[must_use]
+pub(crate) fn detect_formed_sheet_evidence_with_min_pairs(
+    entities: &[EntityInstance],
+    min_coaxial_pairs: usize,
+    min_parallel_plane_pairs: usize,
+) -> Vec<FormedSheetEvidence> {
+    if min_coaxial_pairs == 0 || min_parallel_plane_pairs == 0 {
+        return Vec::new();
+    }
     let index = build_index(entities);
     let mut out = Vec::new();
 
@@ -181,7 +202,7 @@ pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSh
             }
         }
 
-        if cylinders.len() < MIN_COAXIAL_PAIRS * 2 || planes.len() < 2 {
+        if cylinders.len() < min_coaxial_pairs * 2 || planes.len() < 2 {
             continue;
         }
 
@@ -215,14 +236,14 @@ pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSh
         else {
             continue;
         };
-        if raw_cylinder_pairs < MIN_COAXIAL_PAIRS || raw_plane_pairs < MIN_PARALLEL_PLANE_PAIRS {
+        if raw_cylinder_pairs < min_coaxial_pairs || raw_plane_pairs < min_parallel_plane_pairs {
             continue;
         }
         let thickness_mm = tick as f64 * GEOM_TOL_MM;
 
         let cylinder_pairs = select_cylinder_pairs(cylinder_candidates, thickness_mm);
         let plane_pairs = select_plane_pairs(&planes, thickness_mm);
-        if cylinder_pairs.len() < MIN_COAXIAL_PAIRS || plane_pairs.len() < MIN_PARALLEL_PLANE_PAIRS
+        if cylinder_pairs.len() < min_coaxial_pairs || plane_pairs.len() < min_parallel_plane_pairs
         {
             continue;
         }
@@ -281,6 +302,37 @@ pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSh
             .then_with(|| a.solid_id.cmp(&b.solid_id))
     });
     out
+}
+
+/// Rebuild a reference skin from an explicitly selected set of paired supports.
+///
+/// Constructive recovery uses this after permissive evidence discovery to discard
+/// geometrically irrelevant same-thickness pairs (for example the two width faces
+/// of a square-section bent pin) before proving a feature grammar.
+pub(crate) fn recover_reference_skin_for_pairs(
+    solid_id: u64,
+    plane_pairs: &[SheetPlanePair],
+    cylinder_pairs: &[SheetCylinderPair],
+    entities: &[EntityInstance],
+) -> Option<SheetReferenceSkin> {
+    if plane_pairs.is_empty() || cylinder_pairs.is_empty() {
+        return None;
+    }
+    let index = build_index(entities);
+    let face_ids = solid_faces(solid_id, entities, &index)?;
+    let face_edges = face_edge_map(&face_ids, entities, &index);
+    let adjacency = patch_adjacencies(plane_pairs, cylinder_pairs, &face_edges);
+    if !graph_connected(plane_pairs.len(), cylinder_pairs.len(), &adjacency) {
+        return None;
+    }
+    recover_reference_skin(
+        plane_pairs,
+        cylinder_pairs,
+        &adjacency,
+        &face_edges,
+        entities,
+        &index,
+    )
 }
 
 fn coaxial_radius_differences(cylinders: &[CylinderFace]) -> Vec<SheetCylinderPair> {

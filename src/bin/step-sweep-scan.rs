@@ -1,5 +1,12 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::path::PathBuf;
+
+#[derive(Serialize)]
+struct SweepScan {
+    closed_round: Vec<step_redox::solid_sweeps::RecoveredClosedRoundSweep>,
+    open_rectangular: Vec<step_redox::solid_sweeps::RecoveredOpenRectangularSweep>,
+}
 
 fn main() -> Result<()> {
     let path = std::env::args_os()
@@ -9,7 +16,10 @@ fn main() -> Result<()> {
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     serde_json::to_writer(
         std::io::stdout(),
-        &step_redox::detect_closed_round_sweeps_bytes(&bytes)?,
+        &SweepScan {
+            closed_round: step_redox::detect_closed_round_sweeps_bytes(&bytes)?,
+            open_rectangular: step_redox::detect_open_rectangular_sweeps_bytes(&bytes)?,
+        },
     )?;
     Ok(())
 }

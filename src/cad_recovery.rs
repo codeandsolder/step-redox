@@ -8,6 +8,7 @@ use serde::Serialize;
 mod solid;
 pub use solid::{
     recover_closed_round_sweep_fragment, recover_closed_round_sweep_fragments,
+    recover_open_rectangular_sweep_fragment, recover_open_rectangular_sweep_fragments,
     recover_radial_slot_revolution_fragment, recover_radial_slot_revolution_fragments,
     recover_solid_extrusion_fragment, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragment, recover_solid_revolution_fragments,

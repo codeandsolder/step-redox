@@ -1,7 +1,8 @@
 use crate::cad_recovery::{
     CadFragment, CadFragmentSource, recover_closed_round_sweep_fragments,
-    recover_periodic_chain_fragments, recover_radial_slot_revolution_fragments,
-    recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
+    recover_open_rectangular_sweep_fragments, recover_periodic_chain_fragments,
+    recover_radial_slot_revolution_fragments, recover_solid_extrusion_fragments,
+    recover_solid_revolution_fragments,
 };
 use crate::patterns::InstancePattern;
 use crate::solid_revolutions::SolidSurfaceSignature;
@@ -88,6 +89,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let mut revolutions = Vec::new();
     let mut radial_slots = Vec::new();
     let mut closed_sweeps = Vec::new();
+    let mut open_sweeps = Vec::new();
     let mut periodic_chains = Vec::new();
     let mut body_scan = Vec::new();
 
@@ -105,6 +107,9 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
             &section.entities,
         ));
         closed_sweeps.extend(crate::solid_sweeps::detect_closed_round_sweeps(
+            &section.entities,
+        ));
+        open_sweeps.extend(crate::solid_sweeps::detect_open_rectangular_sweeps(
             &section.entities,
         ));
         periodic_chains.extend(crate::periodic_chains::detect_periodic_chains(
@@ -134,7 +139,8 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let solid_extrusions = recover_solid_extrusion_fragments(&extrusions)?;
     let solid_revolutions = recover_solid_revolution_fragments(&revolutions)?;
     let radial_slot_revolutions = recover_radial_slot_revolution_fragments(&radial_slots)?;
-    let solid_sweeps = recover_closed_round_sweep_fragments(&closed_sweeps)?;
+    let mut solid_sweeps = recover_closed_round_sweep_fragments(&closed_sweeps)?;
+    solid_sweeps.extend(recover_open_rectangular_sweep_fragments(&open_sweeps)?);
     let periodic_chains = recover_periodic_chain_fragments(&periodic_chains)?;
 
     let whole_solid_candidates = solid_extrusions

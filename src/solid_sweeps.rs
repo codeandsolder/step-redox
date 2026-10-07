@@ -1,3 +1,8 @@
+mod sheet;
+pub use sheet::{
+    RecoveredOpenRectangularSweep, RecoveredPlanarSweepLeg, detect_open_rectangular_sweeps,
+};
+
 use crate::brep::{
     self, CircleSupport, CurveSupport, CylinderSupport, SurfaceSupport, TorusSupport,
 };

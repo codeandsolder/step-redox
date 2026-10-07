@@ -573,6 +573,26 @@ pub fn detect_closed_round_sweeps_bytes(
         .collect())
 }
 
+/// Detect exact one-bend rectangular-section sweeps with planar straight legs.
+///
+/// Straight-leg footprints are proven from paired planar source faces; the bend is
+/// proven from one paired cylindrical sector. This accepts terminal flange/chamfer
+/// geometry when it is part of the planar leg footprint rather than approximating it.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_open_rectangular_sweeps_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredOpenRectangularSweep>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_open_rectangular_sweeps(&section.entities))
+        .collect())
+}
+
 /// Detect read-only periodic chain grammars without enabling mutation.
 ///
 /// This analyzer is intentionally separate from the editable `PeriodicBodyPattern`
