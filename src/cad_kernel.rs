@@ -35,8 +35,8 @@ pub trait CadKernel {
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{
-        Axis3, BooleanOp, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform,
-        SweepPath3d, SweepSegment3d,
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Profile2d,
+        RigidTransform, SweepPath3d, SweepSegment3d,
     };
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
@@ -103,6 +103,42 @@ pub mod monstertruck {
         } else {
             Ok(builder::composite_sweep(&face, segments)?)
         }
+    }
+
+    fn loft_sections(sections: &[LoftSection]) -> Result<Solid> {
+        if sections.len() < 2 {
+            bail!("loft needs at least two sections");
+        }
+        let wires = sections
+            .iter()
+            .map(|section| {
+                let mut wires = profile_wires(&section.profile)?;
+                if wires.len() != 1 {
+                    bail!("Monstertruck loft currently supports one loop per section");
+                }
+                let wire = wires
+                    .pop()
+                    .ok_or_else(|| anyhow::anyhow!("missing loft section wire"))?;
+                Ok(builder::transformed(
+                    &wire,
+                    rigid_matrix(&section.transform),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let first = wires
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("missing first loft wire"))?
+            .clone();
+        let last = wires
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("missing last loft wire"))?
+            .clone();
+        let start_cap = profile::attach_plane_normalized(vec![first])?;
+        let end_cap = profile::attach_plane_normalized(vec![last])?;
+        let mut shell: Shell = builder::try_skin_wires(&wires)?;
+        shell.push(start_cap.inverse());
+        shell.push(end_cap);
+        Ok(Solid::try_new(vec![shell])?)
     }
 
     fn revolve_profile_transformed(
@@ -493,6 +529,7 @@ pub mod monstertruck {
                 angle_rad,
             } => revolve_profile(profile, *axis, *angle_rad),
             CadNode::Sweep { profile, path } => sweep_profile(profile, path),
+            CadNode::Loft { sections } => loft_sections(sections),
             CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
@@ -548,8 +585,8 @@ pub mod monstertruck {
     mod tests {
         use super::*;
         use crate::cad_ir::{
-            Axis3, CadNode, Curve2d, Profile2d, ProfileLoop, RigidTransform, SweepPath3d,
-            SweepSegment3d,
+            Axis3, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, RigidTransform,
+            SweepPath3d, SweepSegment3d,
         };
 
         fn box_model() -> Result<(CadModel, NodeId)> {
@@ -562,6 +599,35 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
             Ok((model, root))
+        }
+
+        #[test]
+        fn evaluates_tapered_rectangular_loft() -> Result<()> {
+            let mut model = CadModel::new();
+            let base =
+                Profile2d::polygon(vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])?;
+            let end = Profile2d::polygon(vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])?;
+            let root = model.add_node(CadNode::Loft {
+                sections: vec![
+                    LoftSection {
+                        profile: base,
+                        transform: RigidTransform::identity(),
+                    },
+                    LoftSection {
+                        profile: end,
+                        transform: RigidTransform::translation_mm([0.0, 0.0, 2.0]),
+                    },
+                ],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert_eq!(summary.faces, 6);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+            Ok(())
         }
 
         fn curved_profile_model(curve: Curve2d) -> Result<(CadModel, NodeId)> {

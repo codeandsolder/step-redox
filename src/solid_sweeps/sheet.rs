@@ -11,10 +11,19 @@ use crate::math3::{
 use crate::step_graph::build_index;
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const SHEET_TOL_MM: f64 = 1.0e-5;
 const DIR_TOL: f64 = 1.0e-9;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveredRectangularTaperTip {
+    pub source_face_ids: [u64; 5],
+    pub base_y_mm: f64,
+    pub end_y_mm: f64,
+    pub end_x_range_mm: [f64; 2],
+    pub end_z_range_mm: [f64; 2],
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecoveredPlanarSweepLeg {
@@ -25,6 +34,7 @@ pub struct RecoveredPlanarSweepLeg {
     pub z_axis: [f64; 3],
     pub profile_points_mm: Vec<[f64; 2]>,
     pub depth_mm: f64,
+    pub terminal_taper: Option<RecoveredRectangularTaperTip>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -155,8 +165,28 @@ fn detect_one(
         index,
     )?;
 
-    let leg0 = recover_planar_leg(&plane_pairs[0], axis, entities, index)?;
-    let leg1 = recover_planar_leg(&plane_pairs[1], axis, entities, index)?;
+    let mut leg0 = recover_planar_leg(&plane_pairs[0], axis, entities, index)?;
+    let mut leg1 = recover_planar_leg(&plane_pairs[1], axis, entities, index)?;
+    leg0.terminal_taper = recover_rectangular_taper_tip(
+        &leg0,
+        tangent_proofs[0].inward_direction,
+        &source_face_ids,
+        entities,
+        index,
+    );
+    leg1.terminal_taper = recover_rectangular_taper_tip(
+        &leg1,
+        tangent_proofs[1].inward_direction,
+        &source_face_ids,
+        entities,
+        index,
+    );
+    let taper_face_ids = leg0
+        .terminal_taper
+        .iter()
+        .chain(leg1.terminal_taper.iter())
+        .flat_map(|tip| tip.source_face_ids)
+        .collect::<HashSet<_>>();
     prove_source_supports_covered(
         &source_face_ids,
         [&leg0, &leg1],
@@ -164,6 +194,7 @@ fn detect_one(
         axis,
         section.axis_center_mm,
         section.width_mm,
+        &taper_face_ids,
         entities,
         index,
     )?;
@@ -230,6 +261,7 @@ fn prove_source_supports_covered(
     axis: [f64; 3],
     axis_center_mm: [f64; 3],
     width_mm: f64,
+    extra_plane_face_ids: &HashSet<u64>,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<()> {
@@ -266,7 +298,9 @@ fn prove_source_supports_covered(
         match brep::surface_support(surface_id, entities, index) {
             brep::SurfaceSupport::Plane(plane) => {
                 let source = canonical_plane(plane.normal, plane.origin_mm)?;
-                if !planes.iter().any(|expected| same_plane(source, *expected)) {
+                if !planes.iter().any(|expected| same_plane(source, *expected))
+                    && !extra_plane_face_ids.contains(&face_id)
+                {
                     return None;
                 }
             }
@@ -313,6 +347,241 @@ fn canonical_plane(normal: [f64; 3], point: [f64; 3]) -> Option<ExpectedPlane> {
 
 fn same_plane(a: ExpectedPlane, b: ExpectedPlane) -> bool {
     dot(a.normal, b.normal) > 1.0 - DIR_TOL && (a.offset_mm - b.offset_mm).abs() <= SHEET_TOL_MM
+}
+
+fn rectangular_bounds(points: &[[f64; 2]]) -> Option<([f64; 2], [f64; 2])> {
+    if points.len() != 4 {
+        return None;
+    }
+    let min = [
+        points.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+        points.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
+    ];
+    let max = [
+        points
+            .iter()
+            .map(|p| p[0])
+            .fold(f64::NEG_INFINITY, f64::max),
+        points
+            .iter()
+            .map(|p| p[1])
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+    if max[0] - min[0] <= SHEET_TOL_MM || max[1] - min[1] <= SHEET_TOL_MM {
+        return None;
+    }
+    let corners = [
+        [min[0], min[1]],
+        [max[0], min[1]],
+        [max[0], max[1]],
+        [min[0], max[1]],
+    ];
+    corners
+        .iter()
+        .all(|corner| {
+            points
+                .iter()
+                .any(|p| near(p[0], corner[0]) && near(p[1], corner[1]))
+        })
+        .then_some((min, max))
+}
+
+fn leg_local_point(leg: &RecoveredPlanarSweepLeg, point: [f64; 3]) -> [f64; 3] {
+    let delta = sub(point, leg.origin_mm);
+    [
+        dot(delta, leg.x_axis),
+        dot(delta, leg.y_axis),
+        dot(delta, leg.z_axis),
+    ]
+}
+
+fn leg_world_point(leg: &RecoveredPlanarSweepLeg, point: [f64; 3]) -> [f64; 3] {
+    add(
+        leg.origin_mm,
+        add(
+            mul(leg.x_axis, point[0]),
+            add(mul(leg.y_axis, point[1]), mul(leg.z_axis, point[2])),
+        ),
+    )
+}
+
+fn source_planar_polygon(
+    face_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<[f64; 3]>> {
+    let surface_id = brep::face_surface(face_id, entities, index)?;
+    if !matches!(
+        brep::surface_support(surface_id, entities, index),
+        brep::SurfaceSupport::Plane(_)
+    ) {
+        return None;
+    }
+    simplify_collinear_3d(line_polygon(face_id, entities, index)?)
+}
+
+fn find_matching_planar_face(
+    expected: &[[f64; 3]],
+    face_ids: &[u64],
+    used: &HashSet<u64>,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<u64> {
+    let matches = face_ids
+        .iter()
+        .copied()
+        .filter(|face_id| !used.contains(face_id))
+        .filter(|&face_id| {
+            source_planar_polygon(face_id, entities, index)
+                .is_some_and(|polygon| cyclic_polygon_match(expected, &polygon))
+        })
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then_some(matches[0])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TaperTerminalSection {
+    flat_face_id: u64,
+    base_y_mm: f64,
+    x_min: f64,
+    x_max: f64,
+    z_min: f64,
+    z_max: f64,
+    end_y_mm: f64,
+    end_min: [f64; 2],
+    end_max: [f64; 2],
+}
+
+fn find_taper_terminal_section(
+    leg: &RecoveredPlanarSweepLeg,
+    terminal_direction: [f64; 3],
+    face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<TaperTerminalSection> {
+    let (profile_min, profile_max) = rectangular_bounds(&leg.profile_points_mm)?;
+    let direction_sign = dot(leg.y_axis, terminal_direction);
+    if direction_sign.abs() < 1.0 - DIR_TOL {
+        return None;
+    }
+    let sign = direction_sign.signum();
+    let base_y_mm = if sign > 0.0 {
+        profile_max[1]
+    } else {
+        profile_min[1]
+    };
+    let (x_min, x_max) = (profile_min[0], profile_max[0]);
+    let (z_min, z_max) = (0.0, leg.depth_mm);
+    let mut candidates = Vec::new();
+    for &face_id in face_ids {
+        let surface_id = brep::face_surface(face_id, entities, index)?;
+        let brep::SurfaceSupport::Plane(plane) = brep::surface_support(surface_id, entities, index)
+        else {
+            continue;
+        };
+        let plane_normal = normalize(plane.normal, 0.0)?;
+        if dot(plane_normal, terminal_direction).abs() < 1.0 - DIR_TOL {
+            continue;
+        }
+        let polygon = source_planar_polygon(face_id, entities, index)?;
+        if polygon.len() != 4 {
+            continue;
+        }
+        let local = polygon
+            .iter()
+            .copied()
+            .map(|point| leg_local_point(leg, point))
+            .collect::<Vec<_>>();
+        let end_y_mm = common_value(&local.iter().map(|p| p[1]).collect::<Vec<_>>())?;
+        if (end_y_mm - base_y_mm) * sign <= SHEET_TOL_MM {
+            continue;
+        }
+        let end_xz = local.iter().map(|p| [p[0], p[2]]).collect::<Vec<_>>();
+        let Some((end_min, end_max)) = rectangular_bounds(&end_xz) else {
+            continue;
+        };
+        if end_min[0] > x_min + SHEET_TOL_MM
+            && end_max[0] < x_max - SHEET_TOL_MM
+            && end_min[1] > z_min + SHEET_TOL_MM
+            && end_max[1] < z_max - SHEET_TOL_MM
+        {
+            candidates.push((face_id, end_y_mm, end_min, end_max));
+        }
+    }
+    let [(flat_face_id, end_y_mm, end_min, end_max)] = candidates.as_slice() else {
+        return None;
+    };
+    Some(TaperTerminalSection {
+        flat_face_id: *flat_face_id,
+        base_y_mm,
+        x_min,
+        x_max,
+        z_min,
+        z_max,
+        end_y_mm: *end_y_mm,
+        end_min: *end_min,
+        end_max: *end_max,
+    })
+}
+
+fn recover_rectangular_taper_tip(
+    leg: &RecoveredPlanarSweepLeg,
+    terminal_direction: [f64; 3],
+    face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredRectangularTaperTip> {
+    let terminal = find_taper_terminal_section(leg, terminal_direction, face_ids, entities, index)?;
+    let local_quads = [
+        [
+            [terminal.x_min, terminal.base_y_mm, terminal.z_min],
+            [terminal.x_min, terminal.base_y_mm, terminal.z_max],
+            [terminal.end_min[0], terminal.end_y_mm, terminal.end_max[1]],
+            [terminal.end_min[0], terminal.end_y_mm, terminal.end_min[1]],
+        ],
+        [
+            [terminal.x_max, terminal.base_y_mm, terminal.z_min],
+            [terminal.end_max[0], terminal.end_y_mm, terminal.end_min[1]],
+            [terminal.end_max[0], terminal.end_y_mm, terminal.end_max[1]],
+            [terminal.x_max, terminal.base_y_mm, terminal.z_max],
+        ],
+        [
+            [terminal.x_min, terminal.base_y_mm, terminal.z_min],
+            [terminal.x_max, terminal.base_y_mm, terminal.z_min],
+            [terminal.end_max[0], terminal.end_y_mm, terminal.end_min[1]],
+            [terminal.end_min[0], terminal.end_y_mm, terminal.end_min[1]],
+        ],
+        [
+            [terminal.x_min, terminal.base_y_mm, terminal.z_max],
+            [terminal.end_min[0], terminal.end_y_mm, terminal.end_max[1]],
+            [terminal.end_max[0], terminal.end_y_mm, terminal.end_max[1]],
+            [terminal.x_max, terminal.base_y_mm, terminal.z_max],
+        ],
+    ];
+    let mut used = HashSet::from([terminal.flat_face_id]);
+    let mut bevel_ids = Vec::with_capacity(4);
+    for local_quad in local_quads {
+        let expected = local_quad.map(|point| leg_world_point(leg, point));
+        let face_id = find_matching_planar_face(&expected, face_ids, &used, entities, index)?;
+        used.insert(face_id);
+        bevel_ids.push(face_id);
+    }
+    bevel_ids.sort_unstable();
+    let mut source_face_ids = [
+        terminal.flat_face_id,
+        bevel_ids[0],
+        bevel_ids[1],
+        bevel_ids[2],
+        bevel_ids[3],
+    ];
+    source_face_ids.sort_unstable();
+    Some(RecoveredRectangularTaperTip {
+        source_face_ids,
+        base_y_mm: terminal.base_y_mm,
+        end_y_mm: terminal.end_y_mm,
+        end_x_range_mm: [terminal.end_min[0], terminal.end_max[0]],
+        end_z_range_mm: [terminal.end_min[1], terminal.end_max[1]],
+    })
 }
 
 fn recover_planar_leg(
@@ -367,6 +636,7 @@ fn recover_planar_leg(
         z_axis,
         profile_points_mm,
         depth_mm: pair.separation_mm,
+        terminal_taper: None,
     })
 }
 

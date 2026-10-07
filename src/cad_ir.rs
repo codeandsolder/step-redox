@@ -81,6 +81,39 @@ impl CadModel {
             if let CadNode::Sweep { path, .. } = node {
                 path.validate()?;
             }
+            if let CadNode::Loft { sections } = node {
+                if sections.len() < 2 {
+                    bail!("loft node {} needs at least two sections", id.0);
+                }
+                let loop_curve_counts = sections[0]
+                    .profile
+                    .loops
+                    .iter()
+                    .map(|loop_| loop_.curves.len())
+                    .collect::<Vec<_>>();
+                if loop_curve_counts.is_empty() || loop_curve_counts.iter().any(|count| *count < 3)
+                {
+                    bail!("loft node {} has an invalid first section", id.0);
+                }
+                for section in sections {
+                    if section
+                        .transform
+                        .matrix
+                        .iter()
+                        .flatten()
+                        .any(|value| !value.is_finite())
+                        || section.profile.loops.len() != loop_curve_counts.len()
+                        || section
+                            .profile
+                            .loops
+                            .iter()
+                            .zip(&loop_curve_counts)
+                            .any(|(loop_, count)| loop_.curves.len() != *count)
+                    {
+                        bail!("loft node {} has incompatible sections", id.0);
+                    }
+                }
+            }
             if let Some(provenance) = self.provenance.get(&id) {
                 if let Some(residual) = provenance.max_residual_mm
                     && (!residual.is_finite() || residual < 0.0)
@@ -181,6 +214,9 @@ pub enum CadNode {
         profile: Profile2d,
         path: SweepPath3d,
     },
+    Loft {
+        sections: Vec<LoftSection>,
+    },
     Boolean {
         op: BooleanOp,
         children: Vec<NodeId>,
@@ -216,6 +252,12 @@ impl CadNode {
                 1 + profile.complexity()
             }
             Self::Sweep { profile, path, .. } => 2 + profile.complexity() + path.complexity(),
+            Self::Loft { sections } => {
+                2 + sections
+                    .iter()
+                    .map(|section| 1 + section.profile.complexity())
+                    .sum::<u64>()
+            }
             Self::Boolean { children, .. } | Self::Assembly { children } => {
                 1 + children.len() as u64
             }
@@ -344,6 +386,12 @@ impl Curve2d {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LoftSection {
+    pub profile: Profile2d,
+    pub transform: RigidTransform,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -899,6 +947,30 @@ mod tests {
             };
             assert!(model.validate().is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn model_rejects_incompatible_loft_sections() -> Result<()> {
+        let triangle = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])?;
+        let square = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])?;
+        let model = CadModel {
+            nodes: vec![CadNode::Loft {
+                sections: vec![
+                    LoftSection {
+                        profile: triangle,
+                        transform: RigidTransform::identity(),
+                    },
+                    LoftSection {
+                        profile: square,
+                        transform: RigidTransform::translation_mm([0.0, 0.0, 1.0]),
+                    },
+                ],
+            }],
+            roots: vec![NodeId(0)],
+            provenance: BTreeMap::new(),
+        };
+        assert!(model.validate().is_err());
         Ok(())
     }
 

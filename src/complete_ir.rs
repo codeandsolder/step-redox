@@ -12,7 +12,7 @@ use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v5";
+pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v6";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {

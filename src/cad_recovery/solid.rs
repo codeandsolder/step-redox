@@ -1,9 +1,9 @@
 use super::{CadFragment, CadFragmentSource};
 use crate::cad_ir::{
-    Axis3, BooleanOp, CadModel, CadNode, Curve2d, Profile2d, ProfileLoop, ProofStatus, Provenance,
-    RigidTransform, SweepPath3d, SweepSegment3d,
+    Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, ProofStatus,
+    Provenance, RigidTransform, SweepPath3d, SweepSegment3d,
 };
-use crate::math3::{cross, dot, norm};
+use crate::math3::{add, cross, dot, mul, norm};
 use crate::profile_curves::RecoveredProfileCurve;
 use crate::solid_extrusions::RecoveredSolidExtrusion;
 use crate::solid_revolutions::{
@@ -354,6 +354,92 @@ pub fn recover_open_rectangular_sweep_fragment(
     })
 }
 
+fn add_transformed_prism(
+    model: &mut CadModel,
+    points: Vec<[f64; 2]>,
+    depth_mm: f64,
+    origin_mm: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    z_axis: [f64; 3],
+) -> Result<crate::cad_ir::NodeId> {
+    let profile = Profile2d::polygon(points)?;
+    let body = model.add_node(CadNode::Extrude {
+        profile,
+        vector_mm: [0.0, 0.0, depth_mm],
+    });
+    Ok(model.add_node(CadNode::Transform {
+        transform: local_frame_transform(origin_mm, x_axis, y_axis, z_axis),
+        child: body,
+    }))
+}
+
+fn rectangular_profile_bounds(points: &[[f64; 2]]) -> Option<([f64; 2], [f64; 2])> {
+    if points.len() != 4 {
+        return None;
+    }
+    let min = [
+        points.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+        points.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
+    ];
+    let max = [
+        points
+            .iter()
+            .map(|p| p[0])
+            .fold(f64::NEG_INFINITY, f64::max),
+        points
+            .iter()
+            .map(|p| p[1])
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+    let tolerance = 1.0e-8;
+    let corners = [
+        [min[0], min[1]],
+        [max[0], min[1]],
+        [max[0], max[1]],
+        [min[0], max[1]],
+    ];
+    (max[0] - min[0] > tolerance
+        && max[1] - min[1] > tolerance
+        && corners.iter().all(|corner| {
+            points.iter().any(|point| {
+                (point[0] - corner[0]).abs() <= tolerance
+                    && (point[1] - corner[1]).abs() <= tolerance
+            })
+        }))
+    .then_some((min, max))
+}
+
+fn rectangular_section_profile(
+    x_range_mm: [f64; 2],
+    z_range_mm: [f64; 2],
+    outward_sign: f64,
+) -> Result<Profile2d> {
+    let q0 = -outward_sign * z_range_mm[0];
+    let q1 = -outward_sign * z_range_mm[1];
+    let q_min = q0.min(q1);
+    let q_max = q0.max(q1);
+    Profile2d::polygon(vec![
+        [x_range_mm[0], q_min],
+        [x_range_mm[1], q_min],
+        [x_range_mm[1], q_max],
+        [x_range_mm[0], q_max],
+    ])
+}
+
+fn tapered_leg_section_transform(
+    leg: &RecoveredPlanarSweepLeg,
+    y_mm: f64,
+    outward_sign: f64,
+) -> RigidTransform {
+    local_frame_transform(
+        add(leg.origin_mm, mul(leg.y_axis, y_mm)),
+        leg.x_axis,
+        mul(leg.z_axis, -outward_sign),
+        mul(leg.y_axis, outward_sign),
+    )
+}
+
 fn add_planar_sweep_leg(
     model: &mut CadModel,
     leg: &RecoveredPlanarSweepLeg,
@@ -361,15 +447,69 @@ fn add_planar_sweep_leg(
     if !leg.depth_mm.is_finite() || leg.depth_mm <= 0.0 || leg.profile_points_mm.len() < 3 {
         bail!("open rectangular sweep leg is malformed");
     }
-    let profile = Profile2d::polygon(leg.profile_points_mm.clone())?;
-    let body = model.add_node(CadNode::Extrude {
-        profile,
-        vector_mm: [0.0, 0.0, leg.depth_mm],
-    });
-    Ok(model.add_node(CadNode::Transform {
-        transform: local_frame_transform(leg.origin_mm, leg.x_axis, leg.y_axis, leg.z_axis),
-        child: body,
-    }))
+    let Some(tip) = &leg.terminal_taper else {
+        return add_transformed_prism(
+            model,
+            leg.profile_points_mm.clone(),
+            leg.depth_mm,
+            leg.origin_mm,
+            leg.x_axis,
+            leg.y_axis,
+            leg.z_axis,
+        );
+    };
+
+    let (profile_min, profile_max) = rectangular_profile_bounds(&leg.profile_points_mm)
+        .ok_or_else(|| anyhow::anyhow!("tapered sweep leg base is not rectangular"))?;
+    let tolerance = 1.0e-8;
+    let base_is_min = (tip.base_y_mm - profile_min[1]).abs() <= tolerance;
+    let base_is_max = (tip.base_y_mm - profile_max[1]).abs() <= tolerance;
+    if base_is_min == base_is_max
+        || !tip.end_y_mm.is_finite()
+        || (tip.end_y_mm - tip.base_y_mm).abs() <= tolerance
+        || tip.end_x_range_mm[0] <= profile_min[0] + tolerance
+        || tip.end_x_range_mm[1] >= profile_max[0] - tolerance
+        || tip.end_x_range_mm[0] >= tip.end_x_range_mm[1] - tolerance
+        || tip.end_z_range_mm[0] <= tolerance
+        || tip.end_z_range_mm[1] >= leg.depth_mm - tolerance
+        || tip.end_z_range_mm[0] >= tip.end_z_range_mm[1] - tolerance
+    {
+        bail!("tapered sweep leg proof is malformed");
+    }
+    if (base_is_min && tip.end_y_mm >= tip.base_y_mm)
+        || (base_is_max && tip.end_y_mm <= tip.base_y_mm)
+    {
+        bail!("tapered sweep leg end is not outward from its base");
+    }
+
+    let outward_sign = (tip.end_y_mm - tip.base_y_mm).signum();
+    let inner_y_mm = if base_is_min {
+        profile_max[1]
+    } else {
+        profile_min[1]
+    };
+    let full_profile = rectangular_section_profile(
+        [profile_min[0], profile_max[0]],
+        [0.0, leg.depth_mm],
+        outward_sign,
+    )?;
+    let end_profile =
+        rectangular_section_profile(tip.end_x_range_mm, tip.end_z_range_mm, outward_sign)?;
+    let sections = vec![
+        LoftSection {
+            profile: full_profile.clone(),
+            transform: tapered_leg_section_transform(leg, inner_y_mm, outward_sign),
+        },
+        LoftSection {
+            profile: full_profile,
+            transform: tapered_leg_section_transform(leg, tip.base_y_mm, outward_sign),
+        },
+        LoftSection {
+            profile: end_profile,
+            transform: tapered_leg_section_transform(leg, tip.end_y_mm, outward_sign),
+        },
+    ];
+    Ok(model.add_node(CadNode::Loft { sections }))
 }
 
 /// Lower every proven one-bend rectangular sweep into CAD IR.

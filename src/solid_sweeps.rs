@@ -1,6 +1,7 @@
 mod sheet;
 pub use sheet::{
-    RecoveredOpenRectangularSweep, RecoveredPlanarSweepLeg, detect_open_rectangular_sweeps,
+    RecoveredOpenRectangularSweep, RecoveredPlanarSweepLeg, RecoveredRectangularTaperTip,
+    detect_open_rectangular_sweeps,
 };
 
 use crate::brep::{
