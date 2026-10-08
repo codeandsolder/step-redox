@@ -10,6 +10,7 @@ pub use solid::{
     recover_closed_round_sweep_fragment, recover_closed_round_sweep_fragments,
     recover_open_rectangular_sweep_fragment, recover_open_rectangular_sweep_fragments,
     recover_radial_slot_revolution_fragment, recover_radial_slot_revolution_fragments,
+    recover_revolved_round_tail_fragment, recover_revolved_round_tail_fragments,
     recover_solid_extrusion_fragment, recover_solid_extrusion_fragments,
     recover_solid_revolution_fragment, recover_solid_revolution_fragments,
 };
@@ -42,6 +43,11 @@ pub enum CadFragmentSource {
         solid_id: u64,
         face_ids: Vec<u64>,
         closed: bool,
+    },
+    RevolvedRoundTail {
+        solid_id: u64,
+        head_face_ids: Vec<u64>,
+        tail_face_ids: Vec<u64>,
     },
     PeriodicChain {
         solid_id: u64,

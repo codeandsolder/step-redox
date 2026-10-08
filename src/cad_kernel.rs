@@ -35,7 +35,7 @@ pub trait CadKernel {
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{
-        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Profile2d,
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Primitive, Profile2d,
         RigidTransform, SweepPath3d, SweepSegment3d,
     };
     use anyhow::{Result, bail};
@@ -202,8 +202,12 @@ pub mod monstertruck {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, edge)| {
+                    let curve = edge.oriented_curve();
+                    let (start, end) = curve.range_tuple();
+                    let midpoint = curve.evaluate((start + end) * 0.5);
                     (point_axis_distance(edge.front().point(), origin, direction) <= 1.0e-9
-                        && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9)
+                        && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9
+                        && point_axis_distance(midpoint, origin, direction) <= 1.0e-9)
                         .then_some(index)
                 })
                 .collect::<Vec<_>>();
@@ -484,8 +488,23 @@ pub mod monstertruck {
             bail!("boolean node needs at least one child");
         };
         let mut result = evaluate_node(model, first)?;
-        for &child in rest {
+        for (stage, &child) in rest.iter().enumerate() {
             let rhs = evaluate_node(model, child)?;
+            if matches!(op, BooleanOp::Union) {
+                let lb = result.boundaries();
+                let rb = rhs.boundaries();
+                eprintln!(
+                    "DEBUG_OR stage {} child {:?} lhs shells={} faces={} consistent={} rhs shells={} faces={} consistent={}",
+                    stage + 1,
+                    child,
+                    lb.len(),
+                    lb.iter().map(|shell| shell.len()).sum::<usize>(),
+                    result.is_geometric_consistent(),
+                    rb.len(),
+                    rb.iter().map(|shell| shell.len()).sum::<usize>(),
+                    rhs.is_geometric_consistent(),
+                );
+            }
             result = match op {
                 BooleanOp::Union => monstertruck_solid::or(&result, &rhs, BOOLEAN_TOLERANCE_MM)?,
                 BooleanOp::Intersection => {
@@ -515,8 +534,52 @@ pub mod monstertruck {
         Ok(result)
     }
 
+    fn primitive_solid(primitive: &Primitive) -> Result<Solid> {
+        match primitive {
+            Primitive::Box { size_mm } => {
+                let [x, y, z] = *size_mm;
+                if [x, y, z]
+                    .into_iter()
+                    .any(|value| !value.is_finite() || value <= 0.0)
+                {
+                    bail!("box dimensions must be finite and positive");
+                }
+                let vertex = builder::vertex(Point3::origin());
+                let edge = builder::extrude(&vertex, Vector3::new(x, 0.0, 0.0));
+                let face = builder::extrude(&edge, Vector3::new(0.0, y, 0.0));
+                Ok(builder::extrude(&face, Vector3::new(0.0, 0.0, z)))
+            }
+            Primitive::Cylinder {
+                radius_mm,
+                height_mm,
+            } => {
+                if !radius_mm.is_finite()
+                    || *radius_mm <= 0.0
+                    || !height_mm.is_finite()
+                    || *height_mm <= 0.0
+                {
+                    bail!("cylinder dimensions must be finite and positive");
+                }
+                let vertex = builder::vertex(Point3::new(0.0, 0.0, *radius_mm));
+                let circle = builder::revolve(
+                    &vertex,
+                    Point3::origin(),
+                    Vector3::unit_y(),
+                    builder::SweepAngle::Closed,
+                    2,
+                );
+                let disk = profile::attach_plane_normalized(vec![circle])?;
+                Ok(builder::extrude(&disk, Vector3::new(0.0, *height_mm, 0.0)))
+            }
+            Primitive::Sphere { .. } => {
+                bail!("Monstertruck backend does not yet evaluate full-sphere primitives")
+            }
+        }
+    }
+
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
         match model.node(root)? {
+            CadNode::Primitive(primitive) => primitive_solid(primitive),
             CadNode::Extrude { profile, vector_mm } => {
                 if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
                     bail!("Monstertruck backend currently supports local Z extrusion only");
@@ -711,6 +774,34 @@ pub mod monstertruck {
 
             let step = kernel.to_step(&evaluated)?;
             ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_adjacent_cylinders_union() -> Result<()> {
+            let mut model = CadModel::new();
+            let first = model.add_node(CadNode::Primitive(Primitive::Cylinder {
+                radius_mm: 1.0,
+                height_mm: 1.0,
+            }));
+            let second_body = model.add_node(CadNode::Primitive(Primitive::Cylinder {
+                radius_mm: 1.0,
+                height_mm: 1.0,
+            }));
+            let second = model.add_node(CadNode::Transform {
+                transform: RigidTransform::translation_mm([0.0, 1.0, 0.0]),
+                child: second_body,
+            });
+            let root = model.add_node(CadNode::Boolean {
+                op: BooleanOp::Union,
+                children: vec![first, second],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
             Ok(())
         }
 

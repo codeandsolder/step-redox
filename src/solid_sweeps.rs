@@ -11,6 +11,9 @@ use crate::math3::{
     add, canonical_direction, cross, distance, dot, mul, norm, normalize,
     point_to_unit_line_distance, sub,
 };
+use crate::solid_revolutions::{
+    RecoveredSolidRevolution, recover_axisymmetric_subbody_with_circular_cap,
+};
 use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
@@ -45,6 +48,21 @@ pub struct RecoveredClosedRoundSweep {
     pub max_residual_mm: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveredRevolvedRoundTail {
+    pub solid_id: u64,
+    pub source_face_ids: Vec<u64>,
+    pub head: RecoveredSolidRevolution,
+    pub profile_radius_mm: f64,
+    pub path_start_mm: [f64; 3],
+    pub profile_x_axis: [f64; 3],
+    pub profile_y_axis: [f64; 3],
+    pub path_tangent: [f64; 3],
+    pub segments: Vec<RecoveredSweepSegment>,
+    pub end_sphere_center_mm: [f64; 3],
+    pub max_residual_mm: f64,
+}
+
 #[derive(Debug, Clone)]
 struct CylinderRun {
     origin_mm: [f64; 3],
@@ -59,6 +77,13 @@ struct TorusBend {
     axis: [f64; 3],
     major_radius_mm: f64,
     minor_radius_mm: f64,
+    face_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SphereEnd {
+    center_mm: [f64; 3],
+    radius_mm: f64,
     face_ids: Vec<u64>,
 }
 
@@ -88,6 +113,26 @@ pub fn detect_closed_round_sweeps(entities: &[EntityInstance]) -> Vec<RecoveredC
     }
 
     out.sort_by_key(|sweep| sweep.solid_id);
+    out
+}
+
+#[must_use]
+pub fn detect_revolved_round_tails(entities: &[EntityInstance]) -> Vec<RecoveredRevolvedRoundTail> {
+    let index = build_index(entities);
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        if let Some(candidate) = detect_one_revolved_round_tail(solid_id, entities, &index) {
+            out.push(candidate);
+        }
+    }
+    out.sort_by_key(|candidate| candidate.solid_id);
     out
 }
 
@@ -203,6 +248,305 @@ fn detect_one_closed_round_sweep(
     None
 }
 
+fn detect_one_revolved_round_tail(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredRevolvedRoundTail> {
+    let mut face_ids = brep::solid_face_ids(solid_id, entities, index)?;
+    if face_ids.len() < 8 {
+        return None;
+    }
+    face_ids.sort_unstable();
+    prove_closed_manifold_source_topology(&face_ids, entities, index)?;
+
+    let mut cylinders = Vec::<CylinderRun>::new();
+    let mut tori = Vec::<TorusBend>::new();
+    let mut spheres = Vec::<SphereEnd>::new();
+    for &face_id in &face_ids {
+        let surface_id = brep::face_surface(face_id, entities, index)?;
+        match brep::surface_support(surface_id, entities, index) {
+            SurfaceSupport::Cylinder(support) => {
+                let mut run = canonical_cylinder(support)?;
+                if let Some(existing) = cylinders
+                    .iter_mut()
+                    .find(|existing| same_cylinder(existing, &run))
+                {
+                    existing.face_ids.push(face_id);
+                } else {
+                    run.face_ids.push(face_id);
+                    cylinders.push(run);
+                }
+            }
+            SurfaceSupport::Torus(support) => {
+                let mut bend = canonical_torus(support)?;
+                if let Some(existing) = tori.iter_mut().find(|existing| same_torus(existing, &bend))
+                {
+                    existing.face_ids.push(face_id);
+                } else {
+                    bend.face_ids.push(face_id);
+                    tori.push(bend);
+                }
+            }
+            SurfaceSupport::Sphere(support) => {
+                if !support.radius_mm.is_finite() || support.radius_mm <= GEOM_TOL_MM {
+                    return None;
+                }
+                let candidate = SphereEnd {
+                    center_mm: support.center_mm,
+                    radius_mm: support.radius_mm,
+                    face_ids: vec![face_id],
+                };
+                if let Some(existing) = spheres.iter_mut().find(|existing| {
+                    near(existing.radius_mm, candidate.radius_mm)
+                        && distance(existing.center_mm, candidate.center_mm) <= GEOM_TOL_MM
+                }) {
+                    existing.face_ids.push(face_id);
+                } else {
+                    spheres.push(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for bend in &tori {
+        let radius = bend.minor_radius_mm;
+        let attached = cylinders
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| {
+                near(run.radius_mm, radius)
+                    && dot(run.direction, bend.axis).abs() <= DIR_TOL
+                    && (point_to_unit_line_distance(bend.center_mm, run.origin_mm, run.direction)
+                        - bend.major_radius_mm)
+                        .abs()
+                        <= GEOM_TOL_MM
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if attached.len() < 2 {
+            continue;
+        }
+
+        for &incoming_index in &attached {
+            for &outgoing_index in &attached {
+                if incoming_index == outgoing_index {
+                    continue;
+                }
+                let incoming = &cylinders[incoming_index];
+                let outgoing = &cylinders[outgoing_index];
+                if dot(incoming.direction, outgoing.direction).abs() > DIR_TOL {
+                    continue;
+                }
+                let interface_mm = project_to_line(bend.center_mm, incoming);
+                let bend_end_mm = project_to_line(bend.center_mm, outgoing);
+                let radial_in = normalize(sub(interface_mm, bend.center_mm), GEOM_TOL_MM)?;
+                let radial_out = normalize(sub(bend_end_mm, bend.center_mm), GEOM_TOL_MM)?;
+                let angle_rad =
+                    dot(bend.axis, cross(radial_in, radial_out)).atan2(dot(radial_in, radial_out));
+                if !angle_rad.is_finite()
+                    || angle_rad.abs() <= 1.0e-8
+                    || angle_rad.abs() >= std::f64::consts::PI - 1.0e-8
+                {
+                    continue;
+                }
+                let sign = angle_rad.signum();
+                let path_tangent = normalize(mul(cross(bend.axis, radial_in), sign), GEOM_TOL_MM)?;
+                let bend_exit_tangent =
+                    normalize(mul(cross(bend.axis, radial_out), sign), GEOM_TOL_MM)?;
+
+                for sphere in &spheres {
+                    if !near(sphere.radius_mm, radius)
+                        || point_to_unit_line_distance(
+                            sphere.center_mm,
+                            outgoing.origin_mm,
+                            outgoing.direction,
+                        ) > GEOM_TOL_MM
+                    {
+                        continue;
+                    }
+                    let translation = sub(sphere.center_mm, bend_end_mm);
+                    let translation_len = norm(translation);
+                    if translation_len <= GEOM_TOL_MM {
+                        continue;
+                    }
+                    let translation_dir = normalize(translation, GEOM_TOL_MM)?;
+                    if dot(translation_dir, bend_exit_tangent) < 1.0 - 1.0e-7 {
+                        continue;
+                    }
+
+                    let mut tail_faces = HashSet::<u64>::new();
+                    tail_faces.extend(bend.face_ids.iter().copied());
+                    tail_faces.extend(outgoing.face_ids.iter().copied());
+                    tail_faces.extend(sphere.face_ids.iter().copied());
+                    let head_face_ids = face_ids
+                        .iter()
+                        .copied()
+                        .filter(|face_id| !tail_faces.contains(face_id))
+                        .collect::<Vec<_>>();
+                    if head_face_ids.len() + tail_faces.len() != face_ids.len() {
+                        continue;
+                    }
+                    let Some((head, interface_circle)) =
+                        recover_axisymmetric_subbody_with_circular_cap(
+                            solid_id,
+                            &head_face_ids,
+                            entities,
+                            index,
+                        )
+                    else {
+                        continue;
+                    };
+                    if !near(interface_circle.radius_mm, radius)
+                        || distance(interface_circle.center_mm, interface_mm) > GEOM_TOL_MM
+                        || !circle_is_cylinder_section(&interface_circle, incoming, radius)
+                    {
+                        continue;
+                    }
+                    prove_torus_trim(bend, incoming, outgoing, entities, index)?;
+                    prove_cylinder_between_points(
+                        outgoing,
+                        bend_end_mm,
+                        sphere.center_mm,
+                        radius,
+                        entities,
+                        index,
+                    )?;
+                    prove_hemispherical_end(sphere, outgoing, entities, index)?;
+
+                    let path_start_mm = interface_mm;
+
+                    let profile_x_axis = bend.axis;
+                    let profile_y_axis =
+                        normalize(cross(path_tangent, profile_x_axis), GEOM_TOL_MM)?;
+                    if dot(cross(profile_x_axis, profile_y_axis), path_tangent) < 1.0 - 1.0e-7 {
+                        continue;
+                    }
+                    let max_residual_mm = head.max_residual_mm.max(
+                        (distance(interface_mm, bend.center_mm) - bend.major_radius_mm)
+                            .abs()
+                            .max(
+                                (distance(bend_end_mm, bend.center_mm) - bend.major_radius_mm)
+                                    .abs(),
+                            )
+                            .max(point_to_unit_line_distance(
+                                sphere.center_mm,
+                                outgoing.origin_mm,
+                                outgoing.direction,
+                            )),
+                    );
+                    if max_residual_mm > 1.0e-5 {
+                        continue;
+                    }
+                    return Some(RecoveredRevolvedRoundTail {
+                        solid_id,
+                        source_face_ids: face_ids.clone(),
+                        head,
+                        profile_radius_mm: radius,
+                        path_start_mm,
+                        profile_x_axis,
+                        profile_y_axis,
+                        path_tangent,
+                        segments: vec![
+                            RecoveredSweepSegment::Rotation {
+                                axis_origin_mm: bend.center_mm,
+                                axis_direction: bend.axis,
+                                angle_rad,
+                            },
+                            RecoveredSweepSegment::Translation {
+                                vector_mm: translation,
+                            },
+                        ],
+                        end_sphere_center_mm: sphere.center_mm,
+                        max_residual_mm,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+fn prove_hemispherical_end(
+    sphere: &SphereEnd,
+    run: &CylinderRun,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<()> {
+    if !near(sphere.radius_mm, run.radius_mm) {
+        return None;
+    }
+    let run_edges = run
+        .face_ids
+        .iter()
+        .copied()
+        .flat_map(|face_id| {
+            brep::face_loops(face_id, entities, index)
+                .into_iter()
+                .flatten()
+        })
+        .flat_map(|loop_| loop_.edges)
+        .map(|edge| edge.edge_id)
+        .collect::<HashSet<_>>();
+    let mut edge_counts = HashMap::<u64, (usize, Option<brep::OrientedEdgeUse>)>::new();
+    for &face_id in &sphere.face_ids {
+        let SurfaceSupport::Sphere(support) = brep::surface_support(
+            brep::face_surface(face_id, entities, index)?,
+            entities,
+            index,
+        ) else {
+            return None;
+        };
+        if !near(support.radius_mm, sphere.radius_mm)
+            || distance(support.center_mm, sphere.center_mm) > GEOM_TOL_MM
+        {
+            return None;
+        }
+        for loop_ in brep::face_loops(face_id, entities, index)? {
+            for edge in loop_.edges {
+                for point in [edge.start_mm, edge.end_mm] {
+                    if (distance(point, sphere.center_mm) - sphere.radius_mm).abs() > GEOM_TOL_MM {
+                        return None;
+                    }
+                }
+                let entry = edge_counts.entry(edge.edge_id).or_insert((0, None));
+                entry.0 += 1;
+                entry.1.get_or_insert(edge);
+            }
+        }
+    }
+    let boundary = edge_counts
+        .values()
+        .filter(|(count, _)| *count == 1)
+        .filter_map(|(_, edge)| edge.as_ref())
+        .collect::<Vec<_>>();
+    if boundary.is_empty()
+        || boundary
+            .iter()
+            .any(|edge| !run_edges.contains(&edge.edge_id))
+    {
+        return None;
+    }
+    boundary
+        .iter()
+        .all(|edge| {
+            let CurveSupport::Circle(circle) = edge.support else {
+                return false;
+            };
+            near(circle.radius_mm, sphere.radius_mm)
+                && distance(circle.center_mm, sphere.center_mm) <= GEOM_TOL_MM
+                && 1.0
+                    - dot(
+                        normalize(circle.normal, GEOM_TOL_MM).unwrap_or([0.0; 3]),
+                        run.direction,
+                    )
+                    .abs()
+                    <= DIR_TOL
+        })
+        .then_some(())
+}
+
 fn collect_closed_round_supports(
     face_ids: &[u64],
     entities: &[EntityInstance],
@@ -258,6 +602,59 @@ fn collect_closed_round_supports(
         profile_radius_mm,
         corner_radius_mm,
     })
+}
+
+fn prove_closed_manifold_source_topology(
+    face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<()> {
+    if face_ids.is_empty() {
+        return None;
+    }
+    let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+    let mut face_neighbors = vec![HashSet::<usize>::new(); face_ids.len()];
+    for (face_index, &face_id) in face_ids.iter().enumerate() {
+        let loops = brep::face_loops(face_id, entities, index)?;
+        if loops.is_empty() {
+            return None;
+        }
+        for loop_ in loops {
+            if loop_.edges.len() < 2 {
+                return None;
+            }
+            for (edge, next) in loop_.edges.iter().zip(loop_.edges.iter().cycle().skip(1)) {
+                if edge.end_vertex != next.start_vertex {
+                    return None;
+                }
+                edge_faces.entry(edge.edge_id).or_default().push(face_index);
+            }
+        }
+    }
+    for attached in edge_faces.values() {
+        if attached.len() != 2 {
+            return None;
+        }
+        let [a, b] = attached.as_slice() else {
+            return None;
+        };
+        if a != b {
+            face_neighbors[*a].insert(*b);
+            face_neighbors[*b].insert(*a);
+        }
+    }
+    let mut seen = vec![false; face_ids.len()];
+    let mut queue = VecDeque::from([0_usize]);
+    seen[0] = true;
+    while let Some(face) = queue.pop_front() {
+        for &neighbor in &face_neighbors[face] {
+            if !seen[neighbor] {
+                seen[neighbor] = true;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    seen.into_iter().all(|value| value).then_some(())
 }
 
 fn prove_closed_source_topology(
@@ -319,8 +716,24 @@ fn prove_cylinder_trim(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<()> {
-    let start_mm = project_to_line(first_corner.center_mm, run);
-    let end_mm = project_to_line(second_corner.center_mm, run);
+    prove_cylinder_between_points(
+        run,
+        project_to_line(first_corner.center_mm, run),
+        project_to_line(second_corner.center_mm, run),
+        profile_radius_mm,
+        entities,
+        index,
+    )
+}
+
+fn prove_cylinder_between_points(
+    run: &CylinderRun,
+    start_mm: [f64; 3],
+    end_mm: [f64; 3],
+    profile_radius_mm: f64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<()> {
     let tangent = normalize(sub(end_mm, start_mm), GEOM_TOL_MM)?;
     let length_mm = distance(start_mm, end_mm);
     if length_mm <= GEOM_TOL_MM {

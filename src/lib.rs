@@ -573,6 +573,26 @@ pub fn detect_closed_round_sweeps_bytes(
         .collect())
 }
 
+/// Detect a turned/axisymmetric head fused to one constant-round bent tail.
+///
+/// The head is proven as an axisymmetric sub-body with one circular interface;
+/// the tail is proven from a tangent torus bend, straight cylindrical run and
+/// hemispherical terminal sharing one constant radius.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_revolved_round_tails_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredRevolvedRoundTail>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_revolved_round_tails(&section.entities))
+        .collect())
+}
+
 /// Detect exact one-bend rectangular-section sweeps with planar straight legs.
 ///
 /// Straight-leg footprints are proven from paired planar source faces; the bend is

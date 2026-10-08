@@ -1,8 +1,8 @@
 use crate::cad_recovery::{
     CadFragment, CadFragmentSource, recover_closed_round_sweep_fragments,
     recover_open_rectangular_sweep_fragments, recover_periodic_chain_fragments,
-    recover_radial_slot_revolution_fragments, recover_solid_extrusion_fragments,
-    recover_solid_revolution_fragments,
+    recover_radial_slot_revolution_fragments, recover_revolved_round_tail_fragments,
+    recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
 };
 use crate::patterns::InstancePattern;
 use crate::solid_revolutions::SolidSurfaceSignature;
@@ -12,7 +12,7 @@ use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v6";
+pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v7";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -89,6 +89,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let mut revolutions = Vec::new();
     let mut radial_slots = Vec::new();
     let mut closed_sweeps = Vec::new();
+    let mut revolved_round_tails = Vec::new();
     let mut open_sweeps = Vec::new();
     let mut periodic_chains = Vec::new();
     let mut body_scan = Vec::new();
@@ -107,6 +108,9 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
             &section.entities,
         ));
         closed_sweeps.extend(crate::solid_sweeps::detect_closed_round_sweeps(
+            &section.entities,
+        ));
+        revolved_round_tails.extend(crate::solid_sweeps::detect_revolved_round_tails(
             &section.entities,
         ));
         open_sweeps.extend(crate::solid_sweeps::detect_open_rectangular_sweeps(
@@ -140,6 +144,9 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let solid_revolutions = recover_solid_revolution_fragments(&revolutions)?;
     let radial_slot_revolutions = recover_radial_slot_revolution_fragments(&radial_slots)?;
     let mut solid_sweeps = recover_closed_round_sweep_fragments(&closed_sweeps)?;
+    solid_sweeps.extend(recover_revolved_round_tail_fragments(
+        &revolved_round_tails,
+    )?);
     solid_sweeps.extend(recover_open_rectangular_sweep_fragments(&open_sweeps)?);
     let periodic_chains = recover_periodic_chain_fragments(&periodic_chains)?;
 
@@ -178,6 +185,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
                     | CadFragmentSource::SolidRevolution { .. }
                     | CadFragmentSource::RadialSlotRevolution { .. }
                     | CadFragmentSource::SolidSweep { .. }
+                    | CadFragmentSource::RevolvedRoundTail { .. }
             )
         })
         .count();
@@ -201,7 +209,10 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
             matches!(source, CadFragmentSource::RadialSlotRevolution { .. })
         }),
         solid_sweeps: selected_category(&selected, |source| {
-            matches!(source, CadFragmentSource::SolidSweep { .. })
+            matches!(
+                source,
+                CadFragmentSource::SolidSweep { .. } | CadFragmentSource::RevolvedRoundTail { .. }
+            )
         }),
         periodic_chains: selected_category(&selected, |source| {
             matches!(source, CadFragmentSource::PeriodicChain { .. })
@@ -259,6 +270,7 @@ fn source_solid_id(source: &CadFragmentSource) -> u64 {
         | CadFragmentSource::SolidRevolution { solid_id, .. }
         | CadFragmentSource::RadialSlotRevolution { solid_id, .. }
         | CadFragmentSource::SolidSweep { solid_id, .. }
+        | CadFragmentSource::RevolvedRoundTail { solid_id, .. }
         | CadFragmentSource::PeriodicChain { solid_id, .. } => *solid_id,
     }
 }

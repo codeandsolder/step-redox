@@ -1,7 +1,7 @@
 use super::{CadFragment, CadFragmentSource};
 use crate::cad_ir::{
-    Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, ProofStatus,
-    Provenance, RigidTransform, SweepPath3d, SweepSegment3d,
+    Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop,
+    ProofStatus, Provenance, RigidTransform, SweepPath3d, SweepSegment3d,
 };
 use crate::math3::{add, cross, dot, mul, norm};
 use crate::profile_curves::RecoveredProfileCurve;
@@ -12,7 +12,7 @@ use crate::solid_revolutions::{
 };
 use crate::solid_sweeps::{
     RecoveredClosedRoundSweep, RecoveredOpenRectangularSweep, RecoveredPlanarSweepLeg,
-    RecoveredSweepSegment,
+    RecoveredRevolvedRoundTail, RecoveredSweepSegment,
 };
 use anyhow::{Result, bail};
 
@@ -225,6 +225,227 @@ pub fn recover_closed_round_sweep_fragments(
     sweeps
         .iter()
         .map(recover_closed_round_sweep_fragment)
+        .collect()
+}
+
+/// Recover an axisymmetric head fused to one round bent tail and hemispherical end.
+///
+/// The source-proven circular stem interface is represented exactly as the shared
+/// boundary between the revolved head and round sweep.
+///
+/// # Errors
+/// Returns an error if the proof is malformed or the resulting CAD IR is invalid.
+pub fn recover_revolved_round_tail_fragment(
+    recovered: &RecoveredRevolvedRoundTail,
+) -> Result<CadFragment> {
+    if recovered.solid_id == 0
+        || recovered.head.solid_id != recovered.solid_id
+        || !recovered.profile_radius_mm.is_finite()
+        || recovered.profile_radius_mm <= 0.0
+        || !recovered.max_residual_mm.is_finite()
+        || recovered.max_residual_mm > 1.0e-5
+        || recovered.segments.len() != 2
+    {
+        bail!("revolved round-tail proof is invalid");
+    }
+    for axis in [
+        recovered.profile_x_axis,
+        recovered.profile_y_axis,
+        recovered.path_tangent,
+    ] {
+        if (norm(axis) - 1.0).abs() > 1.0e-8 {
+            bail!("revolved round-tail frame is not orthonormal");
+        }
+    }
+    if dot(recovered.profile_x_axis, recovered.profile_y_axis).abs() > 1.0e-8
+        || dot(recovered.profile_x_axis, recovered.path_tangent).abs() > 1.0e-8
+        || dot(recovered.profile_y_axis, recovered.path_tangent).abs() > 1.0e-8
+        || dot(
+            cross(recovered.profile_x_axis, recovered.profile_y_axis),
+            recovered.path_tangent,
+        ) < 1.0 - 1.0e-8
+    {
+        bail!("revolved round-tail frame axes are inconsistent");
+    }
+
+    let mut model = CadModel::new();
+    let head_profile = recovered_revolution_profile(&recovered.head);
+    let head_body = model.add_node(CadNode::Revolve {
+        profile: head_profile,
+        axis: Axis3 {
+            origin_mm: [0.0, 0.0, 0.0],
+            direction: [0.0, 1.0, 0.0],
+        },
+        angle_rad: std::f64::consts::TAU,
+    });
+    let head_z = cross(
+        recovered.head.radial_direction,
+        recovered.head.axis_direction,
+    );
+    let head = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            recovered.head.axis_origin_mm,
+            recovered.head.radial_direction,
+            recovered.head.axis_direction,
+            head_z,
+        ),
+        child: head_body,
+    });
+
+    let radius = recovered.profile_radius_mm;
+    let profile = Profile2d {
+        loops: vec![ProfileLoop {
+            curves: vec![
+                Curve2d::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: radius,
+                    start_angle_rad: 0.0,
+                    end_angle_rad: std::f64::consts::PI,
+                },
+                Curve2d::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: radius,
+                    start_angle_rad: std::f64::consts::PI,
+                    end_angle_rad: std::f64::consts::TAU,
+                },
+            ],
+        }],
+    };
+    let segments = recovered
+        .segments
+        .iter()
+        .map(|segment| match segment {
+            RecoveredSweepSegment::Translation { vector_mm } => SweepSegment3d::Translation {
+                vector_mm: *vector_mm,
+            },
+            RecoveredSweepSegment::Rotation {
+                axis_origin_mm,
+                axis_direction,
+                angle_rad,
+            } => SweepSegment3d::Rotation {
+                axis: Axis3 {
+                    origin_mm: *axis_origin_mm,
+                    direction: *axis_direction,
+                },
+                angle_rad: *angle_rad,
+            },
+        })
+        .collect::<Vec<_>>();
+    let tail = model.add_node(CadNode::Sweep {
+        profile,
+        path: SweepPath3d {
+            initial_transform: local_frame_transform(
+                recovered.path_start_mm,
+                recovered.profile_x_axis,
+                recovered.profile_y_axis,
+                recovered.path_tangent,
+            ),
+            segments,
+            closed: false,
+        },
+    });
+    let RecoveredSweepSegment::Translation { vector_mm: end_vector } = recovered.segments[1]
+    else {
+        bail!("revolved round-tail proof must end in a straight segment");
+    };
+    let end_length = norm(end_vector);
+    if !end_length.is_finite() || end_length <= 1.0e-8 {
+        bail!("revolved round-tail terminal segment is degenerate");
+    }
+    let end_direction = mul(end_vector, 1.0 / end_length);
+    let hemisphere_z = cross(recovered.profile_x_axis, end_direction);
+    if (norm(hemisphere_z) - 1.0).abs() > 1.0e-8 {
+        bail!("revolved round-tail hemisphere frame is invalid");
+    }
+    let hemisphere_profile = Profile2d {
+        loops: vec![ProfileLoop {
+            curves: vec![
+                Curve2d::CircleArc {
+                    center_mm: [0.0, 0.0],
+                    radius_mm: radius,
+                    start_angle_rad: 0.0,
+                    end_angle_rad: std::f64::consts::FRAC_PI_2,
+                },
+                Curve2d::Line {
+                    start_mm: [0.0, radius],
+                    end_mm: [0.0, 0.0],
+                },
+                Curve2d::Line {
+                    start_mm: [0.0, 0.0],
+                    end_mm: [radius, 0.0],
+                },
+            ],
+        }],
+    };
+    let hemisphere_body = model.add_node(CadNode::Revolve {
+        profile: hemisphere_profile,
+        axis: Axis3 {
+            origin_mm: [0.0, 0.0, 0.0],
+            direction: [0.0, 1.0, 0.0],
+        },
+        angle_rad: std::f64::consts::TAU,
+    });
+    let hemisphere = model.add_node(CadNode::Transform {
+        transform: local_frame_transform(
+            recovered.end_sphere_center_mm,
+            recovered.profile_x_axis,
+            end_direction,
+            hemisphere_z,
+        ),
+        child: hemisphere_body,
+    });
+    let root = model.add_node(CadNode::Boolean {
+        op: BooleanOp::Union,
+        children: vec![head, tail, hemisphere],
+    });
+
+    let mut source_entity_ids = recovered.source_face_ids.clone();
+    source_entity_ids.push(recovered.solid_id);
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids,
+            proof: ProofStatus::WithinTolerance,
+            max_residual_mm: Some(recovered.max_residual_mm),
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+
+    let head_face_ids = recovered.head.face_ids.clone();
+    let head_set = head_face_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let tail_face_ids = recovered
+        .source_face_ids
+        .iter()
+        .copied()
+        .filter(|face_id| !head_set.contains(face_id))
+        .collect::<Vec<_>>();
+    Ok(CadFragment {
+        source: CadFragmentSource::RevolvedRoundTail {
+            solid_id: recovered.solid_id,
+            head_face_ids,
+            tail_face_ids,
+        },
+        model,
+        root,
+    })
+}
+
+/// Lower every proven revolved-head/round-tail body into CAD IR.
+///
+/// # Errors
+/// Returns the first malformed detector result.
+pub fn recover_revolved_round_tail_fragments(
+    recovered: &[RecoveredRevolvedRoundTail],
+) -> Result<Vec<CadFragment>> {
+    recovered
+        .iter()
+        .map(recover_revolved_round_tail_fragment)
         .collect()
 }
 

@@ -15,9 +15,9 @@ encoding_rs = "0.8.41"
 ruststep = { package = "step-p21", version = "0.1.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "58602eda20d1883a828748763781c926d4aaee3e", optional = true }
-monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "58602eda20d1883a828748763781c926d4aaee3e", optional = true }
-monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "58602eda20d1883a828748763781c926d4aaee3e", optional = true }
+monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"

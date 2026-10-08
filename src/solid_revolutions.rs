@@ -560,6 +560,165 @@ fn detect_one_solid(
     })
 }
 
+fn same_circle_support(a: brep::CircleSupport, b: brep::CircleSupport) -> bool {
+    (a.radius_mm - b.radius_mm).abs() <= GEOM_TOL_MM
+        && norm(sub(a.center_mm, b.center_mm)) <= GEOM_TOL_MM
+        && parallel(a.normal, b.normal)
+}
+
+fn selected_faces_connected(face_count: usize, edge_faces: &HashMap<u64, Vec<usize>>) -> bool {
+    if face_count == 0
+        || edge_faces
+            .values()
+            .any(|attached| attached.is_empty() || attached.len() > 2)
+    {
+        return false;
+    }
+    let mut adjacency = vec![Vec::<usize>::new(); face_count];
+    for attached in edge_faces.values().filter(|attached| attached.len() == 2) {
+        let [a, b] = attached.as_slice() else {
+            return false;
+        };
+        if a != b {
+            adjacency[*a].push(*b);
+            adjacency[*b].push(*a);
+        }
+    }
+    let mut seen = vec![false; face_count];
+    let mut stack = vec![0usize];
+    seen[0] = true;
+    while let Some(face) = stack.pop() {
+        for &neighbor in &adjacency[face] {
+            if !seen[neighbor] {
+                seen[neighbor] = true;
+                stack.push(neighbor);
+            }
+        }
+    }
+    seen.into_iter().all(|value| value)
+}
+
+/// Recover a connected axisymmetric subset of one source solid when removing the
+/// remaining feature leaves exactly one circular interface. The missing interface
+/// is capped only in constructive meridian space; source topology remains untouched.
+pub(crate) fn recover_axisymmetric_subbody_with_circular_cap(
+    solid_id: u64,
+    selected_face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<(RecoveredSolidRevolution, brep::CircleSupport)> {
+    if selected_face_ids.len() < 3 {
+        return None;
+    }
+    let faces = selected_face_ids
+        .iter()
+        .copied()
+        .map(|id| {
+            Some(FaceInfo {
+                surface: brep::surface_support(
+                    brep::face_surface(id, entities, index)?,
+                    entities,
+                    index,
+                ),
+                loops: brep::face_loops(id, entities, index)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        if face.loops.is_empty() {
+            return None;
+        }
+        for edge in face.loops.iter().flat_map(|loop_| &loop_.edges) {
+            edge_faces.entry(edge.edge_id).or_default().push(face_index);
+        }
+    }
+    if !selected_faces_connected(faces.len(), &edge_faces) {
+        return None;
+    }
+
+    let mut interface_circle = None;
+    let mut boundary_edge_count = 0usize;
+    for (edge_id, attached) in &edge_faces {
+        if attached.len() != 1 {
+            continue;
+        }
+        boundary_edge_count += 1;
+        let face = faces.get(attached[0])?;
+        let edge = face
+            .loops
+            .iter()
+            .flat_map(|loop_| &loop_.edges)
+            .find(|edge| edge.edge_id == *edge_id)?;
+        let CurveSupport::Circle(circle) = edge.support else {
+            return None;
+        };
+        if let Some(existing) = interface_circle {
+            if !same_circle_support(existing, circle) {
+                return None;
+            }
+        } else {
+            interface_circle = Some(circle);
+        }
+    }
+    if boundary_edge_count == 0 {
+        return None;
+    }
+    let interface_circle = interface_circle?;
+
+    let (axis_reference_origin_mm, axis_reference_direction) =
+        faces.iter().find_map(|face| match face.surface {
+            SurfaceSupport::Cylinder(cylinder) => Some((cylinder.axis_origin_mm, cylinder.axis)),
+            SurfaceSupport::Cone(cone) => Some((cone.reference_origin_mm, cone.axis)),
+            SurfaceSupport::Revolution(revolution) => {
+                Some((revolution.axis_origin_mm, revolution.axis))
+            }
+            SurfaceSupport::Torus(torus) => Some((torus.center_mm, torus.axis)),
+            _ => None,
+        })?;
+    let axis_direction = canonical_direction(normalize(axis_reference_direction)?);
+    let axis_origin_mm =
+        closest_point_on_unit_line_to_origin(axis_reference_origin_mm, axis_direction);
+    if !parallel(interface_circle.normal, axis_direction)
+        || point_to_unit_line_distance(interface_circle.center_mm, axis_origin_mm, axis_direction)
+            > GEOM_TOL_MM
+        || !interface_circle.radius_mm.is_finite()
+        || interface_circle.radius_mm <= GEOM_TOL_MM
+    {
+        return None;
+    }
+    let interface_axial_mm =
+        axial_coordinate(interface_circle.center_mm, axis_origin_mm, axis_direction);
+    let cap = MeridianCurve::Line(MeridianLine {
+        start: [interface_circle.radius_mm, interface_axial_mm],
+        end: [0.0, interface_axial_mm],
+    });
+    let context = TopologyContext {
+        faces: &faces,
+        edge_faces: &edge_faces,
+        entities,
+        index,
+    };
+    let source_tolerance_mm = source_tolerance_by_representation_item(entities, index)
+        .get(&solid_id)
+        .copied()
+        .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+    let mut recovered = detect_mixed_curved_revolution_with_synthetic(
+        solid_id,
+        selected_face_ids,
+        &faces,
+        &context,
+        &[cap],
+    )?;
+    recovered.max_residual_mm = recovered.max_residual_mm.max(point_to_unit_line_distance(
+        interface_circle.center_mm,
+        axis_origin_mm,
+        axis_direction,
+    ));
+    recovered.source_tolerance_mm = source_tolerance_mm;
+    Some((recovered, interface_circle))
+}
+
 fn detect_one_radial_slot(
     solid_id: u64,
     entities: &[EntityInstance],
@@ -1531,6 +1690,16 @@ fn detect_mixed_curved_revolution(
     faces: &[FaceInfo],
     context: &TopologyContext<'_>,
 ) -> Option<RecoveredSolidRevolution> {
+    detect_mixed_curved_revolution_with_synthetic(solid_id, face_ids, faces, context, &[])
+}
+
+fn detect_mixed_curved_revolution_with_synthetic(
+    solid_id: u64,
+    face_ids: &[u64],
+    faces: &[FaceInfo],
+    context: &TopologyContext<'_>,
+    synthetic_curves: &[MeridianCurve],
+) -> Option<RecoveredSolidRevolution> {
     let curved_count = faces
         .iter()
         .filter(|face| {
@@ -1673,6 +1842,7 @@ fn detect_mixed_curved_revolution(
         })
         .collect::<Vec<_>>();
     curves.extend(arcs);
+    curves.extend(synthetic_curves.iter().cloned());
     let profile_curves = MeridianProfile::closed(curves, GEOM_TOL_MM)?.into_recovered();
     Some(RecoveredSolidRevolution {
         solid_id,
