@@ -3,6 +3,8 @@ use ruststep::ast::Exchange;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub mod analysis;
+pub use analysis::AnalysisSession;
 mod bezier_recovery;
 #[doc(hidden)]
 pub mod body_corpus;
