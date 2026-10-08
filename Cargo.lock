@@ -599,6 +599,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "monstertruck-assembly"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "monstertruck-core",
  "rayon",
@@ -607,6 +608,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-core"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "cgmath",
  "matext4cgmath",
@@ -618,6 +620,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-derive"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -628,6 +631,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-geometry"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -640,6 +644,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-io"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "chrono",
  "derive_more",
@@ -660,6 +665,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-mesh"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "array-macro",
  "bytemuck",
@@ -675,6 +681,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-meshing"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "array-macro",
  "derive_more",
@@ -693,6 +700,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-modeling"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "derive_more",
  "itertools 0.14.0",
@@ -711,6 +719,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-solid"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "ahash",
  "derive_more",
@@ -730,6 +739,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-topology"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -744,6 +754,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-traits"
 version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=1ea5d553#1ea5d553e6e1b1bcd4d14dfffa2d8d4cde310bde"
 dependencies = [
  "getrandom 0.4.3",
  "monstertruck-core",

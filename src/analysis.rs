@@ -25,10 +25,6 @@ impl<'a> AnalysisSession<'a> {
         Ok(Self { input, exchange })
     }
 
-    pub(crate) const fn exchange(&self) -> &Exchange {
-        &self.exchange
-    }
-
     #[must_use]
     pub fn formed_sheet_evidence(&self) -> Vec<formed_sheet::FormedSheetEvidence> {
         self.exchange

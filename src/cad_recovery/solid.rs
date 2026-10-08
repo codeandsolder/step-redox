@@ -1,7 +1,7 @@
 use super::{CadFragment, CadFragmentSource};
 use crate::cad_ir::{
-    Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop,
-    ProofStatus, Provenance, RigidTransform, SweepPath3d, SweepSegment3d,
+    Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, ProofStatus,
+    Provenance, RigidTransform, SweepPath3d, SweepSegment3d,
 };
 use crate::math3::{add, cross, dot, mul, norm};
 use crate::profile_curves::RecoveredProfileCurve;
@@ -344,7 +344,9 @@ pub fn recover_revolved_round_tail_fragment(
             closed: false,
         },
     });
-    let RecoveredSweepSegment::Translation { vector_mm: end_vector } = recovered.segments[1]
+    let RecoveredSweepSegment::Translation {
+        vector_mm: end_vector,
+    } = recovered.segments[1]
     else {
         bail!("revolved round-tail proof must end in a straight segment");
     };

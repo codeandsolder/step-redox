@@ -144,7 +144,7 @@ pub(crate) fn recover_complete_ir_exchange(
             1.0e-7,
             4,
         ));
-        body_scan.extend(scan_source_solids(&section.entities, index));
+        body_scan.extend(scan_source_solids(&section.entities, &index));
     }
 
     body_scan.sort_by_key(|solid| solid.solid_id);
@@ -253,7 +253,7 @@ pub(crate) fn recover_complete_ir_exchange(
 fn scan_source_solids(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-J -> Vec<SourceSolidSummary> {
+) -> Vec<SourceSolidSummary> {
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = crate::step_graph::simple_record(entity) else {
