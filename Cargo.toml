@@ -6,7 +6,7 @@ rust-version = "1.88"
 
 [features]
 default = []
-cad-kernel-monstertruck = ["dep:monstertruck-modeling", "dep:monstertruck-io"]
+cad-kernel-monstertruck = ["dep:monstertruck-modeling", "dep:monstertruck-io", "dep:monstertruck-solid"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -15,15 +15,32 @@ encoding_rs = "0.8.41"
 ruststep = { package = "step-p21", version = "0.1.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-monstertruck-modeling = { version = "0.4.1", optional = true }
-monstertruck-io = { version = "0.4.1", optional = true }
+monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+num-traits = "0.2.19"
 
 [lints.rust]
 unsafe_code = "forbid"
+unfulfilled_lint_expectations = "warn"
+unexpected_cfgs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
 
 [lints.clippy]
-perf = "warn"
-complexity = "warn"
+correctness = "warn"
 suspicious = "warn"
-redundant_clone = "warn"
-iter_overeager_cloned = "warn"
+perf = "warn"
+style = "warn"
+complexity = "warn"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+await_holding_lock = "warn"
+allow_attributes_without_reason = "warn"

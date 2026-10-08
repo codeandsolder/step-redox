@@ -1,4 +1,12 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::math3::{add, dot, norm, scale, sub};
+use crate::step_entities::{
+    entity_ref, entity_ref_list, integer_list, integer_value, number as numeric_value,
+    numeric_list, push_simple,
+};
+use crate::step_graph::{
+    build_index, entity_id, entity_ref_value, simple_record, visit_entity_refs,
+};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const COLLINEAR_TOL: f64 = 1.0e-12;
@@ -8,7 +16,7 @@ const DIRECTION_ENDPOINT_TOL: f64 = 2.0e-13;
 const DEGENERATE_CHORD2: f64 = 1.0e-24;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct LineRecoveryStats {
+pub struct LineRecoveryStats {
     pub curves_recovered: usize,
     pub direction_groups: usize,
     pub orphan_points_removed: usize,
@@ -30,9 +38,7 @@ struct DirectionGroup {
     candidate_ids: Vec<u64>,
 }
 
-pub(crate) fn recover_straight_bspline_lines(
-    entities: &mut Vec<EntityInstance>,
-) -> LineRecoveryStats {
+pub fn recover_straight_bspline_lines(entities: &mut Vec<EntityInstance>) -> LineRecoveryStats {
     let mut stats = LineRecoveryStats::default();
     if entities.is_empty() {
         return stats;
@@ -412,14 +418,6 @@ fn vertex_coords(
     point_coords(entity_ref_value(params.get(1)?)?, entities, index)
 }
 
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(idx, entity)| (entity_id(entity), idx))
-        .collect()
-}
-
 fn inbound_map_for_targets(
     entities: &[EntityInstance],
     targets: &HashSet<u64>,
@@ -476,134 +474,8 @@ fn point_coords(
     ])
 }
 
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    let refs = items
-        .iter()
-        .map(entity_ref_value)
-        .collect::<Option<Vec<_>>>()?;
-    Some(refs)
-}
-
-fn integer_value(param: &Parameter) -> Option<i64> {
-    match param {
-        Parameter::Integer(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(integer_value).collect()
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => Some(*value as f64),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
 fn is_false_logical(param: &Parameter) -> bool {
     matches!(param, Parameter::Enumeration(value) if value == "F")
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(v: [f64; 3], factor: f64) -> [f64; 3] {
-    [v[0] * factor, v[1] * factor, v[2] * factor]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
 }
 
 fn point_line_distance(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -684,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_strict_straight_clamped_spline_and_only_orphan_poles() {
+    fn recovers_strict_straight_clamped_spline_and_only_orphan_poles() -> anyhow::Result<()> {
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
             point(2, [1.0, 0.0, 0.0]),
@@ -702,12 +574,14 @@ mod tests {
         assert_eq!(stats.orphan_points_removed, 2);
 
         let index = build_index(&entities);
-        let record = simple_record(&entities[index[&7]]).unwrap();
+        let record = simple_record(&entities[index[&7]])
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(record.name, "LINE");
         assert!(index.contains_key(&1));
         assert!(index.contains_key(&4));
         assert!(!index.contains_key(&2));
         assert!(!index.contains_key(&3));
+        Ok(())
     }
 
     #[test]
@@ -745,7 +619,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_straight_support_when_edge_vertices_trim_different_endpoints() {
+    fn rejects_straight_support_when_edge_vertices_trim_different_endpoints() -> anyhow::Result<()>
+    {
         let mut entities = vec![
             point(1, [0.0, 0.0, 0.0]),
             point(2, [1.0, 0.0, 0.0]),
@@ -762,8 +637,10 @@ mod tests {
         let stats = recover_straight_bspline_lines(&mut entities);
         assert_eq!(stats.curves_recovered, 0);
         let index = build_index(&entities);
-        let record = simple_record(&entities[index[&7]]).unwrap();
+        let record = simple_record(&entities[index[&7]])
+            .ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert_eq!(record.name, "B_SPLINE_CURVE_WITH_KNOTS");
+        Ok(())
     }
 
     #[test]

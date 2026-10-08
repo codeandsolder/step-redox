@@ -9,6 +9,16 @@ The project now has three output policies:
 - `--profile compat`: broadly compatible plain-BREP cleanup
 - `--profile compact`: proven semantic recovery, instancing, and aggressive compact output
 
+Experimental rewrites that do not preserve the imported top-level solid set or
+fused-solid boundary decomposition remain explicit-only even when they can
+produce large byte savings. In particular, broad same-support face coalescing,
+bare Z90 mapped-solid instancing, planar positive-feature factoring, and
+spherical-cap factoring are not enabled by `compat` or `compact`.
+
+The production profiles do enable a narrower planar-only same-support coalescer.
+A single closed loop on `PLANE` has an unambiguous bounded patch; closed or
+periodic supports remain behind the broad experimental flag.
+
 The current semantic layer also recovers regular instance patterns, coupled count
 parameters, and periodic body grammars. On a validated 2.00 mm dual-row header,
 step-redox independently recovers two contact rows plus a 24-face-per-site housing
@@ -70,18 +80,21 @@ periodic-body growth/shrink are implemented in `periodic_resize.rs`.
 The long-term representation is a backend-neutral constructive DAG rather than an
 ever-smarter mutable STEP entity graph. `cad_ir` now provides the first slice of that
 model: analytic/curve profiles, extrude/revolve/sweep/boolean/transform/pattern nodes,
-assemblies, explicit provenance/proof status, exact B-rep fallbacks, and a structural
-complexity score that counts shared DAG nodes once. KCL is the intended human-editable
+assemblies, explicit provenance/proof status, and a structural complexity score that counts
+shared DAG nodes once. Unrecovered source bodies stay outside `cad_ir` as explicit
+diagnostics rather than opaque geometry leaves. KCL is the intended human-editable
 serialization; the emitter currently lowers only proven polygon extrusion, translation,
 and linear-pattern subsets and fails closed on everything else.
 
-The first local evaluation backend is upstream Rust-native Truck pinned to a known-good
-git revision behind the optional `cad-kernel-truck` feature. Truck topology is wrapped in
-an opaque evaluated-shape type and does not escape the adapter. The backend currently
-evaluates only a single polygonal Z extrusion; extending the IR and extending a backend
-are intentionally separate operations. A 10 x 6 x 2 mm smoke model independently
-validated in OpenCascade as one valid six-face solid with 120 mm^3 volume and 184 mm^2
-surface area. The architecture spike is in `experiments/kcl-truck-spike/`.
+The local evaluation backend is Rust-native Monstertruck behind the optional
+`cad-kernel-monstertruck` feature. Kernel topology is wrapped in an opaque evaluated-shape
+type and does not escape the adapter. The backend evaluates proven profile extrusions,
+full/partial revolutions, transforms, booleans, and exact composite sweeps whose path is a
+sequence of straight translations and circular rotations; unsupported nodes fail closed.
+Closed composite paths join the final section directly back to the first, so rounded wire
+loops do not acquire coincident end caps. STEP emitted by the backend is independently
+checked with OpenCascade during development. The architecture spike is in
+`experiments/kcl-monstertruck-spike/`.
 
 ## Validation and CI
 
@@ -247,6 +260,11 @@ the exact host plane and reused through `REPRESENTATION_MAP` /
 `MAPPED_ITEM`, while the expanded feature faces and matching host holes are
 removed.
 
+This representation preserves the occupied union but changes a fused B-rep
+into touching solids and introduces coincident interface caps. Corpus
+differential validation therefore treats it as an explicit experimental
+representation transform rather than a semantics-preserving `compact` rewrite.
+
 Detection is deliberately strict. The source must be a closed shell, the host
 must be planar, every extracted feature edge must be exactly two-manifold with
 the feature or host, the complete feature/host interface must match exactly one
@@ -283,7 +301,7 @@ The output is byte-idempotent after all applicable aggressive passes have run.
 
 The pass is intentionally narrow. It requires two matching spherical faces per feature, an exact two-edge circular interface to one shared planar face, a one-to-one matching `FACE_BOUND` hole in that plane, identical normalized B-rep topology and style across the feature array, and identical sphere centers modulo translation.
 
-It removes the circular holes from the substrate plane, keeps one feature as a canonical closed solid by adding a planar interface disk, and maps that solid to all feature locations with `REPRESENTATION_MAP` / `MAPPED_ITEM`. This changes solid decomposition and introduces hidden coincident interface faces, so it is kept separate from the topology-preserving safe tier.
+It removes the circular holes from the substrate plane, keeps one feature as a canonical closed solid by adding a planar interface disk, and maps that solid to all feature locations with `REPRESENTATION_MAP` / `MAPPED_ITEM`. This changes solid decomposition and introduces hidden coincident interface faces, so it is kept separate from the topology-preserving safe tier and is not enabled by `compat` or `compact`.
 
 On the BGA-636 corpus example:
 

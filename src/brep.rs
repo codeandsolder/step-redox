@@ -1,21 +1,27 @@
-use crate::instances::{
-    cartesian_point, entity_ref, entity_ref_value, number, simple_record, simple_record_mut,
+use crate::math3::{dot, mul, normalize as normalize3, sub};
+use crate::shape_identity::{manifold_solid_face_ids, resolve_edge_curve_use};
+use crate::step_entities::{
+    cartesian_point, direction_components as raw_direction_components, entity_ref,
+    enumeration_bool as parse_enumeration_bool, finite_numeric_list, number,
+    vertex_point as parse_vertex_point,
 };
+use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut};
 use crate::surface_recovery;
 use ruststep::ast::{EntityInstance, Parameter, Record, SubSuperRecord};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 const DIRECTION_TOLERANCE: f64 = 1.0e-15;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PlaneSupport {
+pub struct PlaneSupport {
     pub origin_mm: [f64; 3],
     pub normal: [f64; 3],
     pub max_residual_mm: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CylinderSupport {
+pub struct CylinderSupport {
     pub axis_origin_mm: [f64; 3],
     pub axis: [f64; 3],
     pub x_direction: [f64; 3],
@@ -23,7 +29,7 @@ pub(crate) struct CylinderSupport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ConeSupport {
+pub struct ConeSupport {
     pub reference_origin_mm: [f64; 3],
     pub axis: [f64; 3],
     pub x_direction: [f64; 3],
@@ -32,7 +38,7 @@ pub(crate) struct ConeSupport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SphereSupport {
+pub struct SphereSupport {
     pub center_mm: [f64; 3],
     pub axis: [f64; 3],
     pub x_direction: [f64; 3],
@@ -40,7 +46,7 @@ pub(crate) struct SphereSupport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct TorusSupport {
+pub struct TorusSupport {
     pub center_mm: [f64; 3],
     pub axis: [f64; 3],
     pub x_direction: [f64; 3],
@@ -49,14 +55,14 @@ pub(crate) struct TorusSupport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RevolutionSurfaceSupport {
+pub struct RevolutionSurfaceSupport {
     pub axis_origin_mm: [f64; 3],
     pub axis: [f64; 3],
     pub swept_curve_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct BSplineSupport {
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BSplineSupport {
     pub degree: usize,
     pub control_points_mm: Vec<[f64; 3]>,
     pub knots: Vec<f64>,
@@ -64,14 +70,14 @@ pub(crate) struct BSplineSupport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SplineExtrusionSupport {
+pub struct SplineExtrusionSupport {
     pub profile: BSplineSupport,
     pub extrusion_mm: [f64; 3],
     pub max_residual_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SurfaceSupport {
+pub enum SurfaceSupport {
     Plane(PlaneSupport),
     Cylinder(CylinderSupport),
     Cone(ConeSupport),
@@ -83,13 +89,13 @@ pub(crate) enum SurfaceSupport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct LineSupport {
+pub struct LineSupport {
     pub origin_mm: [f64; 3],
     pub direction: [f64; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CircleSupport {
+pub struct CircleSupport {
     pub center_mm: [f64; 3],
     pub normal: [f64; 3],
     pub x_direction: [f64; 3],
@@ -97,7 +103,7 @@ pub(crate) struct CircleSupport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CurveSupport {
+pub enum CurveSupport {
     Line(LineSupport),
     Circle(CircleSupport),
     BSpline(BSplineSupport),
@@ -105,7 +111,7 @@ pub(crate) enum CurveSupport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OrientedEdgeUse {
+pub struct OrientedEdgeUse {
     pub oriented_edge_id: u64,
     pub edge_id: u64,
     pub curve_id: u64,
@@ -119,7 +125,7 @@ pub(crate) struct OrientedEdgeUse {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FaceLoop {
+pub struct FaceLoop {
     pub bound_id: u64,
     pub loop_id: u64,
     pub outer: bool,
@@ -127,16 +133,15 @@ pub(crate) struct FaceLoop {
     pub edges: Vec<OrientedEdgeUse>,
 }
 
-pub(crate) fn solid_face_ids(
+pub fn solid_face_ids(
     solid_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<Vec<u64>> {
-    let shell_id = manifold_shell(solid_id, entities, index)?;
-    ref_list_param(shell_id, 1, entities, index)
+    manifold_solid_face_ids(solid_id, entities, index)
 }
 
-pub(crate) fn face_loops(
+pub fn face_loops(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -157,7 +162,7 @@ pub(crate) fn face_loops(
         .collect()
 }
 
-pub(crate) fn ordered_bound_loop(
+pub fn ordered_bound_loop(
     bound_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -199,20 +204,12 @@ pub(crate) fn ordered_bound_loop(
     })
 }
 
-pub(crate) fn oriented_edge_use(
+pub fn oriented_edge_use(
     oriented_edge_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<OrientedEdgeUse> {
-    let oriented_record = simple_record(&entities[*index.get(&oriented_edge_id)?])?;
-    if oriented_record.name != "ORIENTED_EDGE" {
-        return None;
-    }
-    let Parameter::List(oriented_params) = &oriented_record.parameter else {
-        return None;
-    };
-    let edge_id = entity_ref_value(oriented_params.get(3)?)?;
-    let forward = enumeration_bool(oriented_params.get(4)?)?;
+    let (edge_id, forward) = resolve_edge_curve_use(oriented_edge_id, entities, index)?;
 
     let edge_record = simple_record(&entities[*index.get(&edge_id)?])?;
     if edge_record.name != "EDGE_CURVE" {
@@ -252,7 +249,7 @@ pub(crate) fn oriented_edge_use(
     })
 }
 
-pub(crate) fn surface_support(
+pub fn surface_support(
     surface_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -413,7 +410,7 @@ pub(crate) fn surface_support(
     }
 }
 
-pub(crate) fn curve_support(
+pub fn curve_support(
     curve_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -699,16 +696,6 @@ fn positive_integer_list(parameter: &Parameter) -> Option<Vec<usize>> {
         .collect()
 }
 
-fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = parameter else {
-        return None;
-    };
-    items
-        .iter()
-        .map(|item| number(item).filter(|value| value.is_finite()))
-        .collect()
-}
-
 fn normalized_expanded_knots(
     degree: usize,
     control_points: usize,
@@ -759,7 +746,7 @@ fn normalize_weights(weights: Vec<f64>) -> Option<Vec<f64>> {
         .then_some(normalized)
 }
 
-pub(crate) fn axis2_placement_3d(
+pub fn axis2_placement_3d(
     placement_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -791,7 +778,7 @@ pub(crate) fn axis2_placement_3d(
     Some((origin_mm, axis, x_direction))
 }
 
-pub(crate) fn axis1_placement(
+pub fn axis1_placement(
     placement_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -814,52 +801,24 @@ pub(crate) fn axis1_placement(
     Some((origin_mm, normalize(axis)?))
 }
 
-pub(crate) fn direction_components(
+pub fn direction_components(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(values) = params.get(1)? else {
-        return None;
-    };
-    if values.len() != 3 {
-        return None;
-    }
-    normalize([
-        number(&values[0])?,
-        number(&values[1])?,
-        number(&values[2])?,
-    ])
+    normalize(raw_direction_components(id, entities, index)?)
 }
 
-pub(crate) fn vertex_point(
+pub fn vertex_point(
     vertex_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Option<[f64; 3]> {
-    let vertex = simple_record(&entities[*index.get(&vertex_id)?])?;
-    if vertex.name != "VERTEX_POINT" {
-        return None;
-    }
-    let Parameter::List(params) = &vertex.parameter else {
-        return None;
-    };
-    cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)
+    parse_vertex_point(vertex_id, entities, index)
 }
 
-pub(crate) fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
-    match parameter {
-        Parameter::Enumeration(value) if value == "T" => Some(true),
-        Parameter::Enumeration(value) if value == "F" => Some(false),
-        _ => None,
-    }
+pub fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
+    parse_enumeration_bool(parameter)
 }
 
 fn default_ref_direction(axis: [f64; 3]) -> [f64; 3] {
@@ -873,26 +832,10 @@ fn default_ref_direction(axis: [f64; 3]) -> [f64; 3] {
 }
 
 fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
-    let length = dot(vector, vector).sqrt();
-    if !length.is_finite() || length <= DIRECTION_TOLERANCE {
-        return None;
-    }
-    Some(mul(vector, 1.0 / length))
+    normalize3(vector, DIRECTION_TOLERANCE)
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f64; 3], scalar: f64) -> [f64; 3] {
-    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
-}
-
-pub(crate) fn manifold_shell(
+pub fn manifold_shell(
     solid_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -907,7 +850,7 @@ pub(crate) fn manifold_shell(
     entity_ref_value(params.get(1)?)
 }
 
-pub(crate) fn face_surface(
+pub fn face_surface(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -922,7 +865,7 @@ pub(crate) fn face_surface(
     entity_ref_value(params.get(2)?)
 }
 
-pub(crate) fn face_sense(
+pub fn face_sense(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -934,7 +877,7 @@ pub(crate) fn face_sense(
     enumeration_value(params.get(3)?)
 }
 
-pub(crate) fn face_edge_curves(
+pub fn face_edge_curves(
     face_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -956,7 +899,7 @@ pub(crate) fn face_edge_curves(
     Some(edges)
 }
 
-pub(crate) fn bound_loop_edges(
+pub fn bound_loop_edges(
     bound_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -969,7 +912,7 @@ pub(crate) fn bound_loop_edges(
     ))
 }
 
-pub(crate) fn matching_plane_bound(
+pub fn matching_plane_bound(
     plane_face: u64,
     interface_edges: &HashSet<u64>,
     entities: &[EntityInstance],
@@ -995,7 +938,7 @@ pub(crate) fn matching_plane_bound(
     matched
 }
 
-pub(crate) fn ref_list_param(
+pub fn ref_list_param(
     id: u64,
     param_index: usize,
     entities: &[EntityInstance],
@@ -1011,7 +954,7 @@ pub(crate) fn ref_list_param(
     items.iter().map(entity_ref_value).collect()
 }
 
-pub(crate) fn remove_refs_from_list_param(
+pub fn remove_refs_from_list_param(
     entity: &mut EntityInstance,
     param_index: usize,
     remove: &HashSet<u64>,
@@ -1030,7 +973,7 @@ pub(crate) fn remove_refs_from_list_param(
     items.len() < before
 }
 
-pub(crate) fn append_refs_to_list_param(
+pub fn append_refs_to_list_param(
     entity: &mut EntityInstance,
     param_index: usize,
     append: &[u64],
@@ -1048,14 +991,14 @@ pub(crate) fn append_refs_to_list_param(
     true
 }
 
-pub(crate) fn enumeration_value(parameter: &Parameter) -> Option<String> {
+pub fn enumeration_value(parameter: &Parameter) -> Option<String> {
     match parameter {
         Parameter::Enumeration(value) => Some(value.clone()),
         _ => None,
     }
 }
 
-pub(crate) fn toggle_tf(value: &str) -> String {
+pub fn toggle_tf(value: &str) -> String {
     match value {
         "T" => "F".to_string(),
         "F" => "T".to_string(),
@@ -1066,7 +1009,7 @@ pub(crate) fn toggle_tf(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::entity_id;
+    use crate::step_graph::entity_id;
 
     fn wrapped(data: &str) -> String {
         format!(
@@ -1085,7 +1028,7 @@ END-ISO-10303-21;
     }
 
     #[test]
-    fn parses_rotational_analytic_surface_supports() {
+    fn parses_rotational_analytic_surface_supports() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(1.,2.,3.));
              #2=DIRECTION('',(0.,0.,2.));
@@ -1099,7 +1042,7 @@ END-ISO-10303-21;
              #10=LINE('',#1,#9);
              #11=SURFACE_OF_REVOLUTION('',#10,#8);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1108,7 +1051,7 @@ END-ISO-10303-21;
             .collect::<HashMap<_, _>>();
 
         let SurfaceSupport::Cone(cone) = surface_support(5, entities, &index) else {
-            panic!("expected cone support");
+            anyhow::bail!("expected cone support");
         };
         assert_eq!(cone.reference_origin_mm, [1.0, 2.0, 3.0]);
         assert_eq!(cone.axis, [0.0, 0.0, 1.0]);
@@ -1116,33 +1059,34 @@ END-ISO-10303-21;
         assert_eq!(cone.semi_angle_rad, 0.25);
 
         let SurfaceSupport::Sphere(sphere) = surface_support(6, entities, &index) else {
-            panic!("expected sphere support");
+            anyhow::bail!("expected sphere support");
         };
         assert_eq!(sphere.center_mm, [1.0, 2.0, 3.0]);
         assert_eq!(sphere.radius_mm, 4.0);
 
         let SurfaceSupport::Torus(torus) = surface_support(7, entities, &index) else {
-            panic!("expected torus support");
+            anyhow::bail!("expected torus support");
         };
         assert_eq!(torus.center_mm, [1.0, 2.0, 3.0]);
         assert_eq!(torus.major_radius_mm, 5.0);
         assert_eq!(torus.minor_radius_mm, 1.0);
 
         let SurfaceSupport::Revolution(revolution) = surface_support(11, entities, &index) else {
-            panic!("expected surface-of-revolution support");
+            anyhow::bail!("expected surface-of-revolution support");
         };
         assert_eq!(revolution.axis_origin_mm, [1.0, 2.0, 3.0]);
         assert_eq!(revolution.axis, [0.0, 0.0, 1.0]);
         assert_eq!(revolution.swept_curve_id, 10);
+        Ok(())
     }
 
     #[test]
-    fn axis1_placement_defaults_to_positive_z() {
+    fn axis1_placement_defaults_to_positive_z() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(1.,2.,3.));
              #2=AXIS1_PLACEMENT('',#1,$);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1153,10 +1097,11 @@ END-ISO-10303-21;
             axis1_placement(2, entities, &index),
             Some(([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]))
         );
+        Ok(())
     }
 
     #[test]
-    fn spline_extrusion_precedes_planar_fallback() {
+    fn spline_extrusion_precedes_planar_fallback() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,0.));
              #2=CARTESIAN_POINT('',(0.,2.,0.));
@@ -1166,7 +1111,7 @@ END-ISO-10303-21;
              #6=CARTESIAN_POINT('',(2.,2.,0.));
              #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1177,10 +1122,11 @@ END-ISO-10303-21;
             surface_support(10, entities, &index),
             SurfaceSupport::SplineExtrusion(_)
         ));
+        Ok(())
     }
 
     #[test]
-    fn planar_non_extrusion_bspline_falls_back_to_plane() {
+    fn planar_non_extrusion_bspline_falls_back_to_plane() -> anyhow::Result<()> {
         let text = wrapped(
             "#1=CARTESIAN_POINT('',(0.,0.,3.));
              #2=CARTESIAN_POINT('',(0.,1.,3.));
@@ -1190,7 +1136,7 @@ END-ISO-10303-21;
              #6=CARTESIAN_POINT('',(2.,2.,3.));
              #10=B_SPLINE_SURFACE_WITH_KNOTS('',1,2,((#1,#2,#3),(#4,#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.);",
         );
-        let exchange = ruststep::parser::parse(&text).unwrap();
+        let exchange = ruststep::parser::parse(&text)?;
         let entities = &exchange.data[0].entities;
         let index = entities
             .iter()
@@ -1198,11 +1144,83 @@ END-ISO-10303-21;
             .map(|(index, entity)| (entity_id(entity), index))
             .collect::<HashMap<_, _>>();
         let SurfaceSupport::Plane(plane) = surface_support(10, entities, &index) else {
-            panic!("expected planar fallback");
+            anyhow::bail!("expected planar fallback");
         };
         assert!((plane.origin_mm[2] - 3.0).abs() <= 1.0e-12);
         assert!((plane.normal[2].abs() - 1.0).abs() <= 1.0e-12);
         assert!(plane.max_residual_mm <= 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn edge_loop_tolerates_direct_edge_curve_as_forward_use() -> anyhow::Result<()> {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));
+             #2=CARTESIAN_POINT('',(1.,0.,0.));
+             #3=DIRECTION('',(1.,0.,0.));
+             #4=VECTOR('',#3,1.);
+             #5=LINE('',#1,#4);
+             #6=VERTEX_POINT('',#1);
+             #7=VERTEX_POINT('',#2);
+             #8=EDGE_CURVE('',#6,#7,#5,.T.);
+             #9=EDGE_LOOP('',(#8));
+             #10=FACE_OUTER_BOUND('',#9,.T.);",
+        );
+        let exchange = ruststep::parser::parse(&text)?;
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+
+        let loop_ = ordered_bound_loop(10, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected direct EDGE_CURVE loop"))?;
+        assert_eq!(loop_.edges.len(), 1);
+        let edge = &loop_.edges[0];
+        assert_eq!(edge.oriented_edge_id, 8);
+        assert_eq!(edge.edge_id, 8);
+        assert_eq!(edge.start_vertex, 6);
+        assert_eq!(edge.end_vertex, 7);
+        assert!(edge.parameter_forward);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_oriented_edges_compose_direction() -> anyhow::Result<()> {
+        let text = wrapped(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));
+             #2=CARTESIAN_POINT('',(1.,0.,0.));
+             #3=DIRECTION('',(1.,0.,0.));
+             #4=VECTOR('',#3,1.);
+             #5=LINE('',#1,#4);
+             #6=VERTEX_POINT('',#1);
+             #7=VERTEX_POINT('',#2);
+             #8=EDGE_CURVE('',#6,#7,#5,.T.);
+             #9=ORIENTED_EDGE('',*,*,#8,.F.);
+             #10=ORIENTED_EDGE('',*,*,#9,.F.);",
+        );
+        let exchange = ruststep::parser::parse(&text)?;
+        let entities = &exchange.data[0].entities;
+        let index = entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| (entity_id(entity), index))
+            .collect::<HashMap<_, _>>();
+
+        let edge = oriented_edge_use(10, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected nested oriented edge"))?;
+        assert_eq!(edge.edge_id, 8);
+        assert_eq!(edge.start_vertex, 6);
+        assert_eq!(edge.end_vertex, 7);
+        assert!(edge.parameter_forward);
+
+        let reversed = oriented_edge_use(9, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("expected single reversal"))?;
+        assert_eq!(reversed.start_vertex, 7);
+        assert_eq!(reversed.end_vertex, 6);
+        assert!(!reversed.parameter_forward);
+        Ok(())
     }
 
     #[test]

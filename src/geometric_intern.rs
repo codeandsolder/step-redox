@@ -1,8 +1,9 @@
-use crate::instances::{
-    build_index, cartesian_point, entity_id, entity_ref_map, entity_ref_value, inbound_map, number,
-    simple_record,
+use crate::math3::{dot, mul, norm, sub};
+use crate::step_entities::{cartesian_point, direction_components as direction, number};
+use crate::step_graph::{
+    ReferenceGraph, build_index, entity_id, entity_ref_value, rewrite_entity_refs, simple_record,
 };
-use ruststep::ast::{EntityInstance, Name, Parameter};
+use ruststep::ast::{EntityInstance, Parameter};
 use std::collections::{HashMap, HashSet};
 
 const POS_TOL_MM: f64 = 1.0e-5;
@@ -10,9 +11,30 @@ const SCALAR_TOL_MM: f64 = 1.0e-5;
 // Direction is dimensionless. Keep this much tighter than position: an angular
 // error can accumulate over a long surface even when its origin matches.
 const DIR_TOL: f64 = 1.0e-10;
+// Reusing the same infinite line with a very distant exporter-local origin can
+// make tolerant STEP importers retrim otherwise unchanged EDGE_CURVEs
+// differently. Keep the canonical origin reasonably local to every edge.
+const LINE_MAX_ORIGIN_SHIFT_EDGE_CHORDS: f64 = 64.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SupportKey {
+    Plane {
+        normal: [i64; 3],
+        offset: i64,
+    },
+    Line {
+        direction: [i64; 3],
+        closest: [i64; 3],
+    },
+    Cylinder {
+        direction: [i64; 3],
+        closest: [i64; 3],
+        radius: i64,
+    },
+}
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct GeometricInternStats {
+pub struct GeometricInternStats {
     pub supports_merged: usize,
     pub entities_removed: usize,
     pub planes_merged: usize,
@@ -23,27 +45,27 @@ pub(crate) struct GeometricInternStats {
 /// Merge support geometry by geometric locus, not exporter-local placement
 /// frames.  This is deliberately narrower than ordinary value interning:
 ///
-/// * PLANE / CYLINDRICAL_SURFACE must be referenced only as ADVANCED_FACE
+/// * PLANE / `CYLINDRICAL_SURFACE` must be referenced only as `ADVANCED_FACE`
 ///   support geometry.
-/// * LINE must be referenced only by EDGE_CURVE.
+/// * LINE must be referenced only by `EDGE_CURVE`.
 ///
-/// That restriction keeps parameter-space consumers (PCURVE, TRIMMED_CURVE,
-/// etc.) out of the pass.  In those safe roles the topology already supplies
-/// the trimming endpoints/loops, so changing an arbitrary local origin or
-/// in-plane X axis does not change the represented 3-D locus.
-pub(crate) fn intern_geometric_supports(
-    entities: &mut Vec<EntityInstance>,
-) -> GeometricInternStats {
+/// That restriction keeps parameter-space consumers (PCURVE, `TRIMMED_CURVE`,
+/// etc.) out of the pass. In those safe roles the topology supplies the
+/// trimming endpoints/loops. LINE aliases get one additional guard because
+/// tolerant importers may still retrim an `EDGE_CURVE` differently when its
+/// underlying line is replaced by the same locus with a very remote parameter
+/// origin.
+pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> GeometricInternStats {
     let mut stats = GeometricInternStats::default();
     if entities.is_empty() {
         return stats;
     }
 
     let index = build_index(entities);
-    let refs = entity_ref_map(entities);
-    let inbound = inbound_map(&refs);
+    let references = ReferenceGraph::new(entities);
+    let inbound = references.inbound();
 
-    let mut seen: HashMap<String, u64> = HashMap::new();
+    let mut seen: HashMap<SupportKey, u64> = HashMap::new();
     let mut alias: HashMap<u64, u64> = HashMap::new();
 
     for entity in entities.iter() {
@@ -81,6 +103,11 @@ pub(crate) fn intern_geometric_supports(
         };
         if let Some(&canonical) = seen.get(&key) {
             if canonical != id {
+                if record.name == "LINE"
+                    && !line_alias_is_safe(id, canonical, entities, &index, &inbound)
+                {
+                    continue;
+                }
                 alias.insert(id, canonical);
                 stats.supports_merged += 1;
                 match record.name.as_str() {
@@ -104,7 +131,7 @@ pub(crate) fn intern_geometric_supports(
     let mut candidate = duplicate_roots.clone();
     let mut stack: Vec<u64> = duplicate_roots.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        for &child in refs.get(&id).into_iter().flatten() {
+        for &child in references.refs(id).iter() {
             if index.contains_key(&child) && candidate.insert(child) {
                 stack.push(child);
             }
@@ -112,11 +139,11 @@ pub(crate) fn intern_geometric_supports(
     }
 
     for entity in entities.iter_mut() {
-        rewrite_refs(entity, &alias);
+        rewrite_entity_refs(entity, &alias);
     }
 
-    let rewritten_refs = entity_ref_map(entities);
-    let rewritten_inbound = inbound_map(&rewritten_refs);
+    let rewritten_references = ReferenceGraph::new(entities);
+    let rewritten_inbound = rewritten_references.inbound();
     let mut delete = duplicate_roots;
 
     // Fixed-point orphan collection within the duplicate support closures.
@@ -148,7 +175,7 @@ fn support_key(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
-) -> Option<String> {
+) -> Option<SupportKey> {
     let record = simple_record(&entities[*index.get(&id)?])?;
     match record.name.as_str() {
         "PLANE" => {
@@ -156,35 +183,23 @@ fn support_key(
             let (origin, z, _x) = axis3(axis, entities, index)?;
             let n = unit(z)?;
             let d = dot(n, origin);
-            Some(format!(
-                "PLANE:{},{},{}:{}",
-                q(n[0], DIR_TOL),
-                q(n[1], DIR_TOL),
-                q(n[2], DIR_TOL),
-                q(d, POS_TOL_MM)
-            ))
+            Some(SupportKey::Plane {
+                normal: [q(n[0], DIR_TOL), q(n[1], DIR_TOL), q(n[2], DIR_TOL)],
+                offset: q(d, POS_TOL_MM),
+            })
         }
         "LINE" => {
-            let point_id = nth_ref(&record.parameter, 1)?;
-            let vector_id = nth_ref(&record.parameter, 2)?;
-            let p = cartesian_point(point_id, entities, index)?;
-            let vrec = simple_record(&entities[*index.get(&vector_id)?])?;
-            if vrec.name != "VECTOR" {
-                return None;
-            }
-            let dir_id = nth_ref(&vrec.parameter, 1)?;
-            let d = unit(direction(dir_id, entities, index)?)?;
+            let (p, d, _magnitude) = line_geometry(id, entities, index)?;
             // Closest point on the infinite line to the global origin.
             let c = sub(p, mul(d, dot(d, p)));
-            Some(format!(
-                "LINE:{},{},{}:{},{},{}",
-                q(d[0], DIR_TOL),
-                q(d[1], DIR_TOL),
-                q(d[2], DIR_TOL),
-                q(c[0], POS_TOL_MM),
-                q(c[1], POS_TOL_MM),
-                q(c[2], POS_TOL_MM)
-            ))
+            Some(SupportKey::Line {
+                direction: [q(d[0], DIR_TOL), q(d[1], DIR_TOL), q(d[2], DIR_TOL)],
+                closest: [
+                    q(c[0], POS_TOL_MM),
+                    q(c[1], POS_TOL_MM),
+                    q(c[2], POS_TOL_MM),
+                ],
+            })
         }
         "CYLINDRICAL_SURFACE" => {
             let axis = nth_ref(&record.parameter, 1)?;
@@ -192,19 +207,127 @@ fn support_key(
             let (origin, z, _x) = axis3(axis, entities, index)?;
             let d = unit(z)?;
             let c = sub(origin, mul(d, dot(d, origin)));
-            Some(format!(
-                "CYL:{},{},{}:{},{},{}:{}",
-                q(d[0], DIR_TOL),
-                q(d[1], DIR_TOL),
-                q(d[2], DIR_TOL),
-                q(c[0], POS_TOL_MM),
-                q(c[1], POS_TOL_MM),
-                q(c[2], POS_TOL_MM),
-                q(radius, SCALAR_TOL_MM)
-            ))
+            Some(SupportKey::Cylinder {
+                direction: [q(d[0], DIR_TOL), q(d[1], DIR_TOL), q(d[2], DIR_TOL)],
+                closest: [
+                    q(c[0], POS_TOL_MM),
+                    q(c[1], POS_TOL_MM),
+                    q(c[2], POS_TOL_MM),
+                ],
+                radius: q(radius, SCALAR_TOL_MM),
+            })
         }
         _ => None,
     }
+}
+
+fn line_alias_is_safe(
+    duplicate: u64,
+    canonical: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    inbound: &HashMap<u64, Vec<u64>>,
+) -> bool {
+    let Some((duplicate_origin, _duplicate_direction, duplicate_magnitude)) =
+        line_geometry(duplicate, entities, index)
+    else {
+        return false;
+    };
+    let Some((canonical_origin, canonical_direction, canonical_magnitude)) =
+        line_geometry(canonical, entities, index)
+    else {
+        return false;
+    };
+
+    if (duplicate_magnitude - canonical_magnitude).abs() > SCALAR_TOL_MM {
+        return false;
+    }
+
+    let axial_shift = dot(sub(duplicate_origin, canonical_origin), canonical_direction).abs();
+    let Some(parents) = inbound.get(&duplicate) else {
+        return false;
+    };
+
+    for &edge_id in parents {
+        let Some(&edge_idx) = index.get(&edge_id) else {
+            return false;
+        };
+        let Some(record) = simple_record(&entities[edge_idx]) else {
+            return false;
+        };
+        if record.name != "EDGE_CURVE" {
+            return false;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            return false;
+        };
+
+        let mut endpoints = [[0.0_f64; 3]; 2];
+        for (slot, vertex_param) in [1_usize, 2].into_iter().enumerate() {
+            let Some(vertex_id) = params.get(vertex_param).and_then(entity_ref_value) else {
+                return false;
+            };
+            let Some(point) = vertex_point(vertex_id, entities, index) else {
+                return false;
+            };
+            if point_line_distance(point, canonical_origin, canonical_direction) > POS_TOL_MM {
+                return false;
+            }
+            endpoints[slot] = point;
+        }
+
+        let edge_chord = norm(sub(endpoints[0], endpoints[1]));
+        if !edge_chord.is_finite()
+            || edge_chord <= f64::EPSILON
+            || axial_shift > LINE_MAX_ORIGIN_SHIFT_EDGE_CHORDS * edge_chord
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn line_geometry(
+    id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<([f64; 3], [f64; 3], f64)> {
+    let record = simple_record(&entities[*index.get(&id)?])?;
+    if record.name != "LINE" {
+        return None;
+    }
+    let point_id = nth_ref(&record.parameter, 1)?;
+    let vector_id = nth_ref(&record.parameter, 2)?;
+    let origin = cartesian_point(point_id, entities, index)?;
+    let vector = simple_record(&entities[*index.get(&vector_id)?])?;
+    if vector.name != "VECTOR" {
+        return None;
+    }
+    let direction_id = nth_ref(&vector.parameter, 1)?;
+    let direction = unit(direction(direction_id, entities, index)?)?;
+    let magnitude = nth_number(&vector.parameter, 2)?;
+    magnitude
+        .is_finite()
+        .then_some((origin, direction, magnitude))
+}
+
+fn vertex_point(
+    id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<[f64; 3]> {
+    let record = simple_record(&entities[*index.get(&id)?])?;
+    if record.name != "VERTEX_POINT" {
+        return None;
+    }
+    cartesian_point(nth_ref(&record.parameter, 1)?, entities, index)
+}
+
+fn point_line_distance(point: [f64; 3], origin: [f64; 3], direction: [f64; 3]) -> f64 {
+    let delta = sub(point, origin);
+    let axial = dot(direction, delta);
+    norm(sub(delta, mul(direction, axial)))
 }
 
 fn axis3(
@@ -220,31 +343,6 @@ fn axis3(
     let z = direction(nth_ref(&record.parameter, 2)?, entities, index)?;
     let x = direction(nth_ref(&record.parameter, 3)?, entities, index)?;
     Some((origin, z, x))
-}
-
-fn direction(
-    id: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(&entities[*index.get(&id)?])?;
-    if record.name != "DIRECTION" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        number(&coords[0])?,
-        number(&coords[1])?,
-        number(&coords[2])?,
-    ])
 }
 
 fn nth_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
@@ -265,18 +363,6 @@ fn q(v: f64, tol: f64) -> i64 {
     (v / tol).round() as i64
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
 fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
     let n = dot(v, v).sqrt();
     if !n.is_finite() || n <= f64::EPSILON {
@@ -285,30 +371,149 @@ fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
     Some([v[0] / n, v[1] / n, v[2] / n])
 }
 
-fn rewrite_refs(entity: &mut EntityInstance, alias: &HashMap<u64, u64>) {
-    match entity {
-        EntityInstance::Simple { record, .. } => rewrite_param(&mut record.parameter, alias),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &mut subsuper.0 {
-                rewrite_param(&mut record.parameter, alias);
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruststep::ast::{Name, Record};
+
+    fn r(id: u64) -> Parameter {
+        Parameter::Ref(Name::Entity(id))
+    }
+
+    fn simple(id: u64, name: &str, params: Vec<Parameter>) -> EntityInstance {
+        EntityInstance::Simple {
+            id,
+            record: Record {
+                name: name.to_string(),
+                parameter: Parameter::List(params),
+            },
         }
     }
-}
 
-fn rewrite_param(param: &mut Parameter, alias: &HashMap<u64, u64>) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => {
-            if let Some(&new) = alias.get(id) {
-                *id = new;
-            }
-        }
-        Parameter::List(items) => {
-            for item in items {
-                rewrite_param(item, alias);
-            }
-        }
-        Parameter::Typed { parameter, .. } => rewrite_param(parameter, alias),
-        _ => {}
+    fn point(id: u64, xyz: [f64; 3]) -> EntityInstance {
+        simple(
+            id,
+            "CARTESIAN_POINT",
+            vec![
+                Parameter::String(String::new()),
+                Parameter::List(xyz.into_iter().map(Parameter::Real).collect()),
+            ],
+        )
+    }
+
+    fn direction_entity(id: u64, xyz: [f64; 3]) -> EntityInstance {
+        simple(
+            id,
+            "DIRECTION",
+            vec![
+                Parameter::String(String::new()),
+                Parameter::List(xyz.into_iter().map(Parameter::Real).collect()),
+            ],
+        )
+    }
+
+    fn vector(id: u64, direction: u64, magnitude: f64) -> EntityInstance {
+        simple(
+            id,
+            "VECTOR",
+            vec![
+                Parameter::String(String::new()),
+                r(direction),
+                Parameter::Real(magnitude),
+            ],
+        )
+    }
+
+    fn line(id: u64, origin: u64, vector: u64) -> EntityInstance {
+        simple(
+            id,
+            "LINE",
+            vec![Parameter::String(String::new()), r(origin), r(vector)],
+        )
+    }
+
+    fn vertex(id: u64, point: u64) -> EntityInstance {
+        simple(
+            id,
+            "VERTEX_POINT",
+            vec![Parameter::String(String::new()), r(point)],
+        )
+    }
+
+    fn edge(id: u64, a: u64, b: u64, line: u64) -> EntityInstance {
+        simple(
+            id,
+            "EDGE_CURVE",
+            vec![
+                Parameter::String(String::new()),
+                r(a),
+                r(b),
+                r(line),
+                Parameter::Enumeration("T".to_string()),
+            ],
+        )
+    }
+
+    fn two_collinear_lines(
+        duplicate_origin_x: f64,
+        duplicate_edge_length: f64,
+    ) -> Vec<EntityInstance> {
+        vec![
+            point(1, [0.0, 0.0, 0.0]),
+            point(2, [duplicate_origin_x, 0.0, 0.0]),
+            direction_entity(3, [1.0, 0.0, 0.0]),
+            direction_entity(4, [1.0, 0.0, 0.0]),
+            vector(5, 3, 1.0),
+            vector(6, 4, 1.0),
+            line(7, 1, 5),
+            line(8, 2, 6),
+            point(9, [0.0, 0.0, 0.0]),
+            point(10, [0.01, 0.0, 0.0]),
+            vertex(11, 9),
+            vertex(12, 10),
+            edge(13, 11, 12, 7),
+            point(14, [duplicate_origin_x, 0.0, 0.0]),
+            point(15, [duplicate_origin_x + duplicate_edge_length, 0.0, 0.0]),
+            vertex(16, 14),
+            vertex(17, 15),
+            edge(18, 16, 17, 8),
+        ]
+    }
+
+    #[test]
+    fn merges_collinear_lines_when_parameter_origin_stays_local_to_edge() {
+        let mut entities = two_collinear_lines(0.5, 0.01);
+        let stats = intern_geometric_supports(&mut entities);
+        assert_eq!(stats.lines_merged, 1);
+        assert!(!build_index(&entities).contains_key(&8));
+    }
+
+    #[test]
+    fn rejects_collinear_line_alias_with_distant_parameter_origin() {
+        let mut entities = two_collinear_lines(0.7, 0.01);
+        let stats = intern_geometric_supports(&mut entities);
+        assert_eq!(stats.lines_merged, 0);
+        assert!(build_index(&entities).contains_key(&8));
+    }
+
+    #[test]
+    fn rejects_line_alias_when_edge_endpoint_is_off_canonical_line() {
+        let mut entities = two_collinear_lines(0.2, 0.01);
+        let index = build_index(&entities);
+        let point_idx = index[&14];
+        let EntityInstance::Simple { record, .. } = &mut entities[point_idx] else {
+            panic!("expected simple point");
+        };
+        let Parameter::List(params) = &mut record.parameter else {
+            panic!("expected point parameters");
+        };
+        let Parameter::List(coords) = &mut params[1] else {
+            panic!("expected point coordinates");
+        };
+        coords[1] = Parameter::Real(2.0e-5);
+
+        let stats = intern_geometric_supports(&mut entities);
+        assert_eq!(stats.lines_merged, 0);
+        assert!(build_index(&entities).contains_key(&8));
     }
 }

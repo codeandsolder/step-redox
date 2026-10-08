@@ -67,6 +67,12 @@ struct Cli {
 
     #[arg(
         long,
+        help = "Merge adjacent coplanar faces sharing the exact same PLANE support and sense"
+    )]
+    coalesce_same_support_planar_faces: bool,
+
+    #[arg(
+        long,
         help = "Experimental: merge adjacent faces sharing the exact same support surface and sense"
     )]
     experimental_coalesce_same_support_faces: bool,
@@ -76,6 +82,12 @@ struct Cli {
         help = "Experimental: factor translation-equivalent 3-D B-spline curves as CURVE_REPLICA"
     )]
     experimental_instance_translated_bspline_curves: bool,
+
+    #[arg(
+        long,
+        help = "Experimental: factor translated PLANE/CYLINDRICAL_SURFACE supports as SURFACE_REPLICA"
+    )]
+    experimental_instance_translated_analytic_surfaces: bool,
 
     #[arg(
         long,
@@ -123,9 +135,16 @@ struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write canonical CAD fragments recovered from detected instance patterns as JSON"
+        help = "Write canonical CAD fragments recovered from proven semantic structures as JSON"
     )]
     cad_fragments_json: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write complete semantic CAD IR plus explicit unrecovered-body diagnostics"
+    )]
+    complete_ir_json: Option<PathBuf>,
 
     #[arg(
         long,
@@ -186,10 +205,13 @@ fn main() -> Result<()> {
     options.experimental_recover_v_extrusions |= cli.experimental_recover_v_extrusions;
     options.experimental_intern_geometric_supports |= cli.experimental_intern_geometric_supports;
     options.experimental_recover_partitioned_bodies |= cli.experimental_recover_partitioned_bodies;
+    options.coalesce_same_support_planar_faces |= cli.coalesce_same_support_planar_faces;
     options.experimental_coalesce_same_support_faces |=
         cli.experimental_coalesce_same_support_faces;
     options.experimental_instance_translated_bspline_curves |=
         cli.experimental_instance_translated_bspline_curves;
+    options.experimental_instance_translated_analytic_surfaces |=
+        cli.experimental_instance_translated_analytic_surfaces;
     options.experimental_instance_z90 |= cli.experimental_instance_z90;
     options.experimental_instance_z90_assembly |= cli.experimental_instance_z90_assembly;
     options.experimental_instance_planar_positive_features |=
@@ -197,6 +219,12 @@ fn main() -> Result<()> {
     options.experimental_instance_spherical_caps |= cli.experimental_instance_spherical_caps;
     options.minify_placeholder_names |= cli.minify_placeholder_names;
     let cleaned = step_redox::clean_bytes(&input, &options)?;
+    let periodic_chains = if cli.cad_fragments_json.is_some() || cli.periodic_chains_json.is_some()
+    {
+        Some(step_redox::detect_periodic_chains_bytes(&cleaned.bytes)?)
+    } else {
+        None
+    };
     std::fs::write(&cli.output, &cleaned.bytes)
         .with_context(|| format!("write {}", cli.output.display()))?;
     if let Some(path) = &cli.patterns_json {
@@ -204,13 +232,30 @@ fn main() -> Result<()> {
         std::fs::write(path, data)
             .with_context(|| format!("write pattern report {}", path.display()))?;
     }
+    if let Some(path) = &cli.complete_ir_json {
+        let report = step_redox::complete_ir::recover_complete_ir_bytes(&cleaned.bytes)?;
+        let data = serde_json::to_vec_pretty(&report)?;
+        std::fs::write(path, data)
+            .with_context(|| format!("write complete CAD IR {}", path.display()))?;
+    }
     if let Some(path) = &cli.cad_fragments_json {
-        let mut fragments =
-            step_redox::cad_recovery::recover_instance_pattern_fragments(&cleaned.patterns)?;
         let extrusions = step_redox::detect_solid_extrusions_bytes(&cleaned.bytes)?;
-        fragments.extend(step_redox::cad_recovery::recover_solid_extrusion_fragments(
-            &extrusions,
-        )?);
+        let revolutions = step_redox::detect_solid_revolutions_bytes(&cleaned.bytes)?;
+        let radial_slots = step_redox::detect_radial_slot_revolutions_bytes(&cleaned.bytes)?;
+        let sweeps = step_redox::detect_closed_round_sweeps_bytes(&cleaned.bytes)?;
+        let mut fragments =
+            step_redox::cad_recovery::recover_solid_extrusion_fragments(&extrusions)?;
+        fragments
+            .extend(step_redox::cad_recovery::recover_solid_revolution_fragments(&revolutions)?);
+        fragments.extend(
+            step_redox::cad_recovery::recover_radial_slot_revolution_fragments(&radial_slots)?,
+        );
+        fragments.extend(step_redox::cad_recovery::recover_closed_round_sweep_fragments(&sweeps)?);
+        if let Some(chains) = &periodic_chains {
+            fragments.extend(step_redox::cad_recovery::recover_periodic_chain_fragments(
+                chains,
+            )?);
+        }
         let data = serde_json::to_vec_pretty(&fragments)?;
         std::fs::write(path, data)
             .with_context(|| format!("write CAD fragment report {}", path.display()))?;
@@ -238,8 +283,10 @@ fn main() -> Result<()> {
             .with_context(|| format!("write count parameter report {}", path.display()))?;
     }
     if let Some(path) = &cli.periodic_chains_json {
-        let chains = step_redox::detect_periodic_chains_bytes(&cleaned.bytes)?;
-        let data = serde_json::to_vec_pretty(&chains)?;
+        let chains = periodic_chains
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("periodic-chain analysis was not initialized"))?;
+        let data = serde_json::to_vec_pretty(chains)?;
         std::fs::write(path, data)
             .with_context(|| format!("write periodic chain report {}", path.display()))?;
     }

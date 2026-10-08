@@ -252,7 +252,10 @@ impl StepDoc {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "viewer target construction keeps before/after mesh context explicit"
+)]
 fn build_face_target(
     before: &StepDoc,
     after: &StepDoc,

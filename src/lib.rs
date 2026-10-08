@@ -1,21 +1,30 @@
-use anyhow::{Context, Result, bail};
-use ruststep::ast::{EntityInstance, Exchange, Name, Parameter, Record};
+use anyhow::{Result, bail};
+use ruststep::ast::Exchange;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
+use std::collections::BTreeMap;
 
+pub mod analysis;
+pub use analysis::AnalysisSession;
 mod bezier_recovery;
+#[doc(hidden)]
+pub mod body_corpus;
 mod brep;
 pub mod cad_ir;
 pub mod cad_kernel;
 pub mod cad_recovery;
+mod clean_pipeline;
 pub mod compatibility;
+pub mod complete_ir;
 mod curve_replicas;
 mod face_coalesce;
 pub mod formed_sheet;
 mod geometric_intern;
 mod instances;
 mod line_recovery;
+mod math2;
+mod math3;
+mod normalization;
+mod numeric;
 pub mod parameters;
 mod partition_recovery;
 pub mod patterns;
@@ -23,11 +32,23 @@ pub mod periodic_bodies;
 pub mod periodic_chains;
 pub mod periodic_resize;
 mod planar_features;
+pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
 pub mod profile_curves;
+mod shape_identity;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
+pub mod solid_sweeps;
 mod spherical_caps;
+mod step_entities;
+mod step_graph;
+mod step_identity;
+mod step_io;
+use normalization::{dense_renumber, intern_section};
+use step_io::ParsedExchange;
+pub use step_io::write_exchange;
 mod surface_recovery;
+mod surface_replicas;
+mod units;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputProfile {
@@ -44,8 +65,10 @@ pub struct Options {
     pub experimental_recover_v_extrusions: bool,
     pub experimental_intern_geometric_supports: bool,
     pub experimental_recover_partitioned_bodies: bool,
+    pub coalesce_same_support_planar_faces: bool,
     pub experimental_coalesce_same_support_faces: bool,
     pub experimental_instance_translated_bspline_curves: bool,
+    pub experimental_instance_translated_analytic_surfaces: bool,
     pub experimental_instance_z90: bool,
     pub experimental_instance_z90_assembly: bool,
     pub experimental_instance_planar_positive_features: bool,
@@ -64,8 +87,10 @@ impl Default for Options {
             experimental_recover_v_extrusions: false,
             experimental_intern_geometric_supports: false,
             experimental_recover_partitioned_bodies: false,
+            coalesce_same_support_planar_faces: false,
             experimental_coalesce_same_support_faces: false,
             experimental_instance_translated_bspline_curves: false,
+            experimental_instance_translated_analytic_surfaces: false,
             experimental_instance_z90: false,
             experimental_instance_z90_assembly: false,
             experimental_instance_planar_positive_features: false,
@@ -77,6 +102,7 @@ impl Default for Options {
 }
 
 impl Options {
+    #[must_use]
     pub fn for_profile(profile: OutputProfile) -> Self {
         let mut options = Self {
             experimental_recover_straight_bspline_lines: true,
@@ -84,22 +110,35 @@ impl Options {
             experimental_recover_v_extrusions: true,
             experimental_intern_geometric_supports: true,
             experimental_recover_partitioned_bodies: true,
-            experimental_coalesce_same_support_faces: true,
+            coalesce_same_support_planar_faces: true,
+            // Same-support face coalescing has a production repro where the
+            // reconstructed boundary drops occupied volume. Keep it opt-in
+            // until loop reconstruction is proven geometry-preserving.
+            experimental_coalesce_same_support_faces: false,
             minify_placeholder_names: true,
             ..Self::default()
         };
 
         if profile == OutputProfile::Compact {
             options.experimental_instance_translated_bspline_curves = true;
+            // Z90 instancing keeps the canonical solid explicit and maps only
+            // the noncanonical occurrences. Auxiliary shape representations are
+            // retargeted to mapped occurrences so expanded duplicate B-reps do
+            // not remain reachable through exporter validation structures.
             options.experimental_instance_z90 = true;
-            options.experimental_instance_planar_positive_features = true;
-            options.experimental_instance_spherical_caps = true;
+            // Positive-feature and spherical-cap factoring currently closes
+            // extracted features with interface caps. That preserves occupied
+            // volume but changes a fused B-rep into touching solids, so keep
+            // both transformations explicit-only until boundary semantics are
+            // preserved by construction.
+            options.experimental_instance_planar_positive_features = false;
+            options.experimental_instance_spherical_caps = false;
         }
         options
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Stats {
     pub input_encoding: String,
     pub input_bytes: usize,
@@ -138,6 +177,13 @@ pub struct Stats {
     pub curve_replica_transforms: usize,
     pub curve_replica_entities_removed: usize,
     pub curve_replica_max_residual_mm: f64,
+    pub surface_replica_families: usize,
+    pub surface_replicas: usize,
+    pub surface_replica_planes: usize,
+    pub surface_replica_cylinders: usize,
+    pub surface_replica_transforms: usize,
+    pub surface_replica_entities_removed: usize,
+    pub surface_replica_max_transform_residual_mm: f64,
     pub instance_groups: usize,
     pub instanced_solids: usize,
     pub instance_entities_removed: usize,
@@ -201,22 +247,227 @@ pub struct PeriodicChainEditOutput {
     pub compatibility: compatibility::CompatibilityAudit,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryFeaturePeelPassReport {
+    pub pass_index: usize,
+    pub diagnostics: planar_features::BoundaryFeatureDiagnostics,
+    pub stats: planar_features::BoundaryFeaturePeelStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BoundaryFeatureDecompositionReport {
+    pub passes: Vec<BoundaryFeaturePeelPassReport>,
+    pub total_families: usize,
+    pub total_instances: usize,
+    pub total_additive_instances: usize,
+    pub total_subtractive_instances: usize,
+    pub total_faces_removed_from_shells: usize,
+    pub total_interface_bounds_healed: usize,
+}
+
+/// Recursively peel regular additive/subtractive boundary-feature families into
+/// a simpler analysis residual.
+///
+/// The returned STEP is deliberately an INTERNAL RESIDUAL, not a geometry-
+/// equivalent replacement for the input. Each peel heals the carrier face(s)
+/// and removes the feature boundary patch; callers reconstruct the original by
+/// replaying the recorded families in reverse order with Union/Difference.
+pub fn peel_patterned_boundary_features_for_analysis_bytes(
+    input: &[u8],
+    min_instances: usize,
+    max_passes: usize,
+) -> Result<(Vec<u8>, BoundaryFeatureDecompositionReport)> {
+    if max_passes == 0 {
+        bail!("boundary feature decomposition requires max_passes > 0");
+    }
+
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
+
+    let mut report = BoundaryFeatureDecompositionReport::default();
+    for pass_index in 0..max_passes {
+        let mut pass_diagnostics = planar_features::BoundaryFeatureDiagnostics::default();
+        let mut pass_stats = planar_features::BoundaryFeaturePeelStats::default();
+
+        for section in &mut exchange.data {
+            let (diagnostics, stats) =
+                planar_features::peel_patterned_boundary_features_for_analysis(
+                    &mut section.entities,
+                    min_instances,
+                )?;
+            pass_diagnostics.shell_contexts += diagnostics.shell_contexts;
+            pass_diagnostics.planar_hosts += diagnostics.planar_hosts;
+            pass_diagnostics.raw_candidates += diagnostics.raw_candidates;
+            pass_diagnostics.additive_candidates += diagnostics.additive_candidates;
+            pass_diagnostics.subtractive_candidates += diagnostics.subtractive_candidates;
+            pass_diagnostics.single_host_candidates += diagnostics.single_host_candidates;
+            pass_diagnostics.multi_host_candidates += diagnostics.multi_host_candidates;
+            pass_diagnostics.families.extend(diagnostics.families);
+
+            pass_stats.families += stats.families;
+            pass_stats.instances += stats.instances;
+            pass_stats.additive_instances += stats.additive_instances;
+            pass_stats.subtractive_instances += stats.subtractive_instances;
+            pass_stats.faces_removed_from_shells += stats.faces_removed_from_shells;
+            pass_stats.interface_bounds_healed += stats.interface_bounds_healed;
+        }
+
+        pass_diagnostics.families.sort_by(|a, b| {
+            b.instances
+                .cmp(&a.instances)
+                .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+                .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+        });
+
+        if pass_stats.families == 0 {
+            break;
+        }
+
+        report.total_families += pass_stats.families;
+        report.total_instances += pass_stats.instances;
+        report.total_additive_instances += pass_stats.additive_instances;
+        report.total_subtractive_instances += pass_stats.subtractive_instances;
+        report.total_faces_removed_from_shells += pass_stats.faces_removed_from_shells;
+        report.total_interface_bounds_healed += pass_stats.interface_bounds_healed;
+        report.passes.push(BoundaryFeaturePeelPassReport {
+            pass_index,
+            diagnostics: pass_diagnostics,
+            stats: pass_stats,
+        });
+    }
+
+    let output = write_exchange(&exchange)?;
+    Ok((output.into_bytes(), report))
+}
+
+/// Detect translation-periodic open boundary paths on planar carrier faces.
+///
+/// This is read-only evidence for edge-entering slots/notches and other
+/// features whose interface is a repeated detour on a FACE_OUTER_BOUND rather
+/// than a complete inner FACE_BOUND. It does not yet heal or mutate those
+/// chains.
+pub fn analyze_open_chain_patterns_bytes(
+    input: &[u8],
+) -> Result<planar_features::OpenChainDiagnostics> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    let mut merged = planar_features::OpenChainDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_open_chain_patterns(&section.entities);
+        merged.planar_faces += report.planar_faces;
+        merged.loops_considered += report.loops_considered;
+        merged.patterned_loops += report.patterned_loops;
+        merged.runs.extend(report.runs);
+    }
+    merged.runs.sort_by(|a, b| {
+        b.covered_edges
+            .cmp(&a.covered_edges)
+            .then_with(|| b.repeats.cmp(&a.repeats))
+            .then_with(|| a.face_id.cmp(&b.face_id))
+            .then_with(|| a.bound_id.cmp(&b.bound_id))
+            .then_with(|| a.start_edge_index.cmp(&b.start_edge_index))
+    });
+    Ok(merged)
+}
+
+/// Materialize one closed canonical tool solid per recovered boundary-feature
+/// family while leaving the source solid unchanged.
+///
+/// The output STEP is an analysis artifact: generated tool solids may reuse
+/// source topology and are intentionally not inserted into product structure.
+/// Their IDs are returned explicitly for recursive recognition/rendering.
+pub fn materialize_boundary_feature_tools_for_analysis_bytes(
+    input: &[u8],
+    min_instances: usize,
+) -> Result<(
+    Vec<u8>,
+    planar_features::BoundaryFeatureDiagnostics,
+    Vec<planar_features::BoundaryFeatureToolMaterialization>,
+)> {
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
+    if exchange.data.len() != 1 {
+        bail!("boundary feature tool materialization currently requires exactly one DATA section");
+    }
+
+    let (diagnostics, tools) = planar_features::materialize_boundary_feature_tools_for_analysis(
+        &mut exchange.data[0].entities,
+        min_instances,
+    )?;
+    let output = write_exchange(&exchange)?;
+    Ok((output.into_bytes(), diagnostics, tools))
+}
+
+/// Detect additive and subtractive planar boundary features without rewriting STEP.
+///
+/// This is the polarity-neutral front end for constructive decomposition:
+/// single-host leaves cover protrusions and blind recesses, while paired
+/// parallel hosts expose through-cuts/tunnels that cannot disconnect when only
+/// one host face is removed. Pattern fitting is applied to the resulting
+/// feature instances after topology/polarity proof.
+pub fn analyze_boundary_features_bytes(
+    input: &[u8],
+) -> Result<planar_features::BoundaryFeatureDiagnostics> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    let mut merged = planar_features::BoundaryFeatureDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_boundary_features(&section.entities);
+        merged.shell_contexts += report.shell_contexts;
+        merged.planar_hosts += report.planar_hosts;
+        merged.raw_candidates += report.raw_candidates;
+        merged.additive_candidates += report.additive_candidates;
+        merged.subtractive_candidates += report.subtractive_candidates;
+        merged.single_host_candidates += report.single_host_candidates;
+        merged.multi_host_candidates += report.multi_host_candidates;
+        merged.families.extend(report.families);
+    }
+    merged.families.sort_by(|a, b| {
+        b.instances
+            .cmp(&a.instances)
+            .then_with(|| b.faces_per_instance.cmp(&a.faces_per_instance))
+            .then_with(|| a.host_face_ids.cmp(&b.host_face_ids))
+    });
+    Ok(merged)
+}
+
+/// Diagnose repeated planar attached-feature candidates without rewriting STEP.
+/// This reports parser blind spots (negative recesses, host orientation, topology
+/// rejection reasons) so constructive recovery can be extended deliberately.
+pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFeatureDiagnostics> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    let mut merged = PlanarFeatureDiagnostics::default();
+    for section in &exchange.data {
+        let report = planar_features::diagnose_planar_features(&section.entities);
+        merged.shell_contexts += report.shell_contexts;
+        merged.qualifying_host_faces += report.qualifying_host_faces;
+        merged.total_components += report.total_components;
+        merged.rejected_empty_or_large += report.rejected_empty_or_large;
+        merged.rejected_non_manifold += report.rejected_non_manifold;
+        merged.rejected_interface += report.rejected_interface;
+        merged.rejected_bound_match += report.rejected_bound_match;
+        merged.rejected_vertices += report.rejected_vertices;
+        merged.rejected_signature += report.rejected_signature;
+        merged.positive_components += report.positive_components;
+        merged.negative_components += report.negative_components;
+        merged.straddling_components += report.straddling_components;
+        merged.coplanar_components += report.coplanar_components;
+        merged.hosts.extend(report.hosts);
+    }
+    Ok(merged)
+}
+
 /// Detect read-only formed-sheet geometric evidence in a STEP exchange.
 ///
 /// This is evidence only: it reports repeated constant-thickness signatures such as
 /// coaxial cylinder radius pairs and parallel-plane offsets. It does not claim that
 /// a complete editable sheet-metal construction has been recovered.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
 pub fn detect_formed_sheet_evidence_bytes(
     input: &[u8],
 ) -> Result<Vec<formed_sheet::FormedSheetEvidence>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -230,17 +481,13 @@ pub fn detect_formed_sheet_evidence_bytes(
 /// This is diagnostic evidence for recovery work: it does not claim that a
 /// constructive solid has been proven. It is intentionally deterministic so
 /// corpus censuses can be compared across detector revisions.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
 pub fn detect_solid_surface_signatures_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::SolidSurfaceSignature>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -254,17 +501,13 @@ pub fn detect_solid_surface_signatures_bytes(
 /// The current pass is intentionally strict and fail-closed. It accepts proven
 /// linear-meridian lathes plus narrowly proven analytic torus and spherical-cap
 /// grammars; unsupported curved-meridian combinations remain unrecovered.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
 pub fn detect_solid_revolutions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_revolutions::RecoveredSolidRevolution>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -273,22 +516,38 @@ pub fn detect_solid_revolutions_bytes(
         .collect())
 }
 
+/// Detect turned solids with one proven radial rectangular slot.
+///
+/// This is intentionally separate from full-revolution recovery: the returned
+/// construction preserves the non-axisymmetric slot explicitly rather than
+/// broadening the definition of an axisymmetric solid.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn detect_radial_slot_revolutions_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_revolutions::RecoveredRadialSlotRevolution>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_revolutions::detect_radial_slot_revolutions(&section.entities))
+        .collect())
+}
+
 /// Detect proven whole-solid extrusion grammars in a STEP exchange.
 ///
 /// Recovery is fail-closed and supports multi-loop profiles with line, circular-arc,
 /// exact Bezier, and general/rational B-spline boundaries when cap correspondence,
 /// side supports, and the common translation are all proven within tolerance.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
 pub fn detect_solid_extrusions_bytes(
     input: &[u8],
 ) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -297,23 +556,78 @@ pub fn detect_solid_extrusions_bytes(
         .collect())
 }
 
+/// Detect closed round-profile composite sweeps such as bent wire frames.
+///
+/// The current grammar is deliberately narrow: one planar four-run/four-bend loop
+/// with a constant circular section, proven from matching cylinder and torus supports.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_closed_round_sweeps_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredClosedRoundSweep>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_closed_round_sweeps(&section.entities))
+        .collect())
+}
+
+/// Detect a turned/axisymmetric head fused to one constant-round bent tail.
+///
+/// The head is proven as an axisymmetric sub-body with one circular interface;
+/// the tail is proven from a tangent torus bend, straight cylindrical run and
+/// hemispherical terminal sharing one constant radius.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_revolved_round_tails_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredRevolvedRoundTail>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_revolved_round_tails(&section.entities))
+        .collect())
+}
+
+/// Detect exact one-bend rectangular-section sweeps with planar straight legs.
+///
+/// Straight-leg footprints are proven from paired planar source faces; the bend is
+/// proven from one paired cylindrical sector. This accepts terminal flange/chamfer
+/// geometry when it is part of the planar leg footprint rather than approximating it.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed.
+pub fn detect_open_rectangular_sweeps_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_sweeps::RecoveredOpenRectangularSweep>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_sweeps::detect_open_rectangular_sweeps(&section.entities))
+        .collect())
+}
+
 /// Detect read-only periodic chain grammars without enabling mutation.
 ///
-/// This analyzer is intentionally separate from the editable PeriodicBodyPattern
+/// This analyzer is intentionally separate from the editable `PeriodicBodyPattern`
 /// path. It can recover fused-solid site/gap/stretch/end structure even when no
-/// MAPPED_ITEM instance row exists, but callers must not treat that as edit
+/// `MAPPED_ITEM` instance row exists, but callers must not treat that as edit
 /// permission.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
 pub fn detect_periodic_chains_bytes(
     input: &[u8],
 ) -> Result<Vec<periodic_chains::PeriodicChainPattern>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let exchange = ParsedExchange::parse(input)?.exchange;
 
     Ok(exchange
         .data
@@ -323,6 +637,9 @@ pub fn detect_periodic_chains_bytes(
 }
 
 /// Resize one proven periodic fused-solid chain while keeping its start fixed.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the selected chain cannot be resized with the requested count while preserving its proof.
 pub fn resize_periodic_chain_bytes(
     input: &[u8],
     chain_index: usize,
@@ -335,6 +652,9 @@ pub fn resize_periodic_chain_bytes(
 ///
 /// Start and End keep the corresponding physical end fixed. Center composes
 /// equal edits at both ends and therefore currently requires an even site delta.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid, the selected chain is not proven editable, or the requested anchored resize cannot be represented safely.
 pub fn resize_periodic_chain_bytes_with_anchor(
     input: &[u8],
     chain_index: usize,
@@ -363,9 +683,8 @@ pub fn resize_periodic_chain_bytes_with_anchor(
     let delta = new_sites.abs_diff(original.sites);
     if delta % 2 != 0 {
         bail!(
-            "center-anchored periodic-chain resize currently requires an even site delta ({} -> {})",
-            original.sites,
-            new_sites
+            "center-anchored periodic-chain resize currently requires an even site delta ({} -> {new_sites})",
+            original.sites
         );
     }
     let half = delta / 2;
@@ -410,16 +729,8 @@ fn resize_periodic_chain_bytes_one_side(
     new_sites: usize,
     anchor: CountAnchor,
 ) -> Result<PeriodicChainEditOutput> {
-    debug_assert!(anchor != CountAnchor::Center);
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    debug_assert_ne!(anchor, CountAnchor::Center);
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("periodic-chain editing currently requires exactly one DATA section");
     }
@@ -490,7 +801,11 @@ fn resize_periodic_chain_bytes_one_side(
             && candidate.fixed_positive_face_ids.len() == chain.fixed_positive_face_ids.len()
             && candidate.faces_without_geometry == 0
             && candidate.nonmanifold_edges == 0
-            && candidate.cross_site_edges == 0
+            && candidate.nonlocal_cross_site_edges == 0
+            && candidate
+                .adjacent_site_edge_counts
+                .iter()
+                .all(|count| Some(count) == chain.adjacent_site_edge_counts.first())
     });
     if !verified {
         bail!(
@@ -509,6 +824,9 @@ fn resize_periodic_chain_bytes_one_side(
 }
 
 /// Backward-compatible growth-only wrapper around `resize_periodic_chain_bytes`.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the selected periodic chain cannot be expanded safely.
 pub fn expand_periodic_chain_bytes(
     input: &[u8],
     chain_index: usize,
@@ -553,6 +871,9 @@ pub struct CountEditOutput {
 }
 
 /// Resize one recovered count parameter atomically, keeping its negative end fixed.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the requested count edit cannot be proven and applied safely.
 pub fn resize_count_parameter_bytes(
     input: &[u8],
     parameter_index: usize,
@@ -566,6 +887,9 @@ pub fn resize_count_parameter_bytes(
 /// Start and End keep the corresponding physical end fixed. Center keeps the
 /// geometric center fixed by performing equal edits at both ends; for now this
 /// requires an even site-count delta.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the requested anchored count edit cannot be proven and applied safely.
 pub fn resize_count_parameter_bytes_with_anchor(
     input: &[u8],
     parameter_index: usize,
@@ -594,9 +918,8 @@ pub fn resize_count_parameter_bytes_with_anchor(
     let delta = new_sites.abs_diff(original.sites);
     if delta % 2 != 0 {
         bail!(
-            "center-anchored count resize currently requires an even site delta ({} -> {})",
-            original.sites,
-            new_sites
+            "center-anchored count resize currently requires an even site delta ({} -> {new_sites})",
+            original.sites
         );
     }
     let half = delta / 2;
@@ -643,16 +966,8 @@ fn resize_count_parameter_bytes_one_side(
     new_sites: usize,
     anchor: CountAnchor,
 ) -> Result<CountEditOutput> {
-    debug_assert!(anchor != CountAnchor::Center);
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    debug_assert_ne!(anchor, CountAnchor::Center);
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }
@@ -729,9 +1044,11 @@ fn resize_count_parameter_bytes_one_side(
             .first()
             .copied()
             .ok_or_else(|| anyhow::anyhow!("coupled pattern has no basis"))?;
-        let axis_dot = basis[0] * parameter.axis[0]
-            + basis[1] * parameter.axis[1]
-            + basis[2] * parameter.axis[2];
+        let axis_dot = f64::mul_add(
+            basis[2],
+            parameter.axis[2],
+            f64::mul_add(basis[1], parameter.axis[1], basis[0] * parameter.axis[0]),
+        );
         let pattern_anchor = match (anchor, axis_dot >= 0.0) {
             (CountAnchor::Start, true) | (CountAnchor::End, false) => {
                 patterns::PatternAnchor::Start
@@ -852,8 +1169,7 @@ fn reverse_periodic_body(
 }
 
 fn detect_count_parameters_bytes(input: &[u8]) -> Result<Vec<parameters::RecoveredCountParameter>> {
-    let (input_text, _) = decode_input(input)?;
-    let exchange = ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
+    let exchange = ParsedExchange::parse(input)?.exchange;
     if exchange.data.len() != 1 {
         bail!("count-parameter editing currently requires exactly one DATA section");
     }
@@ -888,6 +1204,9 @@ fn find_matching_count_parameter(
 }
 
 /// Backward-compatible growth-only wrapper.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the requested count expansion cannot be proven and applied safely.
 pub fn expand_count_parameter_bytes(
     input: &[u8],
     parameter_index: usize,
@@ -905,20 +1224,15 @@ pub fn expand_count_parameter_bytes(
 }
 
 /// Expand one detected periodic body at its positive-axis end.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the selected periodic body cannot be expanded safely.
 pub fn expand_periodic_body_bytes(
     input: &[u8],
     body_index: usize,
     new_sites: usize,
 ) -> Result<PeriodicBodyEditOutput> {
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut remaining = body_index;
     let mut resize = None;
@@ -949,24 +1263,19 @@ pub fn expand_periodic_body_bytes(
     })
 }
 
-/// Resize one fully occupied 1-D regular MAPPED_ITEM pattern in an already
+/// Resize one fully occupied 1-D regular `MAPPED_ITEM` pattern in an already
 /// normalized STEP file. This edits only the instance pattern; higher-level
 /// package/body resizing is intentionally a separate operation.
+///
+/// # Errors
+/// Returns an error if the STEP input is invalid or the selected linear pattern cannot be resized safely.
 pub fn resize_linear_pattern_bytes(
     input: &[u8],
     pattern_index: usize,
     new_count: usize,
     anchor: patterns::PatternAnchor,
 ) -> Result<PatternEditOutput> {
-    let (input_text, _) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
+    let mut exchange = ParsedExchange::parse(input)?.exchange;
 
     let mut remaining = pattern_index;
     let mut resize = None;
@@ -1016,10 +1325,15 @@ fn detect_exchange_semantics(
     let mut bodies_out = Vec::new();
 
     for section in &exchange.data {
-        let local_patterns = patterns::detect_instance_patterns(&section.entities, 1.0e-7, 4);
+        let index = step_graph::build_index(&section.entities);
+        let local_patterns =
+            patterns::detect_instance_patterns_with_index(&section.entities, &index, 1.0e-7, 4);
         let offset = patterns_out.len();
-        let mut local_bodies =
-            periodic_bodies::detect_periodic_bodies(&section.entities, &local_patterns);
+        let mut local_bodies = periodic_bodies::detect_periodic_bodies_with_index(
+            &section.entities,
+            &index,
+            &local_patterns,
+        );
         for body in &mut local_bodies {
             for index in &mut body.coupled_instance_patterns {
                 *index += offset;
@@ -1086,999 +1400,11 @@ fn audit_exchange_compatibility(exchange: &Exchange) -> compatibility::Compatibi
     combined
 }
 
+///
+/// # Errors
+/// Returns an error if the STEP input cannot be decoded, parsed, transformed, or serialized without violating the configured safety checks.
 pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
-    let (input_text, input_encoding) = decode_input(input)?;
-    let mut exchange =
-        ruststep::parser::parse(&input_text).context("parse STEP exchange structure")?;
-
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("ANCHOR/REFERENCE/SIGNATURE sections are not yet supported by step-redox writer");
-    }
-
-    let input_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
-
-    let mut placeholder_names_minified = 0usize;
-    if options.minify_placeholder_names {
-        for section in &mut exchange.data {
-            placeholder_names_minified += minify_placeholder_names(&mut section.entities);
-        }
-    }
-
-    let mut interned_by_type = BTreeMap::new();
-    let mut interned_entities = 0usize;
-
-    if options.intern_values {
-        for section in &mut exchange.data {
-            let pass = intern_section(&mut section.entities);
-            interned_entities += pass.total;
-            for (k, v) in pass.by_type {
-                *interned_by_type.entry(k).or_insert(0) += v;
-            }
-        }
-    }
-
-    let mut consolidated_by_type = BTreeMap::new();
-    let mut consolidated_entities = 0usize;
-    if options.consolidate_presentation {
-        for section in &mut exchange.data {
-            let pass = consolidate_presentation(&mut section.entities);
-            consolidated_entities += pass.total;
-            for (k, v) in pass.by_type {
-                *consolidated_by_type.entry(k).or_insert(0) += v;
-            }
-        }
-    }
-
-    let mut straight_bspline_lines_recovered = 0usize;
-    let mut straight_bspline_direction_groups = 0usize;
-    let mut straight_bspline_points_removed = 0usize;
-    if options.experimental_recover_straight_bspline_lines {
-        for section in &mut exchange.data {
-            let pass = line_recovery::recover_straight_bspline_lines(&mut section.entities);
-            straight_bspline_lines_recovered += pass.curves_recovered;
-            straight_bspline_direction_groups += pass.direction_groups;
-            straight_bspline_points_removed += pass.orphan_points_removed;
-        }
-    }
-
-    let mut exact_bezier_curves_recovered = 0usize;
-    if options.experimental_recover_exact_bezier_curves {
-        for section in &mut exchange.data {
-            let pass = bezier_recovery::recover_exact_bezier_curves(&mut section.entities);
-            exact_bezier_curves_recovered += pass.curves_recovered;
-        }
-    }
-
-    let mut v_extrusion_surfaces_recovered = 0usize;
-    let mut v_extrusion_rational_surfaces_recovered = 0usize;
-    let mut v_extrusion_profile_curves_created = 0usize;
-    let mut v_extrusion_points_removed = 0usize;
-    if options.experimental_recover_v_extrusions {
-        for section in &mut exchange.data {
-            let pass = surface_recovery::recover_v_extrusion_surfaces(&mut section.entities);
-            v_extrusion_surfaces_recovered += pass.surfaces_recovered;
-            v_extrusion_rational_surfaces_recovered += pass.rational_surfaces_recovered;
-            v_extrusion_profile_curves_created += pass.profile_curves_created;
-            v_extrusion_points_removed += pass.orphan_points_removed;
-        }
-    }
-
-    let mut geometric_supports_merged = 0usize;
-    let mut geometric_support_entities_removed = 0usize;
-    let mut geometric_planes_merged = 0usize;
-    let mut geometric_lines_merged = 0usize;
-    let mut geometric_cylinders_merged = 0usize;
-    if options.experimental_intern_geometric_supports {
-        for section in &mut exchange.data {
-            let pass = geometric_intern::intern_geometric_supports(&mut section.entities);
-            geometric_supports_merged += pass.supports_merged;
-            geometric_support_entities_removed += pass.entities_removed;
-            geometric_planes_merged += pass.planes_merged;
-            geometric_lines_merged += pass.lines_merged;
-            geometric_cylinders_merged += pass.cylinders_merged;
-        }
-    }
-
-    let mut partition_components_recovered = 0usize;
-    let mut partition_solids_merged = 0usize;
-    let mut partition_interfaces_removed = 0usize;
-    let mut partition_styles_retargeted = 0usize;
-    let mut partition_entities_removed = 0usize;
-    if options.experimental_recover_partitioned_bodies {
-        for section in &mut exchange.data {
-            let pass = partition_recovery::recover_partitioned_bodies(&mut section.entities);
-            partition_components_recovered += pass.components;
-            partition_solids_merged += pass.solids_merged;
-            partition_interfaces_removed += pass.interfaces_removed;
-            partition_styles_retargeted += pass.styles_retargeted;
-            partition_entities_removed += pass.entities_removed;
-        }
-    }
-
-    let mut face_coalesce_groups = 0usize;
-    let mut face_coalesce_faces_merged = 0usize;
-    let mut face_coalesce_faces_removed = 0usize;
-    let mut face_coalesce_internal_edges_removed = 0usize;
-    let mut face_coalesce_styles_removed = 0usize;
-    let mut face_coalesce_entities_removed = 0usize;
-    if options.experimental_coalesce_same_support_faces {
-        for section in &mut exchange.data {
-            let pass = face_coalesce::coalesce_same_support_faces(&mut section.entities);
-            face_coalesce_groups += pass.groups;
-            face_coalesce_faces_merged += pass.faces_merged;
-            face_coalesce_faces_removed += pass.faces_removed;
-            face_coalesce_internal_edges_removed += pass.internal_edges_removed;
-            face_coalesce_styles_removed += pass.styles_removed;
-            face_coalesce_entities_removed += pass.entities_removed;
-        }
-    }
-
-    let mut curve_replica_families = 0usize;
-    let mut curve_replicas = 0usize;
-    let mut curve_replica_direct_aliases = 0usize;
-    let mut curve_replica_transforms = 0usize;
-    let mut curve_replica_entities_removed = 0usize;
-    let mut curve_replica_max_residual_mm = 0.0f64;
-
-    let mut instance_groups = 0usize;
-    let mut instanced_solids = 0usize;
-    let mut instance_entities_removed = 0usize;
-    let mut instance_styles_replaced = 0usize;
-    if options.experimental_instance_z90_assembly {
-        for section in &mut exchange.data {
-            let pass = instances::instance_z90_solids_assembly(&mut section.entities);
-            instance_groups += pass.groups;
-            instanced_solids += pass.solids_replaced;
-            instance_entities_removed += pass.entities_removed;
-            instance_styles_replaced += pass.styles_replaced;
-        }
-    } else if options.experimental_instance_z90 {
-        for section in &mut exchange.data {
-            let pass = instances::instance_z90_solids(&mut section.entities);
-            instance_groups += pass.groups;
-            instanced_solids += pass.solids_replaced;
-            instance_entities_removed += pass.entities_removed;
-            instance_styles_replaced += pass.styles_replaced;
-        }
-    }
-
-    let mut planar_feature_arrays = 0usize;
-    let mut planar_feature_families = 0usize;
-    let mut planar_feature_instances = 0usize;
-    let mut planar_feature_entities_removed = 0usize;
-    let mut planar_feature_styles_replaced = 0usize;
-    if options.experimental_instance_planar_positive_features {
-        for section in &mut exchange.data {
-            let pass = planar_features::instance_planar_positive_features(&mut section.entities);
-            planar_feature_arrays += pass.arrays;
-            planar_feature_families += pass.families;
-            planar_feature_instances += pass.instances;
-            planar_feature_entities_removed += pass.entities_removed;
-            planar_feature_styles_replaced += pass.styles_replaced;
-        }
-    }
-
-    let mut spherical_cap_arrays = 0usize;
-    let mut spherical_cap_instances = 0usize;
-    let mut spherical_cap_entities_removed = 0usize;
-    let mut spherical_cap_styles_replaced = 0usize;
-    if options.experimental_instance_spherical_caps {
-        for section in &mut exchange.data {
-            let pass = spherical_caps::instance_planar_spherical_caps(&mut section.entities);
-            spherical_cap_arrays += pass.arrays;
-            spherical_cap_instances += pass.instances;
-            spherical_cap_entities_removed += pass.entities_removed;
-            spherical_cap_styles_replaced += pass.styles_replaced;
-        }
-    }
-
-    // Low-level curve factoring comes last. Higher-level body/feature repetition
-    // must be recognized against the actual geometry first; otherwise a
-    // CURVE_REPLICA decomposition can leak global source coordinates into a
-    // later rigid-body signature and hide obvious whole-solid instances.
-    if options.experimental_instance_translated_bspline_curves {
-        for section in &mut exchange.data {
-            let pass = curve_replicas::instance_translated_bspline_curves(&mut section.entities);
-            curve_replica_families += pass.families;
-            curve_replicas += pass.replicas;
-            curve_replica_direct_aliases += pass.direct_aliases;
-            curve_replica_transforms += pass.transforms;
-            curve_replica_entities_removed += pass.entities_removed;
-            curve_replica_max_residual_mm = curve_replica_max_residual_mm.max(pass.max_residual_mm);
-        }
-    }
-
-    // Experimental passes can create new placeholder-labelled entities.
-    // Minify those before the post-rewrite intern pass so name normalization
-    // cannot create fresh duplicates that only disappear on a second run.
-    if options.minify_placeholder_names {
-        for section in &mut exchange.data {
-            placeholder_names_minified += minify_placeholder_names(&mut section.entities);
-        }
-    }
-
-    // Experimental passes create placements/directions and other support
-    // values. Normalize them in the same invocation so aggressive output is a
-    // fixed point rather than requiring a second safe cleanup pass.
-    if (straight_bspline_lines_recovered > 0
-        || v_extrusion_surfaces_recovered > 0
-        || geometric_supports_merged > 0
-        || partition_components_recovered > 0
-        || face_coalesce_groups > 0
-        || curve_replicas > 0
-        || curve_replica_direct_aliases > 0
-        || instance_groups > 0
-        || planar_feature_arrays > 0
-        || spherical_cap_arrays > 0)
-        && options.intern_values
-    {
-        for section in &mut exchange.data {
-            let pass = intern_section(&mut section.entities);
-            interned_entities += pass.total;
-            for (k, v) in pass.by_type {
-                *interned_by_type.entry(k).or_insert(0) += v;
-            }
-        }
-    }
-
-    if options.dense_ids {
-        for section in &mut exchange.data {
-            dense_renumber(&mut section.entities);
-        }
-    }
-
-    let (patterns, periodic_bodies, count_parameters) = detect_exchange_semantics(&exchange);
-    let instance_patterns_detected = patterns.len();
-    let pattern_instances_detected = patterns.iter().map(|pattern| pattern.item_ids.len()).sum();
-    let periodic_body_patterns_detected = periodic_bodies.len();
-    let periodic_body_repeat_faces = periodic_bodies.iter().map(|body| body.repeat_faces).sum();
-    let count_parameters_detected = count_parameters.len();
-    let count_parameters_with_body_grammar = count_parameters
-        .iter()
-        .filter(|parameter| parameter.body_grammar_proven)
-        .count();
-
-    let compatibility = audit_exchange_compatibility(&exchange);
-
-    let output = write_exchange(&exchange)?;
-    let output_entities: usize = exchange.data.iter().map(|d| d.entities.len()).sum();
-    let output_bytes = output.len();
-
-    Ok(CleanOutput {
-        bytes: output.into_bytes(),
-        stats: Stats {
-            input_encoding: input_encoding.to_string(),
-            input_bytes: input.len(),
-            output_bytes,
-            input_entities,
-            output_entities,
-            interned_entities,
-            consolidated_entities,
-            straight_bspline_lines_recovered,
-            straight_bspline_direction_groups,
-            straight_bspline_points_removed,
-            exact_bezier_curves_recovered,
-            v_extrusion_surfaces_recovered,
-            v_extrusion_rational_surfaces_recovered,
-            v_extrusion_profile_curves_created,
-            v_extrusion_points_removed,
-            geometric_supports_merged,
-            geometric_support_entities_removed,
-            geometric_planes_merged,
-            geometric_lines_merged,
-            geometric_cylinders_merged,
-            partition_components_recovered,
-            partition_solids_merged,
-            partition_interfaces_removed,
-            partition_styles_retargeted,
-            partition_entities_removed,
-            face_coalesce_groups,
-            face_coalesce_faces_merged,
-            face_coalesce_faces_removed,
-            face_coalesce_internal_edges_removed,
-            face_coalesce_styles_removed,
-            face_coalesce_entities_removed,
-            curve_replica_families,
-            curve_replicas,
-            curve_replica_direct_aliases,
-            curve_replica_transforms,
-            curve_replica_entities_removed,
-            curve_replica_max_residual_mm,
-            instance_groups,
-            instanced_solids,
-            instance_entities_removed,
-            instance_styles_replaced,
-            planar_feature_arrays,
-            planar_feature_families,
-            planar_feature_instances,
-            planar_feature_entities_removed,
-            planar_feature_styles_replaced,
-            spherical_cap_arrays,
-            spherical_cap_instances,
-            spherical_cap_entities_removed,
-            spherical_cap_styles_replaced,
-            placeholder_names_minified,
-            instance_patterns_detected,
-            pattern_instances_detected,
-            periodic_body_patterns_detected,
-            periodic_body_repeat_faces,
-            count_parameters_detected,
-            count_parameters_with_body_grammar,
-            byte_ratio: output_bytes as f64 / input.len().max(1) as f64,
-            interned_by_type,
-            consolidated_by_type,
-        },
-        patterns,
-        periodic_bodies,
-        count_parameters,
-        compatibility,
-    })
-}
-
-#[derive(Default)]
-struct ConsolidateStats {
-    total: usize,
-    by_type: BTreeMap<String, usize>,
-}
-
-fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
-    use std::collections::{HashMap, HashSet};
-
-    let mut refcounts: HashMap<u64, usize> = HashMap::new();
-    for entity in entities.iter() {
-        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
-    }
-
-    #[derive(Clone)]
-    struct Merge {
-        into: usize,
-        from: usize,
-        items: Vec<Parameter>,
-        ty: &'static str,
-    }
-
-    let mut groups: HashMap<String, usize> = HashMap::new();
-    let mut merges = Vec::new();
-
-    for (idx, entity) in entities.iter().enumerate() {
-        let EntityInstance::Simple { id, record } = entity else {
-            continue;
-        };
-        if refcounts.get(id).copied().unwrap_or(0) != 0 {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-
-        let (ty, key, items) = match record.name.as_str() {
-            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION" if params.len() == 3 => {
-                let Parameter::List(items) = &params[1] else {
-                    continue;
-                };
-                let key = format!(
-                    "MDGPR|{}|{}",
-                    standalone_param_key(&params[0]),
-                    standalone_param_key(&params[2])
-                );
-                (
-                    "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
-                    key,
-                    items.clone(),
-                )
-            }
-            "PRESENTATION_LAYER_ASSIGNMENT" if params.len() == 3 => {
-                let Parameter::List(items) = &params[2] else {
-                    continue;
-                };
-                let key = format!(
-                    "PLA|{}|{}",
-                    standalone_param_key(&params[0]),
-                    standalone_param_key(&params[1])
-                );
-                ("PRESENTATION_LAYER_ASSIGNMENT", key, items.clone())
-            }
-            _ => continue,
-        };
-
-        if let Some(&into) = groups.get(&key) {
-            merges.push(Merge {
-                into,
-                from: idx,
-                items,
-                ty,
-            });
-        } else {
-            groups.insert(key, idx);
-        }
-    }
-
-    let mut additions: HashMap<usize, Vec<Parameter>> = HashMap::new();
-    let mut remove = HashSet::new();
-    let mut stats = ConsolidateStats::default();
-    for merge in merges {
-        additions.entry(merge.into).or_default().extend(merge.items);
-        remove.insert(merge.from);
-        stats.total += 1;
-        *stats.by_type.entry(merge.ty.to_string()).or_insert(0) += 1;
-    }
-
-    for (idx, items) in additions {
-        let EntityInstance::Simple { record, .. } = &mut entities[idx] else {
-            unreachable!();
-        };
-        let Parameter::List(params) = &mut record.parameter else {
-            unreachable!();
-        };
-        let target_idx = if record.name == "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
-        {
-            1
-        } else {
-            2
-        };
-        let Parameter::List(existing) = &mut params[target_idx] else {
-            unreachable!();
-        };
-        existing.extend(items);
-    }
-
-    let mut i = 0usize;
-    entities.retain(|_| {
-        let keep = !remove.contains(&i);
-        i += 1;
-        keep
-    });
-    stats
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
-}
-
-fn standalone_param_key(param: &Parameter) -> String {
-    let mut out = String::new();
-    write_param_key(param, &HashMap::new(), &mut out);
-    out
-}
-
-#[derive(Default)]
-struct InternStats {
-    total: usize,
-    by_type: BTreeMap<String, usize>,
-}
-
-fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
-    // Store redirects only. An identity map for a million-entity STEP file is
-    // a surprisingly expensive way of spelling "most things survive".
-    let mut alias: HashMap<u64, u64> = HashMap::new();
-
-    // Value DAGs in the EasyEDA/SolidWorks corpus settle in a handful of
-    // rounds (units -> uncertainty/context, colour -> style chains, geometry
-    // primitives -> placements/surfaces). Updates are applied at the end of a
-    // round so keys within that round see a stable alias map.
-    for _ in 0..16 {
-        let mut seen: HashMap<String, u64> = HashMap::new();
-        let mut pending: Vec<(u64, u64)> = Vec::new();
-
-        for entity in entities.iter() {
-            if !is_internable(entity) {
-                continue;
-            }
-            let id = entity_id(entity);
-            if alias.contains_key(&id) {
-                continue;
-            }
-
-            let key = entity_key(entity, &alias);
-            if let Some(&canonical) = seen.get(&key) {
-                let canonical = resolve_alias(&alias, canonical);
-                if canonical != id {
-                    pending.push((id, canonical));
-                }
-            } else {
-                seen.insert(key, id);
-            }
-        }
-
-        if pending.is_empty() {
-            break;
-        }
-        for (id, canonical) in pending {
-            alias.insert(id, canonical);
-        }
-        compress_aliases(&mut alias);
-    }
-    compress_aliases(&mut alias);
-
-    let mut stats = InternStats::default();
-    let original = std::mem::take(entities);
-    entities.reserve(original.len().saturating_sub(alias.len()));
-    for mut entity in original {
-        let id = entity_id(&entity);
-        let root = resolve_alias(&alias, id);
-        if root != id {
-            stats.total += 1;
-            *stats.by_type.entry(entity_type_label(&entity)).or_insert(0) += 1;
-            continue;
-        }
-        rewrite_entity_refs(&mut entity, &alias);
-        entities.push(entity);
-    }
-    stats
-}
-
-fn compress_aliases(alias: &mut HashMap<u64, u64>) {
-    let keys: Vec<u64> = alias.keys().copied().collect();
-    for id in keys {
-        let root = resolve_alias(alias, id);
-        if root != id {
-            alias.insert(id, root);
-        }
-    }
-}
-
-fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
-    for _ in 0..64 {
-        let Some(&next) = alias.get(&id) else {
-            return id;
-        };
-        if next == id {
-            return id;
-        }
-        id = next;
-    }
-    id
-}
-
-fn dense_renumber(entities: &mut [EntityInstance]) {
-    let id_map: HashMap<u64, u64> = entities
-        .iter()
-        .enumerate()
-        .map(|(idx, e)| (entity_id(e), idx as u64 + 1))
-        .collect();
-
-    for entity in entities.iter_mut() {
-        let old = entity_id(entity);
-        let new = id_map[&old];
-        set_entity_id(entity, new);
-        rewrite_entity_refs(entity, &id_map);
-    }
-}
-
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn set_entity_id(entity: &mut EntityInstance, new_id: u64) {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id = new_id,
-    }
-}
-
-fn entity_type_label(entity: &EntityInstance) -> String {
-    match entity {
-        EntityInstance::Simple { record, .. } => record.name.clone(),
-        EntityInstance::Complex { subsuper, .. } => subsuper
-            .0
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect::<Vec<_>>()
-            .join("+"),
-    }
-}
-
-fn rewrite_entity_refs(entity: &mut EntityInstance, map: &HashMap<u64, u64>) {
-    match entity {
-        EntityInstance::Simple { record, .. } => rewrite_param_refs(&mut record.parameter, map),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &mut subsuper.0 {
-                rewrite_param_refs(&mut record.parameter, map);
-            }
-        }
-    }
-}
-
-fn rewrite_param_refs(param: &mut Parameter, map: &HashMap<u64, u64>) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => {
-            if let Some(&new) = map.get(id) {
-                *id = new;
-            }
-        }
-        Parameter::List(items) => {
-            for item in items {
-                rewrite_param_refs(item, map);
-            }
-        }
-        Parameter::Typed { parameter, .. } => rewrite_param_refs(parameter, map),
-        _ => {}
-    }
-}
-
-fn is_internable(entity: &EntityInstance) -> bool {
-    match entity {
-        EntityInstance::Simple { record, .. } => internable_record(&record.name),
-        EntityInstance::Complex { subsuper, .. } => {
-            !subsuper.0.is_empty() && subsuper.0.iter().all(|r| internable_record(&r.name))
-        }
-    }
-}
-
-// Deliberately excludes topological identity objects: VERTEX_POINT, EDGE_CURVE,
-// ORIENTED_EDGE, EDGE_LOOP, FACE_*, ADVANCED_FACE, shells, and solids.
-//
-// Sharing these value/geometry-support objects does not merge topology. It only
-// makes multiple topological objects point at the same equal geometry/style/unit
-// value, which is the redundancy SolidWorks explodes in these EasyEDA files.
-fn internable_record(name: &str) -> bool {
-    matches!(
-        name,
-        // Geometry values / support geometry
-        "CARTESIAN_POINT"
-            | "DIRECTION"
-            | "VECTOR"
-            | "AXIS1_PLACEMENT"
-            | "AXIS2_PLACEMENT_2D"
-            | "AXIS2_PLACEMENT_3D"
-            | "LINE"
-            | "CIRCLE"
-            | "ELLIPSE"
-            | "PLANE"
-            | "CYLINDRICAL_SURFACE"
-            | "CONICAL_SURFACE"
-            | "SPHERICAL_SURFACE"
-            | "TOROIDAL_SURFACE"
-            | "SURFACE_OF_LINEAR_EXTRUSION"
-            | "SURFACE_OF_REVOLUTION"
-            | "B_SPLINE_CURVE"
-            | "B_SPLINE_CURVE_WITH_KNOTS"
-            | "RATIONAL_B_SPLINE_CURVE"
-            | "B_SPLINE_SURFACE"
-            | "B_SPLINE_SURFACE_WITH_KNOTS"
-            | "RATIONAL_B_SPLINE_SURFACE"
-            // Presentation/style values
-            | "COLOUR_RGB"
-            | "DRAUGHTING_PRE_DEFINED_COLOUR"
-            | "DRAUGHTING_PRE_DEFINED_CURVE_FONT"
-            | "CURVE_STYLE"
-            | "POINT_STYLE"
-            | "FILL_AREA_STYLE_COLOUR"
-            | "FILL_AREA_STYLE"
-            | "SURFACE_STYLE_FILL_AREA"
-            | "SURFACE_SIDE_STYLE"
-            | "SURFACE_STYLE_USAGE"
-            | "PRESENTATION_STYLE_ASSIGNMENT"
-            // Units / contexts / uncertainty values
-            | "NAMED_UNIT"
-            | "SI_UNIT"
-            | "LENGTH_UNIT"
-            | "PLANE_ANGLE_UNIT"
-            | "SOLID_ANGLE_UNIT"
-            | "CONVERSION_BASED_UNIT"
-            | "MEASURE_WITH_UNIT"
-            | "UNCERTAINTY_MEASURE_WITH_UNIT"
-            | "REPRESENTATION_CONTEXT"
-            | "GEOMETRIC_REPRESENTATION_CONTEXT"
-            | "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT"
-            | "GLOBAL_UNIT_ASSIGNED_CONTEXT"
-    )
-}
-
-fn entity_key(entity: &EntityInstance, alias: &HashMap<u64, u64>) -> String {
-    let mut out = String::new();
-    match entity {
-        EntityInstance::Simple { record, .. } => write_record_key(record, alias, &mut out),
-        EntityInstance::Complex { subsuper, .. } => {
-            out.push('(');
-            for record in &subsuper.0 {
-                write_record_key(record, alias, &mut out);
-            }
-            out.push(')');
-        }
-    }
-    out
-}
-
-fn write_record_key(record: &Record, alias: &HashMap<u64, u64>, out: &mut String) {
-    out.push_str(&record.name);
-    write_param_key(&record.parameter, alias, out);
-}
-
-fn write_param_key(param: &Parameter, alias: &HashMap<u64, u64>, out: &mut String) {
-    match param {
-        Parameter::Typed { keyword, parameter } => {
-            out.push_str(keyword);
-            out.push('(');
-            write_param_key(parameter, alias, out);
-            out.push(')');
-        }
-        Parameter::Integer(v) => {
-            let _ = write!(out, "{v}");
-        }
-        Parameter::Real(v) => out.push_str(&format_real(*v)),
-        Parameter::String(s) => write_step_string(s, out),
-        Parameter::Enumeration(s) => {
-            out.push('.');
-            out.push_str(s);
-            out.push('.');
-        }
-        Parameter::List(items) => {
-            out.push('(');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_param_key(item, alias, out);
-            }
-            out.push(')');
-        }
-        Parameter::Ref(Name::Entity(id)) => {
-            let _ = write!(out, "#{}", resolve_alias(alias, *id));
-        }
-        Parameter::Ref(Name::Value(id)) => {
-            let _ = write!(out, "@{id}");
-        }
-        Parameter::Ref(Name::ConstantEntity(s)) => {
-            out.push('#');
-            out.push_str(s);
-        }
-        Parameter::Ref(Name::ConstantValue(s)) => {
-            out.push('@');
-            out.push_str(s);
-        }
-        Parameter::NotProvided => out.push('$'),
-        Parameter::Omitted => out.push('*'),
-    }
-}
-
-const PLACEHOLDER_NAME_TYPES: &[&str] = &[
-    "ADVANCED_FACE",
-    "AXIS2_PLACEMENT_3D",
-    "B_SPLINE_CURVE_WITH_KNOTS",
-    "B_SPLINE_SURFACE_WITH_KNOTS",
-    "CARTESIAN_POINT",
-    "CIRCLE",
-    "CLOSED_SHELL",
-    "CONICAL_SURFACE",
-    "CYLINDRICAL_SURFACE",
-    "DIRECTION",
-    "EDGE_CURVE",
-    "EDGE_LOOP",
-    "FACE_BOUND",
-    "FACE_OUTER_BOUND",
-    "LINE",
-    "MANIFOLD_SOLID_BREP",
-    "ORIENTED_EDGE",
-    "PLANE",
-    "SPHERICAL_SURFACE",
-    "STYLED_ITEM",
-    "TOROIDAL_SURFACE",
-    "VECTOR",
-    "VERTEX_POINT",
-];
-
-fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
-    let mut changed = 0usize;
-    for entity in entities {
-        match entity {
-            EntityInstance::Simple { record, .. } => {
-                changed += minify_placeholder_record_name(record);
-            }
-            EntityInstance::Complex { subsuper, .. } => {
-                for record in &mut subsuper.0 {
-                    changed += minify_placeholder_record_name(record);
-                }
-            }
-        }
-    }
-    changed
-}
-
-fn minify_placeholder_record_name(record: &mut Record) -> usize {
-    if !PLACEHOLDER_NAME_TYPES.contains(&record.name.as_str()) {
-        return 0;
-    }
-    let Parameter::List(params) = &mut record.parameter else {
-        return 0;
-    };
-    let Some(Parameter::String(name)) = params.first_mut() else {
-        return 0;
-    };
-    if name != "NONE" {
-        return 0;
-    }
-    name.clear();
-    1
-}
-
-pub fn write_exchange(exchange: &Exchange) -> Result<String> {
-    if !exchange.anchor.is_empty()
-        || !exchange.reference.is_empty()
-        || !exchange.signature.is_empty()
-    {
-        bail!("optional STEP sections are not supported by writer");
-    }
-
-    let mut out = String::with_capacity(
-        exchange
-            .data
-            .iter()
-            .map(|d| d.entities.len())
-            .sum::<usize>()
-            * 48,
-    );
-    out.push_str("ISO-10303-21;\nHEADER;\n");
-    for record in &exchange.header {
-        write_record(record, &mut out);
-        out.push_str(";\n");
-    }
-    out.push_str("ENDSEC;\n");
-
-    for section in &exchange.data {
-        if section.meta.is_empty() {
-            out.push_str("DATA;\n");
-        } else {
-            out.push_str("DATA(");
-            for (i, param) in section.meta.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_param(param, &mut out);
-            }
-            out.push_str(");\n");
-        }
-        for entity in &section.entities {
-            write_entity(entity, &mut out);
-            out.push('\n');
-        }
-        out.push_str("ENDSEC;\n");
-    }
-    out.push_str("END-ISO-10303-21;\n");
-    Ok(out)
-}
-
-fn write_entity(entity: &EntityInstance, out: &mut String) {
-    match entity {
-        EntityInstance::Simple { id, record } => {
-            let _ = write!(out, "#{id}=");
-            write_record(record, out);
-            out.push(';');
-        }
-        EntityInstance::Complex { id, subsuper } => {
-            let _ = write!(out, "#{id}=(");
-            for record in &subsuper.0 {
-                write_record(record, out);
-            }
-            out.push_str(");");
-        }
-    }
-}
-
-fn write_record(record: &Record, out: &mut String) {
-    out.push_str(&record.name);
-    write_param(&record.parameter, out);
-}
-
-fn write_param(param: &Parameter, out: &mut String) {
-    match param {
-        Parameter::Typed { keyword, parameter } => {
-            out.push_str(keyword);
-            out.push('(');
-            write_param(parameter, out);
-            out.push(')');
-        }
-        Parameter::Integer(v) => {
-            let _ = write!(out, "{v}");
-        }
-        Parameter::Real(v) => out.push_str(&format_real(*v)),
-        Parameter::String(s) => write_step_string(s, out),
-        Parameter::Enumeration(s) => {
-            out.push('.');
-            out.push_str(s);
-            out.push('.');
-        }
-        Parameter::List(items) => {
-            out.push('(');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_param(item, out);
-            }
-            out.push(')');
-        }
-        Parameter::Ref(Name::Entity(id)) => {
-            let _ = write!(out, "#{id}");
-        }
-        Parameter::Ref(Name::Value(id)) => {
-            let _ = write!(out, "@{id}");
-        }
-        Parameter::Ref(Name::ConstantEntity(s)) => {
-            out.push('#');
-            out.push_str(s);
-        }
-        Parameter::Ref(Name::ConstantValue(s)) => {
-            out.push('@');
-            out.push_str(s);
-        }
-        Parameter::NotProvided => out.push('$'),
-        Parameter::Omitted => out.push('*'),
-    }
-}
-
-fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static str)> {
-    if let Ok(s) = std::str::from_utf8(input) {
-        return Ok((std::borrow::Cow::Borrowed(s), "utf-8"));
-    }
-
-    let (decoded, _used_encoding, had_errors) = encoding_rs::GBK.decode(input);
-    if had_errors {
-        bail!("STEP input is neither valid UTF-8 nor valid GBK");
-    }
-    Ok((decoded, "gbk"))
-}
-
-fn write_step_string(s: &str, out: &mut String) {
-    out.push('\'');
-
-    let flush_non_ascii = |buf: &mut String, out: &mut String| {
-        if buf.is_empty() {
-            return;
-        }
-        out.push_str("\\X2\\");
-        for unit in buf.encode_utf16() {
-            let _ = write!(out, "{unit:04X}");
-        }
-        out.push_str("\\X0\\");
-        buf.clear();
-    };
-
-    let mut non_ascii = String::new();
-    for ch in s.chars() {
-        if ch.is_ascii() && ch != '\'' {
-            flush_non_ascii(&mut non_ascii, out);
-            out.push(ch);
-        } else {
-            // Encode apostrophes too; this stays valid Part 21 and avoids
-            // depending on every downstream reader handling doubled-apostrophe escaping correctly.
-            non_ascii.push(ch);
-        }
-    }
-    flush_non_ascii(&mut non_ascii, out);
-    out.push('\'');
-}
-
-fn format_real(v: f64) -> String {
-    let mut s = v.to_string();
-    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
-        s.push('.');
-    }
-    s
+    clean_pipeline::clean_bytes(input, options)
 }
 
 #[cfg(test)]
@@ -2093,32 +1419,49 @@ mod tests {
     }
 
     #[test]
-    fn writer_roundtrips_basic_exchange() {
+    fn production_profiles_keep_unvalidated_boundary_rewrites_opt_in() {
+        for profile in [OutputProfile::Compat, OutputProfile::Compact] {
+            let options = Options::for_profile(profile);
+            assert!(options.coalesce_same_support_planar_faces);
+            assert!(!options.experimental_coalesce_same_support_faces);
+            assert!(!options.experimental_instance_planar_positive_features);
+            assert!(!options.experimental_instance_spherical_caps);
+        }
+
+        let compact = Options::for_profile(OutputProfile::Compact);
+        assert!(compact.experimental_instance_translated_bspline_curves);
+        assert!(compact.experimental_instance_z90);
+    }
+
+    #[test]
+    fn writer_roundtrips_basic_exchange() -> Result<()> {
         let src = wrap(
             "#9=CARTESIAN_POINT('NONE',(1.000000000000000000,2.500000000000000000,0.000000000000000000));\n#20=CARTESIAN_POINT('NONE',(1.0,2.5,0.0));\n#21=VERTEX_POINT('NONE',#20);",
         );
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
         assert!(out.stats.output_bytes < out.stats.input_bytes);
         assert_eq!(out.stats.interned_entities, 1);
-        ruststep::parser::parse(std::str::from_utf8(&out.bytes).unwrap()).unwrap();
+        ruststep::parser::parse(std::str::from_utf8(&out.bytes)?)?;
+        Ok(())
     }
 
     #[test]
-    fn equal_geometry_values_share_but_topology_identity_survives() {
+    fn equal_geometry_values_share_but_topology_identity_survives() -> Result<()> {
         let src = wrap(
             "#1=CARTESIAN_POINT('',(1.0,2.0,3.0));\n#2=CARTESIAN_POINT('',(1.000000000000000000,2.0,3.0));\n#3=VERTEX_POINT('',#1);\n#4=VERTEX_POINT('',#2);",
         );
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
         assert_eq!(out.stats.interned_entities, 1);
         assert_eq!(out.stats.output_entities, 3);
 
-        let text = std::str::from_utf8(&out.bytes).unwrap();
+        let text = std::str::from_utf8(&out.bytes)?;
         assert_eq!(text.matches("VERTEX_POINT").count(), 2);
         assert_eq!(text.matches("CARTESIAN_POINT").count(), 1);
+        Ok(())
     }
 
     #[test]
-    fn consolidates_only_unreferenced_presentation_roots() {
+    fn consolidates_only_unreferenced_presentation_roots() -> Result<()> {
         let src = wrap(
             "#1=CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
              #8=DIRECTION('',(1.0,0.0,0.0));\n\
@@ -2129,19 +1472,20 @@ mod tests {
              #6=PRESENTATION_LAYER_ASSIGNMENT('','',(#2));\n\
              #7=PRESENTATION_LAYER_ASSIGNMENT('','',(#3));",
         );
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
         assert_eq!(out.stats.consolidated_entities, 2);
-        let text = std::str::from_utf8(&out.bytes).unwrap();
+        let text = std::str::from_utf8(&out.bytes)?;
         assert_eq!(
             text.matches("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION")
                 .count(),
             1
         );
         assert_eq!(text.matches("PRESENTATION_LAYER_ASSIGNMENT").count(), 1);
+        Ok(())
     }
 
     #[test]
-    fn referenced_presentation_records_are_not_consolidated() {
+    fn referenced_presentation_records_are_not_consolidated() -> Result<()> {
         let src = wrap(
             "#1=CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
              #8=DIRECTION('',(1.0,0.0,0.0));\n\
@@ -2151,79 +1495,117 @@ mod tests {
              #5=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#3),#1);\n\
              #6=REPRESENTATION_RELATIONSHIP('','',#4,#5);",
         );
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
         assert_eq!(out.stats.consolidated_entities, 0);
+        Ok(())
     }
 
     #[test]
-    fn legal_empty_aggregates_roundtrip_without_parser_rewrite() {
+    fn legal_empty_aggregates_roundtrip_without_parser_rewrite() -> Result<()> {
         let src = wrap("#8=SHAPE_REPRESENTATION('',(),#6);\n#6=CARTESIAN_POINT('',(0.0,0.0,0.0));");
-        let once = clean_bytes(&src, &Options::default()).unwrap();
-        let text = std::str::from_utf8(&once.bytes).unwrap();
+        let once = clean_bytes(&src, &Options::default())?;
+        let text = std::str::from_utf8(&once.bytes)?;
         assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
 
-        let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
+        let twice = clean_bytes(&once.bytes, &Options::default())?;
         assert_eq!(once.bytes, twice.bytes);
+        Ok(())
     }
 
     #[test]
-    fn empty_aggregates_do_not_confuse_strings_and_comments() {
+    fn empty_aggregates_do_not_confuse_strings_and_comments() -> Result<()> {
         let src = wrap(
             "#1=CARTESIAN_POINT('literal ()', (0.0,0.0,0.0));\n/* () */\n#2=SHAPE_REPRESENTATION('',( ),#1);",
         );
-        let out = clean_bytes(&src, &Options::default()).unwrap();
-        let text = std::str::from_utf8(&out.bytes).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
+        let text = std::str::from_utf8(&out.bytes)?;
         assert!(text.contains("literal ()"));
         assert!(text.contains("SHAPE_REPRESENTATION('',(),#"));
+        Ok(())
     }
 
     #[test]
-    fn doubled_apostrophe_step_strings_parse_directly() {
+    fn doubled_apostrophe_step_strings_parse_directly() -> Result<()> {
         let src = wrap("#1=CARTESIAN_POINT('M3'' thread',(0.0,0.0,0.0));");
-        ruststep::parser::parse(std::str::from_utf8(&src).unwrap()).unwrap();
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        ruststep::parser::parse(std::str::from_utf8(&src)?)?;
+        let out = clean_bytes(&src, &Options::default())?;
         assert_eq!(out.stats.input_entities, 1);
+        Ok(())
     }
 
     #[test]
-    fn optional_placeholder_name_minification_only_touches_allowlisted_name_fields() {
+    fn optional_placeholder_name_minification_only_touches_allowlisted_name_fields() -> Result<()> {
         let src =
             wrap("#1=CARTESIAN_POINT('NONE',(0.0,0.0,0.0));\n#2=PRODUCT('NONE','NONE','NONE',());");
         let options = Options {
             minify_placeholder_names: true,
             ..Options::default()
         };
-        let out = clean_bytes(&src, &options).unwrap();
-        let text = std::str::from_utf8(&out.bytes).unwrap();
+        let out = clean_bytes(&src, &options)?;
+        let text = std::str::from_utf8(&out.bytes)?;
         assert!(text.contains("CARTESIAN_POINT('',"));
         assert!(text.contains("PRODUCT('NONE','NONE','NONE',())"));
         assert_eq!(out.stats.placeholder_names_minified, 1);
+        Ok(())
     }
 
     #[test]
-    fn gbk_strings_become_standard_x2_unicode_escapes() {
+    fn gbk_strings_become_standard_x2_unicode_escapes() -> Result<()> {
         let mut src = b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('".to_vec();
         src.extend_from_slice(&[0xC8, 0xCE, 0xBA, 0xCE]); // 任何 in GBK
         src.extend_from_slice(b"',(0.0,0.0,0.0));\nENDSEC;\nEND-ISO-10303-21;\n");
 
-        let out = clean_bytes(&src, &Options::default()).unwrap();
+        let out = clean_bytes(&src, &Options::default())?;
         assert_eq!(out.stats.input_encoding, "gbk");
-        let text = std::str::from_utf8(&out.bytes).unwrap();
+        let text = std::str::from_utf8(&out.bytes)?;
         assert!(text.contains("\\X2\\4EFB4F55\\X0\\"));
+        Ok(())
     }
 
     #[test]
-    fn cleaning_is_byte_idempotent() {
+    fn cleaning_is_byte_idempotent() -> Result<()> {
         let src = wrap(
             "#10=DIRECTION('',(1.000000000000000000,0.0,0.0));\n#20=DIRECTION('',(1.0,0.0,0.0));\n#30=VECTOR('',#20,1000.000000000000000000);",
         );
-        let once = clean_bytes(&src, &Options::default()).unwrap();
-        let twice = clean_bytes(&once.bytes, &Options::default()).unwrap();
+        let once = clean_bytes(&src, &Options::default())?;
+        let twice = clean_bytes(&once.bytes, &Options::default())?;
         assert_eq!(once.bytes, twice.bytes);
+        Ok(())
     }
 
     #[test]
-    fn straight_bspline_recovery_is_byte_idempotent() {
+    fn v_extrusion_generated_bezier_is_byte_idempotent() -> Result<()> {
+        let src = wrap(concat!(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));\n",
+            "#2=CARTESIAN_POINT('',(0.,2.,0.));\n",
+            "#3=CARTESIAN_POINT('',(1.,0.,0.));\n",
+            "#4=CARTESIAN_POINT('',(1.,2.,0.));\n",
+            "#5=CARTESIAN_POINT('',(2.,0.,0.));\n",
+            "#6=CARTESIAN_POINT('',(2.,2.,0.));\n",
+            "#10=B_SPLINE_SURFACE_WITH_KNOTS('',2,1,((#1,#2),(#3,#4),(#5,#6)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n",
+            "#11=ADVANCED_FACE('',(),#10,.T.);",
+        ));
+        let options = Options {
+            experimental_recover_exact_bezier_curves: true,
+            experimental_recover_v_extrusions: true,
+            ..Options::default()
+        };
+
+        let once = clean_bytes(&src, &options)?;
+        assert_eq!(once.stats.v_extrusion_surfaces_recovered, 1);
+        assert_eq!(once.stats.v_extrusion_profile_curves_created, 1);
+        assert_eq!(once.stats.exact_bezier_curves_recovered, 1);
+        assert!(std::str::from_utf8(&once.bytes)?.contains("BEZIER_CURVE"));
+
+        let twice = clean_bytes(&once.bytes, &options)?;
+        assert_eq!(twice.stats.v_extrusion_surfaces_recovered, 0);
+        assert_eq!(twice.stats.exact_bezier_curves_recovered, 0);
+        assert_eq!(once.bytes, twice.bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn straight_bspline_recovery_is_byte_idempotent() -> Result<()> {
         let src = wrap(
             "#1=CARTESIAN_POINT('',(0.,0.,0.));\n\
              #2=CARTESIAN_POINT('',(1.,0.,0.));\n\
@@ -2238,10 +1620,11 @@ mod tests {
             experimental_recover_straight_bspline_lines: true,
             ..Options::default()
         };
-        let once = clean_bytes(&src, &options).unwrap();
+        let once = clean_bytes(&src, &options)?;
         assert_eq!(once.stats.straight_bspline_lines_recovered, 1);
-        let twice = clean_bytes(&once.bytes, &options).unwrap();
+        let twice = clean_bytes(&once.bytes, &options)?;
         assert_eq!(twice.stats.straight_bspline_lines_recovered, 0);
         assert_eq!(once.bytes, twice.bytes);
+        Ok(())
     }
 }

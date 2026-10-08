@@ -1,4 +1,7 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::math3::{canonical_direction, cross, dot, norm, normalize as normalize3};
+use crate::step_entities::{cartesian_point, number as numeric_value};
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -60,8 +63,18 @@ struct FaceKey {
     local_points: Vec<[i64; 3]>,
 }
 
+#[must_use]
 pub fn detect_periodic_bodies(
     entities: &[EntityInstance],
+    instance_patterns: &[InstancePattern],
+) -> Vec<PeriodicBodyPattern> {
+    let index = build_index(entities);
+    detect_periodic_bodies_with_index(entities, &index, instance_patterns)
+}
+
+pub(crate) fn detect_periodic_bodies_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     instance_patterns: &[InstancePattern],
 ) -> Vec<PeriodicBodyPattern> {
     let candidates = lattice_candidates(instance_patterns);
@@ -69,7 +82,6 @@ pub fn detect_periodic_bodies(
         return Vec::new();
     }
 
-    let index = build_index(entities);
     let solids = entities
         .iter()
         .filter_map(|entity| {
@@ -129,7 +141,7 @@ pub fn detect_periodic_bodies(
                 let mut residual = 0.0f64;
                 let mut okay = true;
                 for (site, face) in group.iter().enumerate() {
-                    let expected = start + site as f64 * candidate.pitch;
+                    let expected = (site as f64).mul_add(candidate.pitch, start);
                     let err = (face.projected - expected).abs();
                     residual = residual.max(err);
                     if err > GEOM_TOL_MM {
@@ -175,7 +187,7 @@ pub fn detect_periodic_bodies(
             }
 
             let min_stretch =
-                (candidate.sites.saturating_sub(1)) as f64 * candidate.pitch - GEOM_TOL_MM;
+                ((candidate.sites.saturating_sub(1)) as f64).mul_add(candidate.pitch, -GEOM_TOL_MM);
             let mut stretch = Vec::new();
             let mut fixed = Vec::new();
             for face in all_face_ids {
@@ -245,10 +257,10 @@ fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
         {
             continue;
         }
-        let Some(mut axis) = normalize(pattern.basis[0]) else {
+        let Some(axis) = normalize(pattern.basis[0]) else {
             continue;
         };
-        canonicalize_axis(&mut axis);
+        let axis = canonical_direction(axis);
         let pitch = norm(pattern.basis[0]);
         if !pitch.is_finite() || pitch <= GEOM_TOL_MM {
             continue;
@@ -350,9 +362,9 @@ fn analyze_planar_line_face(
         }
     }
     let center = [
-        (lo[0] + hi[0]) * 0.5,
-        (lo[1] + hi[1]) * 0.5,
-        (lo[2] + hi[2]) * 0.5,
+        f64::midpoint(lo[0], hi[0]),
+        f64::midpoint(lo[1], hi[1]),
+        f64::midpoint(lo[2], hi[2]),
     ];
     let projected_values = points
         .iter()
@@ -507,31 +519,6 @@ fn plane_normal(
     ])
 }
 
-fn cartesian_point(
-    point: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(entities.get(*index.get(&point)?)?)?;
-    if record.name != "CARTESIAN_POINT" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric_value(&coords[0])?,
-        numeric_value(&coords[1])?,
-        numeric_value(&coords[2])?,
-    ])
-}
-
 fn orthogonal_basis(axis: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
     let reference = if axis[0].abs() < 0.8 {
         [1.0, 0.0, 0.0]
@@ -559,83 +546,12 @@ fn quantize_dir(v: [f64; 3]) -> Option<[i64; 3]> {
     Some(out)
 }
 
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => Some(*value as f64),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(idx, entity)| (entity_id(entity), idx))
-        .collect()
-}
-
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn canonicalize_axis(axis: &mut [f64; 3]) {
-    for value in axis.iter() {
-        if value.abs() > 1.0e-12 {
-            if *value < 0.0 {
-                *axis = scale(*axis, -1.0);
-            }
-            return;
-        }
-    }
-}
-
 fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
     norm(cross(a, b)) <= 1.0e-8
 }
 
-fn scale(v: [f64; 3], s: f64) -> [f64; 3] {
-    [v[0] * s, v[1] * s, v[2] * s]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn norm(v: [f64; 3]) -> f64 {
-    dot(v, v).sqrt()
-}
-
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = norm(v);
-    if !n.is_finite() || n <= 1.0e-15 {
-        return None;
-    }
-    Some(scale(v, 1.0 / n))
+    normalize3(v, 1.0e-15)
 }
 
 #[cfg(test)]
@@ -644,17 +560,18 @@ mod tests {
 
     #[test]
     fn canonical_axis_has_stable_sign() {
-        let mut axis = [-1.0, 0.0, 0.0];
-        canonicalize_axis(&mut axis);
-        assert_eq!(axis, [1.0, 0.0, 0.0]);
+        assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn orthogonal_basis_is_perpendicular() {
-        let axis = normalize([1.0, 2.0, 3.0]).unwrap();
-        let (v, w) = orthogonal_basis(axis).unwrap();
+    fn orthogonal_basis_is_perpendicular() -> anyhow::Result<()> {
+        let axis =
+            normalize([1.0, 2.0, 3.0]).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
+        let (v, w) =
+            orthogonal_basis(axis).ok_or_else(|| anyhow::anyhow!("expected test value"))?;
         assert!(dot(axis, v).abs() < 1e-12);
         assert!(dot(axis, w).abs() < 1e-12);
         assert!(dot(v, w).abs() < 1e-12);
+        Ok(())
     }
 }

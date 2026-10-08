@@ -6,8 +6,9 @@ This experiment tests two deliberately separate choices:
 2. **Monstertruck is an interchangeable local B-rep evaluation backend.**
 
 Neither is the step-redox recovery IR itself. Recovery keeps a small backend-neutral
-constructive DAG with source/provenance links and exact B-rep fallbacks. The spike now
-proves this separation mechanically: one `ExtrudeZ` node lowers independently to KCL text
+constructive DAG with source/provenance links. Unrecovered source geometry is diagnostic
+state outside that DAG, never an opaque semantic leaf. The spike proves this separation
+mechanically: one `ExtrudeZ` node lowers independently to KCL text
 and to Monstertruck B-rep; there is no hand-maintained duplicate model description.
 
 ## Boundaries
@@ -15,11 +16,9 @@ and to Monstertruck B-rep; there is no hand-maintained duplicate model descripti
 - Existing step-redox STEP ingestion remains authoritative for arbitrary vendor input.
   Monstertruck's STEP loader is not used as an ingestion gate.
 - KCL is emitted from the recovered constructive DAG and parsed/recast in optional conformance tests.
-- Unrecovered exact B-rep can remain a sidecar STEP/foreign-import leaf while recovery proceeds; KCL intentionally treats foreign geometry as read-only.
+- Unrecovered source geometry remains source/provenance diagnostic state while recovery proceeds; it does not enter the constructive DAG.
 - Monstertruck evaluates supported constructive nodes and exports clean B-rep/STEP.
 - No recovery detector stores Monstertruck topology handles.
-- The preferred interchange with the kernel is flattened/compressed topology where
-  practical, not long-lived Arc/Mutex topology.
 - Kernel output is never accepted merely because the operation returned Ok: it must
   pass the existing independent geometry/dimension/mass/render validation harness.
 

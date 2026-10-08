@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 /// A step-redox-owned constructive node ID. It is intentionally unrelated to
 /// STEP entity numbers or geometry-kernel handles.
@@ -15,7 +16,8 @@ pub struct CadModel {
 }
 
 impl CadModel {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             nodes: Vec::new(),
             roots: Vec::new(),
@@ -29,24 +31,36 @@ impl CadModel {
         id
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` does not refer to a node in this model.
     pub fn add_root(&mut self, id: NodeId) -> Result<()> {
         self.require_node(id)?;
         self.roots.push(id);
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` does not refer to a node in this model.
     pub fn set_provenance(&mut self, id: NodeId, provenance: Provenance) -> Result<()> {
         self.require_node(id)?;
         self.provenance.insert(id, provenance);
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `id` is outside the model node table.
     pub fn node(&self, id: NodeId) -> Result<&CadNode> {
         self.nodes
             .get(id.0)
             .ok_or_else(|| anyhow::anyhow!("invalid CAD node id {}", id.0))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the model contains invalid child/root references, an invalid proof record, an underspecified boolean, or a cycle.
     pub fn validate(&self) -> Result<()> {
         for &root in &self.roots {
             self.require_node(root)?;
@@ -56,11 +70,69 @@ impl CadModel {
             for child in node.children() {
                 self.require_node(child)?;
             }
-            if let Some(provenance) = self.provenance.get(&id)
-                && provenance.proof == ProofStatus::WithinTolerance
-                && provenance.max_residual_mm.is_none()
+            if let CadNode::Boolean { children, .. } = node
+                && children.len() < 2
             {
-                bail!("node {} is WithinTolerance without max_residual_mm", id.0);
+                bail!("boolean node {} needs at least two children", id.0);
+            }
+            if let CadNode::PeriodicChain(chain) = node {
+                chain.validate()?;
+            }
+            if let CadNode::Sweep { path, .. } = node {
+                path.validate()?;
+            }
+            if let CadNode::Loft { sections } = node {
+                if sections.len() < 2 {
+                    bail!("loft node {} needs at least two sections", id.0);
+                }
+                let loop_curve_counts = sections[0]
+                    .profile
+                    .loops
+                    .iter()
+                    .map(|loop_| loop_.curves.len())
+                    .collect::<Vec<_>>();
+                if loop_curve_counts.is_empty() || loop_curve_counts.iter().any(|count| *count < 3)
+                {
+                    bail!("loft node {} has an invalid first section", id.0);
+                }
+                for section in sections {
+                    if section
+                        .transform
+                        .matrix
+                        .iter()
+                        .flatten()
+                        .any(|value| !value.is_finite())
+                        || section.profile.loops.len() != loop_curve_counts.len()
+                        || section
+                            .profile
+                            .loops
+                            .iter()
+                            .zip(&loop_curve_counts)
+                            .any(|(loop_, count)| loop_.curves.len() != *count)
+                    {
+                        bail!("loft node {} has incompatible sections", id.0);
+                    }
+                }
+            }
+            if let Some(provenance) = self.provenance.get(&id) {
+                if let Some(residual) = provenance.max_residual_mm
+                    && (!residual.is_finite() || residual < 0.0)
+                {
+                    bail!("node {} has an invalid provenance residual", id.0);
+                }
+                if provenance.proof == ProofStatus::WithinTolerance
+                    && provenance.max_residual_mm.is_none()
+                {
+                    bail!("node {} is WithinTolerance without max_residual_mm", id.0);
+                }
+                if provenance.proof == ProofStatus::StructurallyProven
+                    && provenance.max_residual_mm.is_some()
+                {
+                    bail!(
+                        "node {} has structural proof paired with a geometric residual",
+                        id.0
+                    );
+                }
             }
         }
 
@@ -96,6 +168,9 @@ impl CadModel {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if `root` is invalid or the model fails structural validation.
     pub fn complexity_score(&self, root: NodeId) -> Result<u64> {
         self.require_node(root)?;
         self.validate()?;
@@ -137,8 +212,10 @@ pub enum CadNode {
     },
     Sweep {
         profile: Profile2d,
-        path: Path3d,
-        frame: SweepFrame,
+        path: SweepPath3d,
+    },
+    Loft {
+        sections: Vec<LoftSection>,
     },
     Boolean {
         op: BooleanOp,
@@ -155,10 +232,11 @@ pub enum CadNode {
     Assembly {
         children: Vec<NodeId>,
     },
-    BrepFallback(BrepFallback),
+    PeriodicChain(FusedPeriodicChain),
 }
 
 impl CadNode {
+    #[must_use]
     pub fn children(&self) -> Vec<NodeId> {
         match self {
             Self::Boolean { children, .. } | Self::Assembly { children } => children.clone(),
@@ -174,11 +252,18 @@ impl CadNode {
                 1 + profile.complexity()
             }
             Self::Sweep { profile, path, .. } => 2 + profile.complexity() + path.complexity(),
-            Self::Boolean { children, .. } => 1 + children.len() as u64,
+            Self::Loft { sections } => {
+                2 + sections
+                    .iter()
+                    .map(|section| 1 + section.profile.complexity())
+                    .sum::<u64>()
+            }
+            Self::Boolean { children, .. } | Self::Assembly { children } => {
+                1 + children.len() as u64
+            }
             Self::Transform { .. } => 2,
             Self::Pattern { pattern, .. } => 2 + pattern.complexity(),
-            Self::Assembly { children } => 1 + children.len() as u64,
-            Self::BrepFallback(fallback) => fallback.complexity(),
+            Self::PeriodicChain(chain) => chain.complexity(),
         }
     }
 }
@@ -196,10 +281,14 @@ pub struct Profile2d {
 }
 
 impl Profile2d {
+    ///
+    /// # Errors
+    /// Returns an error if the supplied points cannot form a valid polygon profile.
     pub fn polygon(points_mm: Vec<[f64; 2]>) -> Result<Self> {
         if points_mm.len() < 3 {
             bail!("polygon profile needs at least three points");
         }
+        let points_mm = points_mm.into_boxed_slice();
         let mut curves = Vec::with_capacity(points_mm.len());
         for index in 0..points_mm.len() {
             curves.push(Curve2d::Line {
@@ -219,6 +308,7 @@ impl Profile2d {
             .sum()
     }
 
+    #[must_use]
     pub fn single_polygon_points(&self) -> Option<Vec<[f64; 2]>> {
         if self.loops.len() != 1 {
             return None;
@@ -234,13 +324,16 @@ impl Profile2d {
             let Curve2d::Line { start_mm, end_mm } = curve else {
                 return None;
             };
-            if previous_end.is_some_and(|end| end != *start_mm) {
+            if previous_end.is_some_and(|end| !exact_point2_eq(end, *start_mm)) {
                 return None;
             }
             points.push(*start_mm);
             previous_end = Some(*end_mm);
         }
-        if previous_end != points.first().copied() {
+        if !previous_end
+            .zip(points.first().copied())
+            .is_some_and(|(end, start)| exact_point2_eq(end, start))
+        {
             return None;
         }
         Some(points)
@@ -296,47 +389,75 @@ impl Curve2d {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub enum Path3d {
-    Polyline {
-        points_mm: Vec<[f64; 3]>,
-    },
-    BSpline {
-        degree: usize,
-        control_points_mm: Vec<[f64; 3]>,
-        knots: Vec<f64>,
-        weights: Option<Vec<f64>>,
-    },
+pub struct LoftSection {
+    pub profile: Profile2d,
+    pub transform: RigidTransform,
 }
 
-impl Path3d {
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SweepPath3d {
+    /// Places the profile in world space before the first path segment.
+    pub initial_transform: RigidTransform,
+    /// Exact rigid motions applied in order. Straight runs are translations; bends are rotations.
+    pub segments: Vec<SweepSegment3d>,
+    /// The final segment returns to the initial section and the sweep has no end caps.
+    pub closed: bool,
+}
+
+impl SweepPath3d {
     fn complexity(&self) -> u64 {
-        match self {
-            Self::Polyline { points_mm } => 1 + points_mm.len() as u64,
-            Self::BSpline {
-                control_points_mm,
-                knots,
-                weights,
-                ..
-            } => {
-                4 + control_points_mm.len() as u64
-                    + knots.len() as u64
-                    + weights.as_ref().map_or(0, |values| values.len() as u64)
+        1 + self.segments.len() as u64
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.segments.is_empty() {
+            bail!("sweep path needs at least one segment");
+        }
+        if self
+            .initial_transform
+            .matrix
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            bail!("sweep initial transform must be finite");
+        }
+        for segment in &self.segments {
+            match segment {
+                SweepSegment3d::Translation { vector_mm } => {
+                    if vector_mm.iter().any(|value| !value.is_finite())
+                        || vector_mm.iter().all(|value| *value == 0.0)
+                    {
+                        bail!("sweep translation must be finite and nonzero");
+                    }
+                }
+                SweepSegment3d::Rotation { axis, angle_rad } => {
+                    if axis.origin_mm.iter().any(|value| !value.is_finite())
+                        || axis.direction.iter().any(|value| !value.is_finite())
+                        || axis.direction.iter().all(|value| *value == 0.0)
+                        || !angle_rad.is_finite()
+                        || *angle_rad == 0.0
+                        || angle_rad.abs() >= std::f64::consts::TAU
+                    {
+                        bail!("sweep rotation must have a finite nonzero axis and partial angle");
+                    }
+                }
             }
         }
+        Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum SweepSegment3d {
+    Translation { vector_mm: [f64; 3] },
+    Rotation { axis: Axis3, angle_rad: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Axis3 {
     pub origin_mm: [f64; 3],
     pub direction: [f64; 3],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SweepFrame {
-    Fixed,
-    ParallelTransport,
-    Frenet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -352,7 +473,8 @@ pub struct RigidTransform {
 }
 
 impl RigidTransform {
-    pub fn identity() -> Self {
+    #[must_use]
+    pub const fn identity() -> Self {
         Self {
             matrix: [
                 [1.0, 0.0, 0.0, 0.0],
@@ -363,7 +485,8 @@ impl RigidTransform {
         }
     }
 
-    pub fn translation_mm(xyz: [f64; 3]) -> Self {
+    #[must_use]
+    pub const fn translation_mm(xyz: [f64; 3]) -> Self {
         let mut result = Self::identity();
         result.matrix[0][3] = xyz[0];
         result.matrix[1][3] = xyz[1];
@@ -378,7 +501,7 @@ impl RigidTransform {
                 if column_index == 3 && row_index < 3 {
                     continue;
                 }
-                if *value != expected[row_index][column_index] {
+                if !exact_f64_eq(*value, expected[row_index][column_index]) {
                     return None;
                 }
             }
@@ -419,19 +542,124 @@ impl PatternSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BrepFallback {
-    pub source_entity_ids: Vec<u64>,
-    pub estimated_faces: usize,
-    pub estimated_edges: usize,
-    pub estimated_control_points: usize,
+pub struct IndexedCount {
+    pub index: usize,
+    pub count: usize,
 }
 
-impl BrepFallback {
-    fn complexity(&self) -> u64 {
-        100 + self.estimated_faces as u64 * 8
-            + self.estimated_edges as u64 * 3
-            + self.estimated_control_points as u64
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FusedPeriodicChain {
+    pub source_solid_id: u64,
+    pub axis: [f64; 3],
+    pub pitch_mm: f64,
+    pub sites: usize,
+    pub first_site_center_mm: f64,
+    pub interior_site_face_count: usize,
+    pub site_face_count_overrides: Vec<IndexedCount>,
+    pub interior_gap_face_count: usize,
+    pub gap_face_count_overrides: Vec<IndexedCount>,
+    pub stretch_face_count: usize,
+    pub fixed_negative_face_count: usize,
+    pub fixed_positive_face_count: usize,
+    pub adjacent_site_edges_per_boundary: usize,
+    pub repeat_coverage_ratio: f64,
+}
+
+impl FusedPeriodicChain {
+    fn validate(&self) -> Result<()> {
+        if self.source_solid_id == 0 {
+            bail!("periodic-chain source solid id must be nonzero");
+        }
+        if self.sites < 2 {
+            bail!("periodic chain needs at least two sites");
+        }
+        if !self.pitch_mm.is_finite() || self.pitch_mm <= 0.0 {
+            bail!("periodic-chain pitch must be finite and positive");
+        }
+        if !self.first_site_center_mm.is_finite() {
+            bail!("periodic-chain first site center must be finite");
+        }
+        if self.axis.iter().any(|value| !value.is_finite()) {
+            bail!("periodic-chain axis must be finite");
+        }
+        let axis_norm = self.axis[2]
+            .mul_add(
+                self.axis[2],
+                self.axis[1].mul_add(self.axis[1], self.axis[0] * self.axis[0]),
+            )
+            .sqrt();
+        if (axis_norm - 1.0).abs() > 1.0e-9 {
+            bail!("periodic-chain axis must be unit length");
+        }
+        if self.interior_site_face_count == 0 {
+            bail!("periodic-chain prototype site must be nonempty");
+        }
+        if self
+            .site_face_count_overrides
+            .iter()
+            .any(|entry| entry.count == 0)
+        {
+            bail!("periodic-chain sites must be nonempty");
+        }
+        validate_count_overrides(
+            &self.site_face_count_overrides,
+            self.sites,
+            self.interior_site_face_count,
+            "site",
+        )?;
+        validate_count_overrides(
+            &self.gap_face_count_overrides,
+            self.sites - 1,
+            self.interior_gap_face_count,
+            "gap",
+        )?;
+        if !self.repeat_coverage_ratio.is_finite()
+            || !(0.0..=1.0).contains(&self.repeat_coverage_ratio)
+        {
+            bail!("periodic-chain repeat coverage must lie in [0, 1]");
+        }
+        Ok(())
     }
+
+    fn complexity(&self) -> u64 {
+        let overrides = self
+            .site_face_count_overrides
+            .len()
+            .saturating_add(self.gap_face_count_overrides.len());
+        20_u64.saturating_add(
+            u64::try_from(overrides)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2),
+        )
+    }
+}
+
+fn validate_count_overrides(
+    overrides: &[IndexedCount],
+    slots: usize,
+    baseline: usize,
+    kind: &str,
+) -> Result<()> {
+    let mut previous = None;
+    for entry in overrides {
+        if entry.index >= slots {
+            bail!(
+                "periodic-chain {kind} override index {} is outside {slots} slots",
+                entry.index
+            );
+        }
+        if entry.count == baseline {
+            bail!(
+                "periodic-chain {kind} override {} redundantly stores the baseline count",
+                entry.index
+            );
+        }
+        if previous.is_some_and(|prior| entry.index <= prior) {
+            bail!("periodic-chain {kind} overrides must be sorted and unique");
+        }
+        previous = Some(entry.index);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -445,11 +673,15 @@ pub struct Provenance {
 pub enum ProofStatus {
     Exact,
     WithinTolerance,
+    StructurallyProven,
     HeuristicCandidate,
 }
 
 /// Emit only the KCL subset for which step-redox has an exact lowering.
 /// Unsupported nodes fail explicitly rather than being approximated.
+///
+/// # Errors
+/// Returns an error if the CAD model is invalid or contains geometry that the exact KCL lowering does not support.
 pub fn emit_kcl(model: &CadModel) -> Result<String> {
     model.validate()?;
     let mut emitter = KclEmitter::new(model);
@@ -491,25 +723,27 @@ impl<'a> KclEmitter<'a> {
                     anyhow::anyhow!("KCL emitter currently needs one line polygon")
                 })?;
                 emit_polygon_sketch(&mut self.output, id, &points)?;
-                self.output.push_str(&format!(
-                    "n{} = extrude(p{}, length = {})\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = extrude(p{}, length = {})\n",
                     id.0,
                     id.0,
                     scalar(vector_mm[2])
-                ));
+                )?;
             }
             CadNode::Transform { transform, child } => {
                 let xyz = transform.pure_translation().ok_or_else(|| {
                     anyhow::anyhow!("KCL emitter currently supports translation only")
                 })?;
-                self.output.push_str(&format!(
-                    "n{} = n{} |> translate(xyz = [{}, {}, {}], global = true)\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = n{} |> translate(xyz = [{}, {}, {}], global = true)\n",
                     id.0,
                     child.0,
                     scalar(xyz[0]),
                     scalar(xyz[1]),
                     scalar(xyz[2])
-                ));
+                )?;
             }
             CadNode::Pattern {
                 pattern: PatternSpec::Linear { count, step_mm },
@@ -518,9 +752,12 @@ impl<'a> KclEmitter<'a> {
                 if *count == 0 {
                     bail!("linear pattern count must be at least one");
                 }
-                let distance =
-                    (step_mm[0] * step_mm[0] + step_mm[1] * step_mm[1] + step_mm[2] * step_mm[2])
-                        .sqrt();
+                let distance = f64::mul_add(
+                    step_mm[2],
+                    step_mm[2],
+                    f64::mul_add(step_mm[1], step_mm[1], step_mm[0] * step_mm[0]),
+                )
+                .sqrt();
                 if !distance.is_finite() || distance == 0.0 {
                     bail!("linear pattern step must be finite and nonzero");
                 }
@@ -529,16 +766,16 @@ impl<'a> KclEmitter<'a> {
                     step_mm[1] / distance,
                     step_mm[2] / distance,
                 ];
-                self.output.push_str(&format!(
-                    "n{} = n{} |> patternLinear3d(instances = {}, distance = {}, axis = [{}, {}, {}])\n\n",
+                writeln!(
+                    self.output,
+                    "n{} = n{} |> patternLinear3d(instances = {count}, distance = {}, axis = [{}, {}, {}])\n",
                     id.0,
                     child.0,
-                    count,
                     scalar(distance),
                     scalar(axis[0]),
                     scalar(axis[1]),
                     scalar(axis[2])
-                ));
+                )?;
             }
             unsupported => bail!("KCL emitter does not support node {id:?}: {unsupported:?}"),
         }
@@ -553,23 +790,41 @@ fn emit_polygon_sketch(output: &mut String, id: NodeId, points: &[[f64; 2]]) -> 
         bail!("polygon needs at least three points");
     }
     let first = points[0];
-    output.push_str(&format!(
-        "s{} = startSketchOn(XY)\np{} = startProfile(s{}, at = [{}, {}])\n",
+    writeln!(
+        output,
+        "s{} = startSketchOn(XY)\np{} = startProfile(s{}, at = [{}, {}])",
         id.0,
         id.0,
         id.0,
         scalar(first[0]),
         scalar(first[1])
-    ));
+    )?;
     for pair in points.windows(2) {
-        output.push_str(&format!(
-            "  |> line(end = [{}, {}])\n",
+        writeln!(
+            output,
+            "  |> line(end = [{}, {}])",
             scalar(pair[1][0] - pair[0][0]),
             scalar(pair[1][1] - pair[0][1])
-        ));
+        )?;
     }
     output.push_str("  |> close()\n");
     Ok(())
+}
+
+const F64_MAGNITUDE_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+
+const fn exact_f64_eq(left: f64, right: f64) -> bool {
+    if !left.is_finite() || !right.is_finite() {
+        return false;
+    }
+    let left_bits = left.to_bits();
+    let right_bits = right.to_bits();
+    left_bits == right_bits
+        || (left_bits & F64_MAGNITUDE_MASK == 0 && right_bits & F64_MAGNITUDE_MASK == 0)
+}
+
+const fn exact_point2_eq(left: [f64; 2], right: [f64; 2]) -> bool {
+    exact_f64_eq(left[0], right[0]) && exact_f64_eq(left[1], right[1])
 }
 
 fn scalar(value: f64) -> String {
@@ -637,16 +892,85 @@ mod tests {
     }
 
     #[test]
-    fn fallback_is_deliberately_expensive() -> Result<()> {
-        let mut model = CadModel::new();
-        let fallback = model.add_node(CadNode::BrepFallback(BrepFallback {
-            source_entity_ids: vec![1, 2, 3],
-            estimated_faces: 100,
-            estimated_edges: 300,
-            estimated_control_points: 1_000,
-        }));
-        model.add_root(fallback)?;
-        assert!(model.complexity_score(fallback)? > 2_000);
+    fn model_rejects_unary_boolean() {
+        let model = CadModel {
+            nodes: vec![
+                CadNode::Primitive(Primitive::Box {
+                    size_mm: [1.0, 1.0, 1.0],
+                }),
+                CadNode::Boolean {
+                    op: BooleanOp::Difference,
+                    children: vec![NodeId(0)],
+                },
+            ],
+            roots: vec![NodeId(1)],
+            provenance: BTreeMap::new(),
+        };
+        assert!(model.validate().is_err());
+    }
+
+    #[test]
+    fn model_rejects_invalid_sweep_paths() -> Result<()> {
+        let profile = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])?;
+        for path in [
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: Vec::new(),
+                closed: false,
+            },
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: vec![SweepSegment3d::Translation {
+                    vector_mm: [0.0, 0.0, 0.0],
+                }],
+                closed: false,
+            },
+            SweepPath3d {
+                initial_transform: RigidTransform::identity(),
+                segments: vec![SweepSegment3d::Rotation {
+                    axis: Axis3 {
+                        origin_mm: [0.0, 0.0, 0.0],
+                        direction: [0.0, 0.0, 0.0],
+                    },
+                    angle_rad: 1.0,
+                }],
+                closed: false,
+            },
+        ] {
+            let model = CadModel {
+                nodes: vec![CadNode::Sweep {
+                    profile: profile.clone(),
+                    path,
+                }],
+                roots: vec![NodeId(0)],
+                provenance: BTreeMap::new(),
+            };
+            assert!(model.validate().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn model_rejects_incompatible_loft_sections() -> Result<()> {
+        let triangle = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])?;
+        let square = Profile2d::polygon(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])?;
+        let model = CadModel {
+            nodes: vec![CadNode::Loft {
+                sections: vec![
+                    LoftSection {
+                        profile: triangle,
+                        transform: RigidTransform::identity(),
+                    },
+                    LoftSection {
+                        profile: square,
+                        transform: RigidTransform::translation_mm([0.0, 0.0, 1.0]),
+                    },
+                ],
+            }],
+            roots: vec![NodeId(0)],
+            provenance: BTreeMap::new(),
+        };
+        assert!(model.validate().is_err());
         Ok(())
     }
 

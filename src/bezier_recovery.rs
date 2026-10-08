@@ -1,12 +1,14 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::step_entities::{entity_ref_list, integer_list, integer_value, numeric_list};
+use crate::step_graph::{entity_id, visit_entity_refs};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct BezierRecoveryStats {
+pub struct BezierRecoveryStats {
     pub curves_recovered: usize,
 }
 
-pub(crate) fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRecoveryStats {
+pub fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRecoveryStats {
     let mut stats = BezierRecoveryStats::default();
     if entities.is_empty() {
         return stats;
@@ -85,11 +87,7 @@ fn is_single_span_bezier(record: &Record) -> bool {
     let Some(knots) = numeric_list(&params[7]) else {
         return false;
     };
-    if knots.len() != 2 || !knots.iter().all(|x| x.is_finite()) || knots[0] == knots[1] {
-        return false;
-    }
-
-    true
+    !(knots.len() != 2 || !knots.iter().all(|x| x.is_finite()) || knots[0] == knots[1])
 }
 
 fn parameter_usage_is_safe(
@@ -157,82 +155,10 @@ fn inbound_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
     out
 }
 
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-fn integer_value(param: &Parameter) -> Option<i64> {
-    match param {
-        Parameter::Integer(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn integer_list(param: &Parameter) -> Option<Vec<i64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(integer_value).collect()
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => Some(*value as f64),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ruststep::ast::Name;
 
     fn r(id: u64) -> Parameter {
         Parameter::Ref(Name::Entity(id))
@@ -267,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_exact_clamped_single_span() {
+    fn recovers_exact_clamped_single_span() -> anyhow::Result<()> {
         let mut e = vec![
             spline(1, vec![4, 4], vec![3.0, 4.0]),
             simple(
@@ -285,13 +211,14 @@ mod tests {
         let s = recover_exact_bezier_curves(&mut e);
         assert_eq!(s.curves_recovered, 1);
         let EntityInstance::Simple { record, .. } = &e[0] else {
-            panic!();
+            anyhow::bail!("unexpected test variant");
         };
         assert_eq!(record.name, "BEZIER_CURVE");
         let Parameter::List(p) = &record.parameter else {
-            panic!();
+            anyhow::bail!("unexpected test variant");
         };
         assert_eq!(p.len(), 6);
+        Ok(())
     }
 
     #[test]

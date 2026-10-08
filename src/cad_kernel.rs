@@ -16,15 +16,28 @@ pub struct KernelSummary {
 pub trait CadKernel {
     type Evaluated;
 
+    /// Evaluate one canonical CAD root in the backend.
+    ///
+    /// # Errors
+    /// Returns an error when the model cannot be represented or evaluated by this kernel.
     fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated>;
+
     fn summarize(&self, evaluated: &Self::Evaluated) -> KernelSummary;
+
+    /// Serialize an evaluated shape as a STEP exchange.
+    ///
+    /// # Errors
+    /// Returns an error when the evaluated topology cannot be serialized as STEP.
     fn to_step(&self, evaluated: &Self::Evaluated) -> Result<String>;
 }
 
 #[cfg(feature = "cad-kernel-monstertruck")]
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
-    use crate::cad_ir::{Axis3, CadModel, CadNode, Curve2d, NodeId, Profile2d, RigidTransform};
+    use crate::cad_ir::{
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Primitive, Profile2d,
+        RigidTransform, SweepPath3d, SweepSegment3d,
+    };
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::*;
@@ -60,6 +73,72 @@ pub mod monstertruck {
 
     fn revolve_profile(profile: &Profile2d, axis: Axis3, angle_rad: f64) -> Result<Solid> {
         revolve_wires(profile_wires(profile)?, axis, angle_rad)
+    }
+
+    fn sweep_profile(profile: &Profile2d, path: &SweepPath3d) -> Result<Solid> {
+        if path.segments.is_empty() {
+            bail!("sweep path must contain at least one segment");
+        }
+        let face = profile::attach_plane_normalized(profile_wires(profile)?)?;
+        let face = builder::transformed(&face, rigid_matrix(&path.initial_transform));
+        let segments = path.segments.iter().map(|segment| match segment {
+            SweepSegment3d::Translation { vector_mm } => {
+                builder::CompositeSweepSegment::Translation(Vector3::new(
+                    vector_mm[0],
+                    vector_mm[1],
+                    vector_mm[2],
+                ))
+            }
+            SweepSegment3d::Rotation { axis, angle_rad } => {
+                builder::CompositeSweepSegment::Rotation {
+                    origin: Point3::new(axis.origin_mm[0], axis.origin_mm[1], axis.origin_mm[2]),
+                    axis: Vector3::new(axis.direction[0], axis.direction[1], axis.direction[2]),
+                    angle: Rad(*angle_rad),
+                    division: 1,
+                }
+            }
+        });
+        if path.closed {
+            Ok(builder::composite_closed_sweep(&face, segments)?)
+        } else {
+            Ok(builder::composite_sweep(&face, segments)?)
+        }
+    }
+
+    fn loft_sections(sections: &[LoftSection]) -> Result<Solid> {
+        if sections.len() < 2 {
+            bail!("loft needs at least two sections");
+        }
+        let wires = sections
+            .iter()
+            .map(|section| {
+                let mut wires = profile_wires(&section.profile)?;
+                if wires.len() != 1 {
+                    bail!("Monstertruck loft currently supports one loop per section");
+                }
+                let wire = wires
+                    .pop()
+                    .ok_or_else(|| anyhow::anyhow!("missing loft section wire"))?;
+                Ok(builder::transformed(
+                    &wire,
+                    rigid_matrix(&section.transform),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let first = wires
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("missing first loft wire"))?
+            .clone();
+        let last = wires
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("missing last loft wire"))?
+            .clone();
+        let start_cap = profile::attach_plane_normalized(vec![first])?;
+        let end_cap = profile::attach_plane_normalized(vec![last])?;
+        let mut shell: Shell = builder::try_skin_wires(&wires)?;
+        shell.push(start_cap.inverse());
+        shell.push(end_cap);
+        Ok(Solid::try_new(vec![shell])?)
     }
 
     fn revolve_profile_transformed(
@@ -123,8 +202,12 @@ pub mod monstertruck {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, edge)| {
+                    let curve = edge.oriented_curve();
+                    let (start, end) = curve.range_tuple();
+                    let midpoint = curve.evaluate((start + end) * 0.5);
                     (point_axis_distance(edge.front().point(), origin, direction) <= 1.0e-9
-                        && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9)
+                        && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9
+                        && point_axis_distance(midpoint, origin, direction) <= 1.0e-9)
                         .then_some(index)
                 })
                 .collect::<Vec<_>>();
@@ -148,7 +231,7 @@ pub mod monstertruck {
             }
 
             let shell =
-                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 4);
+                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 2);
             return Ok(Solid::try_new(vec![shell])?);
         }
 
@@ -398,8 +481,105 @@ pub mod monstertruck {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
     }
 
+    const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-6;
+
+    fn evaluate_boolean(model: &CadModel, op: BooleanOp, children: &[NodeId]) -> Result<Solid> {
+        let Some((&first, rest)) = children.split_first() else {
+            bail!("boolean node needs at least one child");
+        };
+        let mut result = evaluate_node(model, first)?;
+        for (stage, &child) in rest.iter().enumerate() {
+            let rhs = evaluate_node(model, child)?;
+            if matches!(op, BooleanOp::Union) {
+                let lb = result.boundaries();
+                let rb = rhs.boundaries();
+                eprintln!(
+                    "DEBUG_OR stage {} child {:?} lhs shells={} faces={} consistent={} rhs shells={} faces={} consistent={}",
+                    stage + 1,
+                    child,
+                    lb.len(),
+                    lb.iter().map(|shell| shell.len()).sum::<usize>(),
+                    result.is_geometric_consistent(),
+                    rb.len(),
+                    rb.iter().map(|shell| shell.len()).sum::<usize>(),
+                    rhs.is_geometric_consistent(),
+                );
+            }
+            result = match op {
+                BooleanOp::Union => monstertruck_solid::or(&result, &rhs, BOOLEAN_TOLERANCE_MM)?,
+                BooleanOp::Intersection => {
+                    monstertruck_solid::and(&result, &rhs, BOOLEAN_TOLERANCE_MM)?
+                }
+                BooleanOp::Difference => {
+                    match monstertruck_solid::difference(&result, &rhs, BOOLEAN_TOLERANCE_MM) {
+                        Ok(solid) => solid,
+                        Err(error) => {
+                            #[cfg(test)]
+                            for tolerance in [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 5.0e-2] {
+                                match monstertruck_solid::difference(&result, &rhs, tolerance) {
+                                    Ok(_) => eprintln!(
+                                        "Monstertruck difference succeeds at tolerance {tolerance:.1e}"
+                                    ),
+                                    Err(retry_error) => eprintln!(
+                                        "Monstertruck difference still fails at tolerance {tolerance:.1e}: {retry_error}"
+                                    ),
+                                }
+                            }
+                            return Err(error.into());
+                        }
+                    }
+                }
+            };
+        }
+        Ok(result)
+    }
+
+    fn primitive_solid(primitive: &Primitive) -> Result<Solid> {
+        match primitive {
+            Primitive::Box { size_mm } => {
+                let [x, y, z] = *size_mm;
+                if [x, y, z]
+                    .into_iter()
+                    .any(|value| !value.is_finite() || value <= 0.0)
+                {
+                    bail!("box dimensions must be finite and positive");
+                }
+                let vertex = builder::vertex(Point3::origin());
+                let edge = builder::extrude(&vertex, Vector3::new(x, 0.0, 0.0));
+                let face = builder::extrude(&edge, Vector3::new(0.0, y, 0.0));
+                Ok(builder::extrude(&face, Vector3::new(0.0, 0.0, z)))
+            }
+            Primitive::Cylinder {
+                radius_mm,
+                height_mm,
+            } => {
+                if !radius_mm.is_finite()
+                    || *radius_mm <= 0.0
+                    || !height_mm.is_finite()
+                    || *height_mm <= 0.0
+                {
+                    bail!("cylinder dimensions must be finite and positive");
+                }
+                let vertex = builder::vertex(Point3::new(0.0, 0.0, *radius_mm));
+                let circle = builder::revolve(
+                    &vertex,
+                    Point3::origin(),
+                    Vector3::unit_y(),
+                    builder::SweepAngle::Closed,
+                    2,
+                );
+                let disk = profile::attach_plane_normalized(vec![circle])?;
+                Ok(builder::extrude(&disk, Vector3::new(0.0, *height_mm, 0.0)))
+            }
+            Primitive::Sphere { .. } => {
+                bail!("Monstertruck backend does not yet evaluate full-sphere primitives")
+            }
+        }
+    }
+
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
         match model.node(root)? {
+            CadNode::Primitive(primitive) => primitive_solid(primitive),
             CadNode::Extrude { profile, vector_mm } => {
                 if vector_mm[0] != 0.0 || vector_mm[1] != 0.0 {
                     bail!("Monstertruck backend currently supports local Z extrusion only");
@@ -411,6 +591,9 @@ pub mod monstertruck {
                 axis,
                 angle_rad,
             } => revolve_profile(profile, *axis, *angle_rad),
+            CadNode::Sweep { profile, path } => sweep_profile(profile, path),
+            CadNode::Loft { sections } => loft_sections(sections),
+            CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
                     profile,
@@ -464,7 +647,10 @@ pub mod monstertruck {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::cad_ir::{Axis3, CadNode, Curve2d, Profile2d, ProfileLoop};
+        use crate::cad_ir::{
+            Axis3, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, RigidTransform,
+            SweepPath3d, SweepSegment3d,
+        };
 
         fn box_model() -> Result<(CadModel, NodeId)> {
             let mut model = CadModel::new();
@@ -476,6 +662,35 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
             Ok((model, root))
+        }
+
+        #[test]
+        fn evaluates_tapered_rectangular_loft() -> Result<()> {
+            let mut model = CadModel::new();
+            let base =
+                Profile2d::polygon(vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])?;
+            let end = Profile2d::polygon(vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])?;
+            let root = model.add_node(CadNode::Loft {
+                sections: vec![
+                    LoftSection {
+                        profile: base,
+                        transform: RigidTransform::identity(),
+                    },
+                    LoftSection {
+                        profile: end,
+                        transform: RigidTransform::translation_mm([0.0, 0.0, 2.0]),
+                    },
+                ],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert_eq!(summary.faces, 6);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+            Ok(())
         }
 
         fn curved_profile_model(curve: Curve2d) -> Result<(CadModel, NodeId)> {
@@ -514,6 +729,116 @@ pub mod monstertruck {
             let step = kernel.to_step(&evaluated)?;
             assert!(step.contains(expected_step_fragment));
             ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_exact_line_arc_line_sweep() -> Result<()> {
+            let mut model = CadModel::new();
+            let profile = Profile2d::polygon(vec![
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ])?;
+            let root = model.add_node(CadNode::Sweep {
+                profile,
+                path: SweepPath3d {
+                    initial_transform: RigidTransform::translation_mm([2.0, 0.0, 4.0]),
+                    closed: false,
+                    segments: vec![
+                        SweepSegment3d::Translation {
+                            vector_mm: [0.0, 0.0, -4.0],
+                        },
+                        SweepSegment3d::Rotation {
+                            axis: Axis3 {
+                                origin_mm: [0.0, 0.0, 0.0],
+                                direction: [0.0, 1.0, 0.0],
+                            },
+                            angle_rad: std::f64::consts::FRAC_PI_2,
+                        },
+                        SweepSegment3d::Translation {
+                            vector_mm: [-4.0, 0.0, 0.0],
+                        },
+                    ],
+                },
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert_eq!(summary.faces, 14);
+
+            let step = kernel.to_step(&evaluated)?;
+            ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_adjacent_cylinders_union() -> Result<()> {
+            let mut model = CadModel::new();
+            let first = model.add_node(CadNode::Primitive(Primitive::Cylinder {
+                radius_mm: 1.0,
+                height_mm: 1.0,
+            }));
+            let second_body = model.add_node(CadNode::Primitive(Primitive::Cylinder {
+                radius_mm: 1.0,
+                height_mm: 1.0,
+            }));
+            let second = model.add_node(CadNode::Transform {
+                transform: RigidTransform::translation_mm([0.0, 1.0, 0.0]),
+                child: second_body,
+            });
+            let root = model.add_node(CadNode::Boolean {
+                op: BooleanOp::Union,
+                children: vec![first, second],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_boolean_difference() -> Result<()> {
+            use crate::cad_ir::BooleanOp;
+
+            let mut model = CadModel::new();
+            let base = model.add_node(CadNode::Extrude {
+                profile: Profile2d::polygon(vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 6.0],
+                    [0.0, 6.0],
+                ])?,
+                vector_mm: [0.0, 0.0, 2.0],
+            });
+            let cutter_body = model.add_node(CadNode::Extrude {
+                profile: Profile2d::polygon(vec![[3.0, 2.0], [7.0, 2.0], [7.0, 4.0], [3.0, 4.0]])?,
+                vector_mm: [0.0, 0.0, 4.0],
+            });
+            let cutter = model.add_node(CadNode::Transform {
+                transform: RigidTransform::translation_mm([0.0, 0.0, -1.0]),
+                child: cutter_body,
+            });
+            let root = model.add_node(CadNode::Boolean {
+                op: BooleanOp::Difference,
+                children: vec![base, cutter],
+            });
+            model.add_root(root)?;
+
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert!(summary.faces >= 8);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
             Ok(())
         }
 
@@ -768,10 +1093,10 @@ pub mod monstertruck {
 
             let fragment = crate::cad_recovery::recover_solid_extrusion_fragment(&recovered[0])?;
             let CadNode::Transform { child, .. } = fragment.model.node(fragment.root)? else {
-                panic!("expected transform root");
+                bail!("expected transform root");
             };
             let CadNode::Extrude { profile, .. } = fragment.model.node(*child)? else {
-                panic!("expected extrusion child");
+                bail!("expected extrusion child");
             };
             assert_eq!(profile.loops.len(), 2);
 
@@ -921,7 +1246,7 @@ pub mod monstertruck {
             model.add_root(patterned)?;
 
             let error = match MonstertruckKernel.evaluate(&model, patterned) {
-                Ok(_) => panic!("unimplemented pattern unexpectedly evaluated"),
+                Ok(_) => bail!("unimplemented pattern unexpectedly evaluated"),
                 Err(error) => error,
             };
             assert!(error.to_string().contains("does not yet evaluate"));

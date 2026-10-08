@@ -12,9 +12,9 @@ enum AnchorArg {
 impl From<AnchorArg> for step_redox::CountAnchor {
     fn from(value: AnchorArg) -> Self {
         match value {
-            AnchorArg::Start => step_redox::CountAnchor::Start,
-            AnchorArg::Center => step_redox::CountAnchor::Center,
-            AnchorArg::End => step_redox::CountAnchor::End,
+            AnchorArg::Start => Self::Start,
+            AnchorArg::Center => Self::Center,
+            AnchorArg::End => Self::End,
         }
     }
 }

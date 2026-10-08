@@ -1,4 +1,6 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::step_entities::{cartesian_point, number as numeric_value};
+use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -19,6 +21,8 @@ pub struct PeriodicChainPattern {
     pub faces_without_geometry: usize,
     pub nonmanifold_edges: usize,
     pub cross_site_edges: usize,
+    pub nonlocal_cross_site_edges: usize,
+    pub adjacent_site_edge_counts: Vec<usize>,
     pub site_face_counts: Vec<usize>,
     pub interior_site_face_count: usize,
     pub gap_face_counts: Vec<usize>,
@@ -73,6 +77,7 @@ struct LatticeCandidate {
     pitch_ticks: i64,
     sites: usize,
     votes: usize,
+    site_family_rows: Vec<Vec<(i64, u64)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,8 +92,16 @@ struct Partition {
     score: [i64; 8],
 }
 
+#[must_use]
 pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainPattern> {
     let index = build_index(entities);
+    detect_periodic_chains_with_index(entities, &index)
+}
+
+pub(crate) fn detect_periodic_chains_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<PeriodicChainPattern> {
     let solids = entities
         .iter()
         .filter_map(|entity| {
@@ -99,7 +112,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 
     let mut out = Vec::new();
     for solid in solids {
-        let Some(face_ids) = solid_faces(solid, entities, &index) else {
+        let Some(face_ids) = solid_faces(solid, entities, index) else {
             continue;
         };
         if face_ids.len() < 16 {
@@ -108,7 +121,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 
         let mut geoms = HashMap::<u64, FaceGeom>::new();
         for &face in &face_ids {
-            if let Some(geom) = face_geometry(face, entities, &index) {
+            if let Some(geom) = face_geometry(face, entities, index) {
                 geoms.insert(face, geom);
             }
         }
@@ -143,7 +156,7 @@ pub fn detect_periodic_chains(entities: &[EntityInstance]) -> Vec<PeriodicChainP
 }
 
 fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
-    let mut votes = HashMap::<(usize, i64, usize), usize>::new();
+    let mut families = HashMap::<(usize, i64, usize), Vec<Vec<(i64, u64)>>>::new();
 
     for axis in 0..3 {
         let other = other_axes(axis);
@@ -180,18 +193,22 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
             if row.windows(2).any(|pair| pair[1].0 - pair[0].0 != pitch) {
                 continue;
             }
-            *votes.entry((axis, pitch, row.len())).or_insert(0) += 1;
+            families
+                .entry((axis, pitch, row.len()))
+                .or_default()
+                .push(row.clone());
         }
     }
 
-    votes
+    families
         .into_iter()
         .map(
-            |((axis_index, pitch_ticks, sites), votes)| LatticeCandidate {
+            |((axis_index, pitch_ticks, sites), site_family_rows)| LatticeCandidate {
                 axis_index,
                 pitch_ticks,
                 sites,
-                votes,
+                votes: site_family_rows.len(),
+                site_family_rows,
             },
         )
         .max_by(|a, b| {
@@ -201,7 +218,6 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
                 .then_with(|| b.pitch_ticks.cmp(&a.pitch_ticks))
         })
 }
-
 fn choose_partition(
     geoms: &HashMap<u64, FaceGeom>,
     candidate: &LatticeCandidate,
@@ -261,17 +277,141 @@ fn choose_partition(
 
     let mut best: Option<Partition> = None;
     for (observation_score, centers) in windows {
-        let mut partition = classify_faces(geoms, &centers, axis, pitch)?;
+        let mut partition = classify_faces(geoms, &centers, axis, pitch, candidate)?;
         partition.score = partition_score(geoms, &partition, axis, observation_score);
         if best
             .as_ref()
-            .map(|existing| partition.score > existing.score)
-            .unwrap_or(true)
+            .is_none_or(|existing| partition.score > existing.score)
         {
             best = Some(partition);
         }
     }
+    if let Some(partition) = best.as_mut() {
+        promote_periodic_overlays(geoms, candidate, partition);
+    }
     best
+}
+
+fn promote_periodic_overlays(
+    geoms: &HashMap<u64, FaceGeom>,
+    candidate: &LatticeCandidate,
+    partition: &mut Partition,
+) {
+    let sites = partition.centers.len();
+    let min_run = sites.saturating_sub(2).max(MIN_FAMILY_INSTANCES);
+    if sites < MIN_FAMILY_INSTANCES || candidate.pitch_ticks <= 0 {
+        return;
+    }
+
+    let Some(pitch_mm) = crate::numeric::exact_i64_to_f64(candidate.pitch_ticks) else {
+        return;
+    };
+    let pitch_mm = pitch_mm * GEOM_TOL_MM;
+    let axis = candidate.axis_index;
+    let other = other_axes(axis);
+    let center_ticks = partition
+        .centers
+        .iter()
+        .map(|&center| quantize_mm(center))
+        .collect::<Vec<_>>();
+    let mut rows = HashMap::<(IntrinsicFaceKey, i64, i64), Vec<(i64, u64)>>::new();
+
+    for &face in &partition.fixed {
+        let geom = &geoms[&face];
+        if geom.span[axis] > pitch_mm + GEOM_TOL_MM {
+            continue;
+        }
+        let key = IntrinsicFaceKey {
+            surface_type: geom.surface_type.clone(),
+            edges: geom.edges.len(),
+            bounds: geom.bounds,
+            same_sense: geom.same_sense,
+            support_axis: geom.support_axis,
+            local_points: geom.local_points.clone(),
+        };
+        rows.entry((
+            key,
+            quantize_mm(geom.center[other[0]]),
+            quantize_mm(geom.center[other[1]]),
+        ))
+        .or_default()
+        .push((quantize_mm(geom.center[axis]), face));
+    }
+
+    let mut promote = Vec::<(u64, usize)>::new();
+    for row in rows.values_mut() {
+        row.sort_unstable_by_key(|entry| entry.0);
+        row.dedup_by_key(|entry| entry.0);
+
+        let mut start = 0usize;
+        while start < row.len() {
+            let mut end = start + 1;
+            while end < row.len() && row[end].0 - row[end - 1].0 == candidate.pitch_ticks {
+                end += 1;
+            }
+            let run = &row[start..end];
+            if run.len() >= min_run
+                && run.len() <= sites
+                && let Some(site_start) =
+                    overlay_site_alignment(run, &center_ticks, sites, candidate.pitch_ticks)
+            {
+                for (index, &(_, face)) in run.iter().enumerate() {
+                    promote.push((face, site_start + index));
+                }
+            }
+            start = end;
+        }
+    }
+
+    promote.sort_unstable();
+    if promote.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return;
+    }
+    for (face, site) in promote {
+        if !partition.fixed.remove(&face) {
+            continue;
+        }
+        partition.site_of.insert(face, site);
+        partition.sites[site].push(face);
+    }
+    for site in &mut partition.sites {
+        site.sort_unstable();
+    }
+}
+
+fn overlay_site_alignment(
+    run: &[(i64, u64)],
+    center_ticks: &[i64],
+    sites: usize,
+    pitch_ticks: i64,
+) -> Option<usize> {
+    let mut best: Option<(i64, usize)> = None;
+    let mut ambiguous = false;
+    for (site_start, &site_tick) in center_ticks.iter().take(sites - run.len() + 1).enumerate() {
+        let score = (run[0].0 - site_tick).abs();
+        if score > pitch_ticks / 2 + 1 {
+            continue;
+        }
+        match best {
+            None => {
+                best = Some((score, site_start));
+                ambiguous = false;
+            }
+            Some((best_score, _)) if score < best_score => {
+                best = Some((score, site_start));
+                ambiguous = false;
+            }
+            Some((best_score, best_start)) if score == best_score && site_start != best_start => {
+                ambiguous = true;
+            }
+            Some(_) => {}
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        best.map(|(_, site_start)| site_start)
+    }
 }
 
 fn classify_faces(
@@ -279,33 +419,46 @@ fn classify_faces(
     centers: &[f64],
     axis: usize,
     pitch: f64,
+    candidate: &LatticeCandidate,
 ) -> Option<Partition> {
     let sites_count = centers.len();
     if sites_count < 2 {
         return None;
     }
 
-    let half = pitch * 0.5 + GEOM_TOL_MM;
     let mut site_of = HashMap::<u64, usize>::new();
     let mut sites = vec![Vec::<u64>::new(); sites_count];
     let mut stretch = HashSet::<u64>::new();
     let mut remaining = geoms.keys().copied().collect::<HashSet<_>>();
 
-    for geom in geoms.values() {
-        let candidates = centers
+    // The lattice inference already proved exact translated face families. Use
+    // those families as site membership instead of treating every face that
+    // happens to fit inside a site window as periodic. The latter swallows
+    // unique connector end-cap/housing geometry into the end sites.
+    let center_ticks = centers.iter().map(|&x| quantize_mm(x)).collect::<Vec<_>>();
+    for row in &candidate.site_family_rows {
+        if row.len() != sites_count {
+            continue;
+        }
+        let offset = row[0].0 - center_ticks[0];
+        if !row
             .iter()
             .enumerate()
-            .filter_map(|(index, &center)| {
-                (geom.lo[axis] >= center - half && geom.hi[axis] <= center + half).then_some(index)
-            })
-            .collect::<Vec<_>>();
+            .all(|(site, (tick, _))| *tick - center_ticks[site] == offset)
+        {
+            continue;
+        }
+        for (site, &(_, face)) in row.iter().enumerate() {
+            if site_of.insert(face, site).is_some() {
+                return None;
+            }
+            sites[site].push(face);
+            remaining.remove(&face);
+        }
+    }
 
-        if candidates.len() == 1 {
-            let site = candidates[0];
-            site_of.insert(geom.id, site);
-            sites[site].push(geom.id);
-            remaining.remove(&geom.id);
-        } else if geom.span[axis] > pitch + GEOM_TOL_MM {
+    for geom in geoms.values() {
+        if remaining.contains(&geom.id) && geom.span[axis] > pitch + GEOM_TOL_MM {
             stretch.insert(geom.id);
             remaining.remove(&geom.id);
         }
@@ -313,7 +466,7 @@ fn classify_faces(
 
     let mids = centers
         .windows(2)
-        .map(|pair| (pair[0] + pair[1]) * 0.5)
+        .map(|pair| f64::midpoint(pair[0], pair[1]))
         .collect::<Vec<_>>();
     let mut gap_candidates = vec![Vec::<u64>::new(); mids.len()];
 
@@ -407,7 +560,10 @@ fn partition_score(
     let site_sym = symmetric_abs_difference(&site_counts) as i64;
     let gap_sym = symmetric_abs_difference(&gap_counts) as i64;
 
-    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    let midpoint = f64::midpoint(
+        partition.centers[0],
+        partition.centers[partition.centers.len() - 1],
+    );
     let mut negative = 0usize;
     let mut positive = 0usize;
     let mut middle = 0usize;
@@ -451,16 +607,24 @@ fn build_pattern(
     let interior_site_face_count = mode_value(&site_face_counts).unwrap_or(0);
     let interior_gap_face_count = mode_value(&gap_face_counts).unwrap_or(0);
 
-    let midpoint = (partition.centers[0] + partition.centers[partition.centers.len() - 1]) * 0.5;
+    // Positive-end editing preserves the prefix through site N-3 and moves
+    // the tail beginning at the gap before site N-2. Classify fixed geometry
+    // against that actual edit seam, not the whole-chain midpoint: a central
+    // key/housing feature must remain stationary even if it happens to lie on
+    // the positive half of the model.
+    let tail_split = f64::midpoint(
+        partition.centers[partition.centers.len() - 3],
+        partition.centers[partition.centers.len() - 2],
+    );
     let mut fixed_negative = Vec::new();
     let mut fixed_middle = Vec::new();
     let mut fixed_positive = Vec::new();
     for &face in &partition.fixed {
         let x = geoms[&face].center[axis_index];
-        if x < midpoint - GEOM_TOL_MM {
-            fixed_negative.push(face);
-        } else if x > midpoint + GEOM_TOL_MM {
+        if x > tail_split + GEOM_TOL_MM {
             fixed_positive.push(face);
+        } else if x < tail_split - GEOM_TOL_MM {
+            fixed_negative.push(face);
         } else {
             fixed_middle.push(face);
         }
@@ -481,6 +645,8 @@ fn build_pattern(
     let mut gap_adj = vec![BTreeMap::<String, usize>::new(); partition.gaps.len()];
     let mut nonmanifold_edges = 0usize;
     let mut cross_site_edges = 0usize;
+    let mut nonlocal_cross_site_edges = 0usize;
+    let mut adjacent_site_edge_counts = vec![0usize; partition.sites.len().saturating_sub(1)];
 
     for faces in edge_faces.values() {
         if faces.len() != 2 {
@@ -500,6 +666,15 @@ fn build_pattern(
 
         if ca.0 == "site" && cb.0 == "site" && ca.1 != cb.1 {
             cross_site_edges += 1;
+            if let (Some(a_site), Some(b_site)) = (ca.1, cb.1) {
+                if a_site.abs_diff(b_site) == 1 {
+                    adjacent_site_edge_counts[a_site.min(b_site)] += 1;
+                } else {
+                    nonlocal_cross_site_edges += 1;
+                }
+            } else {
+                nonlocal_cross_site_edges += 1;
+            }
         }
 
         add_adjacency(&mut site_adj, &mut gap_adj, ca, cb);
@@ -509,9 +684,11 @@ fn build_pattern(
     let periodic_faces = partition.site_of.len() + partition.gap_of.len();
     let repeat_coverage_ratio = periodic_faces as f64 / all_face_ids.len().max(1) as f64;
 
-    let site_symmetric = symmetric_abs_difference(&site_face_counts) == 0;
+    // The editor preserves both terminal regions and clones only an interior
+    // (gap + site) unit. Terminal site/end-cap geometry may therefore be
+    // intentionally asymmetric; requiring whole-chain mirror symmetry rejects
+    // valid counted parts such as keyed or end-featured connector headers.
     let gap_symmetric = symmetric_abs_difference(&gap_face_counts) == 0;
-    let fixed_symmetric = fixed_negative.len() == fixed_positive.len();
     let gap_consistent = gap_face_counts
         .iter()
         .all(|&count| count == interior_gap_face_count);
@@ -525,6 +702,10 @@ fn build_pattern(
             .all(|&count| count == interior_site_face_count)
     };
 
+    let adjacent_site_consistent = adjacent_site_edge_counts
+        .first()
+        .is_none_or(|first| adjacent_site_edge_counts.iter().all(|count| count == first));
+
     let complete_partition = faces_without_geometry == 0
         && partition.site_of.len()
             + partition.gap_of.len()
@@ -535,10 +716,9 @@ fn build_pattern(
     let read_only_proven = candidate.votes >= MIN_LATTICE_FAMILY_VOTES
         && complete_partition
         && nonmanifold_edges == 0
-        && cross_site_edges == 0
-        && site_symmetric
+        && nonlocal_cross_site_edges == 0
+        && adjacent_site_consistent
         && gap_symmetric
-        && fixed_symmetric
         && fixed_middle.is_empty()
         && gap_consistent
         && interior_consistent
@@ -559,6 +739,8 @@ fn build_pattern(
         faces_without_geometry,
         nonmanifold_edges,
         cross_site_edges,
+        nonlocal_cross_site_edges,
+        adjacent_site_edge_counts,
         site_face_counts,
         interior_site_face_count,
         gap_face_counts,
@@ -686,9 +868,9 @@ fn face_geometry(
         }
     }
     let center = [
-        (lo[0] + hi[0]) * 0.5,
-        (lo[1] + hi[1]) * 0.5,
-        (lo[2] + hi[2]) * 0.5,
+        f64::midpoint(lo[0], hi[0]),
+        f64::midpoint(lo[1], hi[1]),
+        f64::midpoint(lo[2], hi[2]),
     ];
     let span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let mut local_points = coords
@@ -809,7 +991,7 @@ fn symmetric_abs_difference(values: &[usize]) -> usize {
         .sum()
 }
 
-fn other_axes(axis: usize) -> [usize; 2] {
+const fn other_axes(axis: usize) -> [usize; 2] {
     match axis {
         0 => [1, 2],
         1 => [0, 2],
@@ -886,29 +1068,6 @@ fn face_edges(
     Some(out)
 }
 
-fn cartesian_point(
-    point: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[f64; 3]> {
-    let record = simple_record(entities.get(*index.get(&point)?)?)?;
-    if record.name != "CARTESIAN_POINT" {
-        return None;
-    }
-    let params = list_params(record)?;
-    let Parameter::List(coords) = params.get(1)? else {
-        return None;
-    };
-    if coords.len() != 3 {
-        return None;
-    }
-    Some([
-        numeric_value(&coords[0])?,
-        numeric_value(&coords[1])?,
-        numeric_value(&coords[2])?,
-    ])
-}
-
 fn list_params(record: &Record) -> Option<&[Parameter]> {
     match &record.parameter {
         Parameter::List(params) => Some(params),
@@ -916,45 +1075,101 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
     }
 }
 
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(value) => Some(*value as f64),
-        Parameter::Real(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(index, entity)| (entity_id(entity), index))
-        .collect()
-}
-
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_face(id: u64, center: [f64; 3]) -> FaceGeom {
+        FaceGeom {
+            id,
+            lo: [center[0] - 1.12, center[1], center[2]],
+            hi: [center[0] + 1.12, center[1], center[2]],
+            center,
+            span: [2.24, 0.0, 0.0],
+            surface_type: "PLANE".to_string(),
+            edges: vec![id * 10, id * 10 + 1, id * 10 + 2, id * 10 + 3],
+            bounds: 1,
+            same_sense: true,
+            support_axis: [0, 0, quantize_dir(1.0)],
+            local_points: vec![[quantize_mm(-1.12), 0, 0], [quantize_mm(1.12), 0, 0]],
+        }
+    }
+
+    #[test]
+    fn promotes_long_exact_overlay_row_into_sites() -> anyhow::Result<()> {
+        let pitch = 2.54;
+        let centers = (0_i32..6).map(|i| f64::from(i) * pitch).collect::<Vec<_>>();
+        let mut geoms = HashMap::new();
+        let mut fixed = HashSet::new();
+        for (index, &center) in centers.iter().take(4).enumerate() {
+            let id = u64::try_from(index)? + 1;
+            geoms.insert(id, test_face(id, [center + 0.4, 3.81, 8.5]));
+            fixed.insert(id);
+        }
+        let candidate = LatticeCandidate {
+            axis_index: 0,
+            pitch_ticks: quantize_mm(pitch),
+            sites: centers.len(),
+            votes: MIN_LATTICE_FAMILY_VOTES,
+            site_family_rows: Vec::new(),
+        };
+        let mut partition = Partition {
+            centers,
+            site_of: HashMap::new(),
+            sites: vec![Vec::new(); 6],
+            gap_of: HashMap::new(),
+            gaps: vec![Vec::new(); 5],
+            stretch: HashSet::new(),
+            fixed,
+            score: [0; 8],
+        };
+
+        promote_periodic_overlays(&geoms, &candidate, &mut partition);
+
+        assert!(partition.fixed.is_empty());
+        assert_eq!(
+            partition.sites.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 1, 1, 1, 0, 0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_half_pitch_overlay_row_stays_fixed() -> anyhow::Result<()> {
+        let pitch = 2.54;
+        let centers = (0_i32..6).map(|i| f64::from(i) * pitch).collect::<Vec<_>>();
+        let mut geoms = HashMap::new();
+        let mut fixed = HashSet::new();
+        for index in 0_i32..4 {
+            let id = u64::try_from(index)? + 1;
+            let x = pitch * (f64::from(index) + 0.5);
+            geoms.insert(id, test_face(id, [x, 3.81, 8.5]));
+            fixed.insert(id);
+        }
+        let candidate = LatticeCandidate {
+            axis_index: 0,
+            pitch_ticks: quantize_mm(pitch),
+            sites: centers.len(),
+            votes: MIN_LATTICE_FAMILY_VOTES,
+            site_family_rows: Vec::new(),
+        };
+        let mut partition = Partition {
+            centers,
+            site_of: HashMap::new(),
+            sites: vec![Vec::new(); 6],
+            gap_of: HashMap::new(),
+            gaps: vec![Vec::new(); 5],
+            stretch: HashSet::new(),
+            fixed: fixed.clone(),
+            score: [0; 8],
+        };
+
+        promote_periodic_overlays(&geoms, &candidate, &mut partition);
+
+        assert_eq!(partition.fixed, fixed);
+        assert!(partition.sites.iter().all(Vec::is_empty));
+        Ok(())
+    }
 
     #[test]
     fn symmetry_metric_is_zero_for_palindrome() {

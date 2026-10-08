@@ -1,4 +1,14 @@
-use ruststep::ast::{EntityInstance, Name, Parameter, Record};
+use crate::math3::{canonical_direction, canonical_unit_direction, dot, normalize as normalize3};
+use crate::step_entities::{
+    edge_vertices, entity_ref, entity_ref_list, enumeration_bool as logical_bool,
+    number as numeric_value, numeric_list, oriented_edge_element, oriented_edge_orientation,
+    push_simple, styled_items_by_target as styles_by_target,
+};
+use crate::step_graph::{
+    ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
+    visit_entity_refs,
+};
+use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const POINT_Q: f64 = 1.0e-8;
@@ -6,7 +16,7 @@ const NORMAL_Q: f64 = 1.0e-10;
 const OPPOSITE_DOT: f64 = -1.0 + 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct PartitionRecoveryStats {
+pub struct PartitionRecoveryStats {
     pub components: usize,
     pub solids_merged: usize,
     pub interfaces_removed: usize,
@@ -102,16 +112,13 @@ impl UnionFind {
     }
 }
 
-pub(crate) fn recover_partitioned_bodies(
-    entities: &mut Vec<EntityInstance>,
-) -> PartitionRecoveryStats {
+pub fn recover_partitioned_bodies(entities: &mut Vec<EntityInstance>) -> PartitionRecoveryStats {
     let original = entities.clone();
-    match recover_inner(entities) {
-        Some(stats) => stats,
-        None => {
-            *entities = original;
-            PartitionRecoveryStats::default()
-        }
+    if let Some(stats) = recover_inner(entities) {
+        stats
+    } else {
+        *entities = original;
+        PartitionRecoveryStats::default()
     }
 }
 
@@ -121,7 +128,7 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     }
 
     let index = build_index(entities);
-    let refs_before = entity_ref_map(entities);
+    let refs_before = ReferenceGraph::new(entities);
     let styles_by_target = styles_by_target(entities);
 
     let mut solid_shell = HashMap::new();
@@ -495,19 +502,17 @@ fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecovery
     candidate.extend(old_solids.iter().copied());
     let mut stack: Vec<u64> = old_solids.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        if let Some(children) = refs_before.get(&id) {
-            for &child in children {
-                if candidate.insert(child) {
-                    stack.push(child);
-                }
+        for &child in refs_before.refs(id) {
+            if candidate.insert(child) {
+                stack.push(child);
             }
         }
     }
     let mut seeds = old_solids;
     seeds.extend(old_styles.iter().copied());
 
-    let refs_after = entity_ref_map(entities);
-    let inbound_after = inbound_map(&refs_after);
+    let refs_after = ReferenceGraph::new(entities);
+    let inbound_after = refs_after.inbound();
     let mut delete = HashSet::new();
     loop {
         let mut changed = false;
@@ -710,7 +715,7 @@ fn edge_key(
             let (center, axis) = axis_location_and_axis(placement, entities, index)?;
             Some(EdgeKey::Circle {
                 center: point_key(center)?,
-                axis: direction_key(canonical_axis(axis)?)?,
+                axis: direction_key(canonical_unit_direction(axis, 1.0e-15)?)?,
                 radius: quantize(radius, POINT_Q)?,
                 ends,
             })
@@ -734,7 +739,7 @@ fn plane_key(
     let placement = entity_ref_value(params.get(1)?)?;
     let (point, normal) = axis_location_and_axis(placement, entities, index)?;
     let raw = normalize(normal)?;
-    let canonical = canonical_axis(raw)?;
+    let canonical = canonical_direction(raw);
     Some((
         direction_key(canonical)?,
         quantize(dot(canonical, point), POINT_Q)?,
@@ -804,41 +809,6 @@ fn direction_coords(
     };
     let xyz = numeric_list(params.get(1)?)?;
     (xyz.len() == 3).then(|| [xyz[0], xyz[1], xyz[2]])
-}
-
-fn edge_vertices(
-    edge: u64,
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Option<[u64; 2]> {
-    let record = simple_record(entities.get(*index.get(&edge)?)?)?;
-    if record.name != "EDGE_CURVE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    Some([
-        entity_ref_value(params.get(1)?)?,
-        entity_ref_value(params.get(2)?)?,
-    ])
-}
-
-fn oriented_edge_element(record: &Record) -> Option<u64> {
-    if record.name != "ORIENTED_EDGE" {
-        return None;
-    }
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    entity_ref_value(params.get(3)?)
-}
-
-fn oriented_edge_orientation(record: &Record) -> Option<bool> {
-    let Parameter::List(params) = &record.parameter else {
-        return None;
-    };
-    logical_bool(params.get(4)?)
 }
 
 fn rewrite_edge_vertices(record: &mut Record, uf: &mut UnionFind) -> Option<()> {
@@ -942,33 +912,6 @@ fn replace_and_dedup_direct_ref_lists(param: &mut Parameter, mapping: &HashMap<u
     }
 }
 
-fn styles_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
-    let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let Some(record) = simple_record(entity) else {
-            continue;
-        };
-        if record.name != "STYLED_ITEM" {
-            continue;
-        }
-        let Parameter::List(params) = &record.parameter else {
-            continue;
-        };
-        if params.len() != 3 {
-            continue;
-        }
-        let Some(target) = entity_ref_value(&params[2]) else {
-            continue;
-        };
-        let Some(assignments) = entity_ref_list(&params[1]) else {
-            continue;
-        };
-        out.entry(target).or_default().push((id, assignments));
-    }
-    out
-}
-
 fn direct_refs_of_type(
     entity: &EntityInstance,
     entities: &[EntityInstance],
@@ -986,96 +929,6 @@ fn direct_refs_of_type(
         }
     });
     refs
-}
-
-fn build_index(entities: &[EntityInstance]) -> HashMap<u64, usize> {
-    entities
-        .iter()
-        .enumerate()
-        .map(|(idx, entity)| (entity_id(entity), idx))
-        .collect()
-}
-
-fn entity_ref_map(entities: &[EntityInstance]) -> HashMap<u64, Vec<u64>> {
-    let mut out = HashMap::new();
-    for entity in entities {
-        let id = entity_id(entity);
-        let mut refs = Vec::new();
-        visit_entity_refs(entity, &mut |child| refs.push(child));
-        out.insert(id, refs);
-    }
-    out
-}
-
-fn inbound_map(refs: &HashMap<u64, Vec<u64>>) -> HashMap<u64, Vec<u64>> {
-    let mut out: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (&parent, children) in refs {
-        for &child in children {
-            out.entry(child).or_default().push(parent);
-        }
-    }
-    out
-}
-
-fn simple_record(entity: &EntityInstance) -> Option<&Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-fn simple_record_mut(entity: &mut EntityInstance) -> Option<&mut Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => Some(record),
-        EntityInstance::Complex { .. } => None,
-    }
-}
-
-fn entity_id(entity: &EntityInstance) -> u64 {
-    match entity {
-        EntityInstance::Simple { id, .. } | EntityInstance::Complex { id, .. } => *id,
-    }
-}
-
-fn entity_ref(id: u64) -> Parameter {
-    Parameter::Ref(Name::Entity(id))
-}
-
-fn entity_ref_value(param: &Parameter) -> Option<u64> {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-fn entity_ref_list(param: &Parameter) -> Option<Vec<u64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(entity_ref_value).collect()
-}
-
-fn numeric_value(param: &Parameter) -> Option<f64> {
-    match param {
-        Parameter::Integer(v) => Some(*v as f64),
-        Parameter::Real(v) => Some(*v),
-        _ => None,
-    }
-}
-
-fn numeric_list(param: &Parameter) -> Option<Vec<f64>> {
-    let Parameter::List(items) = param else {
-        return None;
-    };
-    items.iter().map(numeric_value).collect()
-}
-
-fn logical_bool(param: &Parameter) -> Option<bool> {
-    match param {
-        Parameter::Enumeration(v) if v == "T" => Some(true),
-        Parameter::Enumeration(v) if v == "F" => Some(false),
-        _ => None,
-    }
 }
 
 fn point_key(p: [f64; 3]) -> Option<[i64; 3]> {
@@ -1105,71 +958,8 @@ fn quantize(v: f64, q: f64) -> Option<i64> {
     Some(x as i64)
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let n = dot(v, v).sqrt();
-    if !n.is_finite() || n <= 1.0e-15 {
-        return None;
-    }
-    Some([v[0] / n, v[1] / n, v[2] / n])
-}
-
-fn canonical_axis(v: [f64; 3]) -> Option<[f64; 3]> {
-    let mut v = normalize(v)?;
-    for x in v {
-        if x.abs() > 1.0e-12 {
-            if x < 0.0 {
-                v = v.map(|q| -q);
-            }
-            break;
-        }
-    }
-    Some(v)
-}
-
-fn visit_entity_refs(entity: &EntityInstance, f: &mut impl FnMut(u64)) {
-    match entity {
-        EntityInstance::Simple { record, .. } => visit_param_refs(&record.parameter, f),
-        EntityInstance::Complex { subsuper, .. } => {
-            for record in &subsuper.0 {
-                visit_param_refs(&record.parameter, f);
-            }
-        }
-    }
-}
-
-fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
-    match param {
-        Parameter::Ref(Name::Entity(id)) => f(*id),
-        Parameter::List(items) => {
-            for item in items {
-                visit_param_refs(item, f);
-            }
-        }
-        Parameter::Typed { parameter, .. } => visit_param_refs(parameter, f),
-        _ => {}
-    }
-}
-
-fn push_simple(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    name: &str,
-    params: Vec<Parameter>,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    entities.push(EntityInstance::Simple {
-        id,
-        record: Record {
-            name: name.to_string(),
-            parameter: Parameter::List(params),
-        },
-    });
-    id
+    normalize3(v, 1.0e-15)
 }
 
 #[cfg(test)]
@@ -1177,11 +967,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_axis_ignores_sign() {
+    fn canonical_axis_ignores_sign() -> anyhow::Result<()> {
         assert_eq!(
-            direction_key(canonical_axis([1.0, 0.0, 0.0]).unwrap()),
-            direction_key(canonical_axis([-1.0, 0.0, 0.0]).unwrap())
+            direction_key(
+                canonical_unit_direction([1.0, 0.0, 0.0], 1.0e-15)
+                    .ok_or_else(|| anyhow::anyhow!("expected test value"))?
+            ),
+            direction_key(
+                canonical_unit_direction([-1.0, 0.0, 0.0], 1.0e-15)
+                    .ok_or_else(|| anyhow::anyhow!("expected test value"))?
+            )
         );
+        Ok(())
     }
 
     #[test]
