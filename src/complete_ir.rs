@@ -98,21 +98,33 @@ pub(crate) fn recover_complete_ir_exchange(
     let mut revolved_round_tails = Vec::new();
     let mut open_sweeps = Vec::new();
     let mut periodic_chains = Vec::new();
+    let mut patterns = Vec::new();
     let mut body_scan = Vec::new();
 
     for section in &exchange.data {
-        signatures.extend(crate::solid_revolutions::detect_solid_surface_signatures(
+        let index = crate::step_graph::build_index(&section.entities);
+        signatures.extend(
+            crate::solid_revolutions::detect_solid_surface_signatures_with_index(
+                &section.entities,
+                &index,
+            ),
+        );
+        extrusions.extend(crate::solid_extrusions::detect_solid_extrusions_with_index(
             &section.entities,
+            &index,
         ));
-        extrusions.extend(crate::solid_extrusions::detect_solid_extrusions(
-            &section.entities,
-        ));
-        revolutions.extend(crate::solid_revolutions::detect_solid_revolutions(
-            &section.entities,
-        ));
-        radial_slots.extend(crate::solid_revolutions::detect_radial_slot_revolutions(
-            &section.entities,
-        ));
+        revolutions.extend(
+            crate::solid_revolutions::detect_solid_revolutions_with_index(
+                &section.entities,
+                &index,
+            ),
+        );
+        radial_slots.extend(
+            crate::solid_revolutions::detect_radial_slot_revolutions_with_index(
+                &section.entities,
+                &index,
+            ),
+        );
         closed_sweeps.extend(crate::solid_sweeps::detect_closed_round_sweeps(
             &section.entities,
         ));
@@ -122,10 +134,17 @@ pub(crate) fn recover_complete_ir_exchange(
         open_sweeps.extend(crate::solid_sweeps::detect_open_rectangular_sweeps(
             &section.entities,
         ));
-        periodic_chains.extend(crate::periodic_chains::detect_periodic_chains(
+        periodic_chains.extend(crate::periodic_chains::detect_periodic_chains_with_index(
             &section.entities,
+            &index,
         ));
-        body_scan.extend(scan_source_solids(&section.entities));
+        patterns.extend(crate::patterns::detect_instance_patterns_with_index(
+            &section.entities,
+            &index,
+            1.0e-7,
+            4,
+        ));
+        body_scan.extend(scan_source_solids(&section.entities, index));
     }
 
     body_scan.sort_by_key(|solid| solid.solid_id);
@@ -144,7 +163,6 @@ pub(crate) fn recover_complete_ir_exchange(
         .map(SurfaceSignatureSummary::from)
         .collect::<Vec<_>>();
 
-    let (patterns, _, _) = crate::detect_exchange_semantics(&exchange);
     let instance_pattern_diagnostics = patterns;
     let solid_extrusions = recover_solid_extrusion_fragments(&extrusions)?;
     let solid_revolutions = recover_solid_revolution_fragments(&revolutions)?;
@@ -232,8 +250,10 @@ pub(crate) fn recover_complete_ir_exchange(
     })
 }
 
-fn scan_source_solids(entities: &[EntityInstance]) -> Vec<SourceSolidSummary> {
-    let index = crate::step_graph::build_index(entities);
+fn scan_source_solids(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+J -> Vec<SourceSolidSummary> {
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = crate::step_graph::simple_record(entity) else {
@@ -243,8 +263,8 @@ fn scan_source_solids(entities: &[EntityInstance]) -> Vec<SourceSolidSummary> {
             continue;
         }
         let solid_id = crate::step_graph::entity_id(entity);
-        let closure = crate::shape_identity::semantic_solid_closure(solid_id, entities, &index)
-            .unwrap_or_else(|| crate::step_entities::closure_from(solid_id, entities, &index));
+        let closure = crate::shape_identity::semantic_solid_closure(solid_id, entities, index)
+            .unwrap_or_else(|| crate::step_entities::closure_from(solid_id, entities, index));
         let mut faces = 0usize;
         let mut edges = 0usize;
         for id in &closure {
