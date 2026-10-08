@@ -18,6 +18,7 @@ serde_json = "1.0.151"
 monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
 monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
 monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "1ea5d553", optional = true }
+num-traits = "0.2.19"
 
 [lints.rust]
 unsafe_code = "forbid"

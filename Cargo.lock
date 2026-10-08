@@ -1164,6 +1164,7 @@ dependencies = [
  "monstertruck-io",
  "monstertruck-modeling",
  "monstertruck-solid",
+ "num-traits",
  "serde",
  "serde_json",
  "step-p21",
