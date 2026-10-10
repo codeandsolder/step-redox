@@ -914,10 +914,13 @@ fn side_support_residual(
 ) -> Option<f64> {
     let z_axis = normalize(extrusion)?;
     match (&profile_edge.support, &side.surface) {
-        (CurveSupport::Line(_), SurfaceSupport::Plane(plane)) => {
-            let direction = normalize(sub(profile_edge.end_mm, profile_edge.start_mm))?;
-            let expected_normal = normalize(cross(direction, z_axis))?;
-            (parallel(plane.normal, expected_normal)
+        (_, SurfaceSupport::Plane(plane)) => {
+            // A profile edge that lies on both the cap and this side plane is
+            // geometrically linear even when STEP encodes it as a B-spline.
+            // Prove the side directly from its plane instead of requiring a
+            // LINE entity spelling.
+            (dot(z_axis, plane.normal).abs() <= DIR_TOL
+                && edge_lies_on_plane(profile_edge, *plane)
                 && side
                     .loop_edges
                     .iter()
