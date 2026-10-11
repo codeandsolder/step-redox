@@ -57,6 +57,28 @@ def count(shape, kind):
     return n
 
 
+def bbox_values(box):
+    scalar_names = ("GetXMin", "GetYMin", "GetZMin", "GetXMax", "GetYMax", "GetZMax")
+    if all(hasattr(box, name) for name in scalar_names):
+        return [float(getattr(box, name)()) for name in scalar_names]
+    if hasattr(box, "CornerMin") and hasattr(box, "CornerMax"):
+        lo = box.CornerMin()
+        hi = box.CornerMax()
+        return [
+            float(lo.X()),
+            float(lo.Y()),
+            float(lo.Z()),
+            float(hi.X()),
+            float(hi.Y()),
+            float(hi.Z()),
+        ]
+    if hasattr(box, "Get"):
+        values = box.Get()
+        if len(values) >= 6:
+            return [float(value) for value in values[:6]]
+    raise RuntimeError("unsupported OCP Bnd_Box binding")
+
+
 def prop(solid):
     volume = GProp_GProps()
     BRepGProp.VolumeProperties_s(solid, volume)
@@ -69,7 +91,7 @@ def prop(solid):
         "volume": float(volume.Mass()),
         "area": float(area.Mass()),
         "center": [float(center.X()), float(center.Y()), float(center.Z())],
-        "bbox": [float(value) for value in box.Get()],
+        "bbox": bbox_values(box),
         "faces": count(solid, TopAbs_FACE),
         "edges": count(solid, TopAbs_EDGE),
         "vertices": count(solid, TopAbs_VERTEX),
