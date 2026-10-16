@@ -4,7 +4,7 @@ use crate::brep::{
 };
 use crate::instances::{StyleRef, collect_styles_by_target};
 use crate::math2::rotate_quarter_xy as rotate_xy;
-use crate::math3::{add, distance, sub};
+use crate::math3::{add, distance, dot, sub};
 use crate::patterns::{
     PointLattice, PointMotifPattern, factor_point_motif_pattern, fit_point_lattice,
 };
@@ -136,6 +136,7 @@ pub enum FeaturePolarity {
 pub struct BoundaryFeatureInstanceEvidence {
     pub face_ids: Vec<u64>,
     pub center_mm: [f64; 3],
+    pub normalized_quarter: u8,
     pub interface_bound_ids: Vec<u64>,
 }
 
@@ -629,6 +630,43 @@ fn open_chain_run(
 /// carrier interface with a synthetic cap. Additive tools need the interface
 /// cap normal opposite the source host's outward normal; subtractive tools
 /// need it aligned with the host outward normal.
+fn coplanar_feature_cap_holes(
+    member: &BoundaryFeatureInstanceEvidence,
+    host_frame: &PlaneFrame,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<Vec<(u64, u64, String)>> {
+    let mut out = Vec::new();
+    for &face_id in &member.face_ids {
+        let Some(frame) = plane_frame(face_id, entities, index) else {
+            continue;
+        };
+        if (dot(frame.outward, host_frame.outward).abs() - 1.0).abs() > SIDE_TOLERANCE
+            || dot(sub(frame.origin, host_frame.origin), host_frame.outward).abs() > SIDE_TOLERANCE
+        {
+            continue;
+        }
+        let bounds = ref_list_param(face_id, 1, entities, index)?;
+        let [bound_id] = bounds.as_slice() else {
+            return None;
+        };
+        let record = simple_record(&entities[*index.get(bound_id)?])?;
+        if record.name != "FACE_OUTER_BOUND" {
+            return None;
+        }
+        let Parameter::List(params) = &record.parameter else {
+            return None;
+        };
+        let loop_id = params.get(1).and_then(entity_ref_value)?;
+        let orientation = params.get(2).and_then(|parameter| match parameter {
+            Parameter::Enumeration(value) if value == "T" || value == "F" => Some(value.clone()),
+            _ => None,
+        })?;
+        out.push((face_id, loop_id, orientation));
+    }
+    Some(out)
+}
+
 pub(crate) fn materialize_boundary_feature_tools_for_analysis(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
@@ -678,6 +716,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
         }
 
         let mut cap_faces = Vec::new();
+        let mut folded_cap_faces = HashSet::new();
         for &bound_id in &member.interface_bound_ids {
             let Some(&host_id) = bound_owner.get(&bound_id) else {
                 bail!("feature interface bound #{bound_id} has no owning host face");
@@ -729,13 +768,33 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
                     }),
                 ],
             );
+            let mut cap_bounds = vec![entity_ref(cap_bound)];
+            if member.interface_bound_ids.len() == 1
+                && let Some(holes) =
+                    coplanar_feature_cap_holes(member, &frame, entities, &initial_index)
+            {
+                for (face_id, hole_loop_id, hole_orientation) in holes {
+                    folded_cap_faces.insert(face_id);
+                    let hole_bound = push_simple(
+                        entities,
+                        &mut next_id,
+                        "FACE_BOUND",
+                        vec![
+                            Parameter::String("NONE".to_string()),
+                            entity_ref(hole_loop_id),
+                            Parameter::Enumeration(hole_orientation),
+                        ],
+                    );
+                    cap_bounds.push(entity_ref(hole_bound));
+                }
+            }
             let cap_face = push_simple(
                 entities,
                 &mut next_id,
                 "ADVANCED_FACE",
                 vec![
                     Parameter::String("NONE".to_string()),
-                    Parameter::List(vec![entity_ref(cap_bound)]),
+                    Parameter::List(cap_bounds),
                     entity_ref(frame.surface_id),
                     Parameter::Enumeration(if flip {
                         toggle_tf(&frame.sense)
@@ -751,6 +810,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
             .face_ids
             .iter()
             .copied()
+            .filter(|face_id| !folded_cap_faces.contains(face_id))
             .map(entity_ref)
             .collect::<Vec<_>>();
         closed_faces.extend(cap_faces.iter().copied().map(entity_ref));
@@ -803,30 +863,56 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
     Ok((report, materialized))
 }
 
-/// Remove proven patterned feature boundary patches from shell topology so the
+/// Remove proven leaf boundary-feature patches from shell topology so the
 /// simpler residual can be decomposed recursively.
 ///
 /// This is an analysis transform, not a semantics-preserving STEP rewrite:
 /// additive tools and subtractive tools are recorded separately by the caller
 /// and must be replayed in reverse peel order with Union/Difference. Healing
 /// the host interface is intentionally identical for both polarities.
-pub(crate) fn peel_patterned_boundary_features_for_analysis(
+pub fn leaf_feature_family_indices(families: &[BoundaryFeatureFamilyEvidence]) -> Vec<usize> {
+    let hosts = families
+        .iter()
+        .enumerate()
+        .flat_map(|(family_index, family)| {
+            family
+                .host_face_ids
+                .iter()
+                .copied()
+                .map(move |host| (family_index, host))
+        })
+        .collect::<Vec<_>>();
+
+    families
+        .iter()
+        .enumerate()
+        .filter_map(|(family_index, family)| {
+            let contains_child_host = family.members.iter().any(|member| {
+                hosts.iter().any(|&(child_family_index, host)| {
+                    child_family_index != family_index && member.face_ids.contains(&host)
+                })
+            });
+            (!contains_child_host).then_some(family_index)
+        })
+        .collect()
+}
+
+pub fn peel_boundary_features_for_analysis(
     entities: &mut Vec<EntityInstance>,
-    min_instances: usize,
 ) -> Result<(BoundaryFeatureDiagnostics, BoundaryFeaturePeelStats)> {
-    if min_instances < 2 {
-        bail!("patterned feature peel requires min_instances >= 2");
-    }
     let index = build_index(entities);
     let report = diagnose_boundary_features_with_index(entities, &index);
-    let selected = report
-        .families
-        .iter()
-        .filter(|family| family.instances >= min_instances && family.lattice.is_some())
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        return Ok((report, BoundaryFeaturePeelStats::default()));
+    let selected_indices = leaf_feature_family_indices(&report.families);
+    if selected_indices.is_empty() {
+        if report.families.is_empty() {
+            return Ok((report, BoundaryFeaturePeelStats::default()));
+        }
+        bail!("boundary feature dependency graph has no leaf family");
     }
+    let selected = selected_indices
+        .into_iter()
+        .map(|index| &report.families[index])
+        .collect::<Vec<_>>();
 
     let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
     let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
@@ -941,6 +1027,7 @@ fn diagnose_boundary_features_with_index(
                     .map(|member| BoundaryFeatureInstanceEvidence {
                         face_ids: member.face_ids,
                         center_mm: member.center,
+                        normalized_quarter: member.normalized_quarter,
                         interface_bound_ids: member
                             .interfaces
                             .into_iter()
@@ -1674,7 +1761,11 @@ fn component_signature(
     best
 }
 
-fn rigid_translation(source_center: [f64; 3], target_center: [f64; 3], quarter: u8) -> [f64; 3] {
+pub fn rigid_translation(
+    source_center: [f64; 3],
+    target_center: [f64; 3],
+    quarter: u8,
+) -> [f64; 3] {
     let (x, y) = rotate_xy(source_center[0], source_center[1], quarter);
     [
         target_center[0] - x,
@@ -1686,6 +1777,33 @@ fn rigid_translation(source_center: [f64; 3], target_center: [f64; 3], quarter: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_dependency_selection_is_leaf_first() {
+        let family =
+            |host_face_ids: Vec<u64>, member_faces: Vec<u64>| BoundaryFeatureFamilyEvidence {
+                shell_id: 1,
+                polarity: FeaturePolarity::Additive,
+                host_face_ids,
+                faces_per_instance: member_faces.len(),
+                instances: 1,
+                signature: String::new(),
+                members: vec![BoundaryFeatureInstanceEvidence {
+                    face_ids: member_faces,
+                    center_mm: [0.0; 3],
+                    normalized_quarter: 0,
+                    interface_bound_ids: vec![1],
+                }],
+                lattice: None,
+                motif_pattern: None,
+            };
+        let families = vec![
+            family(vec![10], vec![20, 21, 30]),
+            family(vec![30], vec![40, 41]),
+            family(vec![50], vec![60, 61]),
+        ];
+        assert_eq!(leaf_feature_family_indices(&families), vec![1, 2]);
+    }
 
     #[test]
     fn quarter_turn_translation_maps_center() {

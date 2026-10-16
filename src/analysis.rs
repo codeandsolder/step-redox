@@ -1,5 +1,6 @@
 use crate::{
-    complete_ir, formed_sheet, periodic_chains, solid_extrusions, solid_revolutions, step_io,
+    complete_ir, dominant_extrusions, formed_sheet, periodic_chains, solid_extrusions,
+    solid_revolutions, step_io,
 };
 use anyhow::Result;
 use ruststep::ast::Exchange;
@@ -43,6 +44,13 @@ impl<'a> AnalysisSession<'a> {
                 solid_revolutions::detect_solid_surface_signatures(&section.entities)
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn dominant_extrusion_candidates(
+        &self,
+    ) -> Vec<dominant_extrusions::DominantExtrusionCandidate> {
+        dominant_extrusions::detect_dominant_extrusion_candidates(&self.solid_surface_signatures())
     }
 
     #[must_use]

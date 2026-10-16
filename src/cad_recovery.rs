@@ -53,6 +53,12 @@ pub enum CadFragmentSource {
         solid_id: u64,
         sites: usize,
     },
+    BoundaryFeatureComposite {
+        solid_id: u64,
+        passes: usize,
+        feature_families: usize,
+        feature_instances: usize,
+    },
 }
 
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.

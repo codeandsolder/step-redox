@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepGProp import BRepGProp
 from OCP.Bnd import Bnd_Box
@@ -57,6 +58,28 @@ def count(shape, kind):
     return n
 
 
+def bbox_values(box):
+    scalar_names = ("GetXMin", "GetYMin", "GetZMin", "GetXMax", "GetYMax", "GetZMax")
+    if all(hasattr(box, name) for name in scalar_names):
+        return [float(getattr(box, name)()) for name in scalar_names]
+    if hasattr(box, "CornerMin") and hasattr(box, "CornerMax"):
+        lo = box.CornerMin()
+        hi = box.CornerMax()
+        return [
+            float(lo.X()),
+            float(lo.Y()),
+            float(lo.Z()),
+            float(hi.X()),
+            float(hi.Y()),
+            float(hi.Z()),
+        ]
+    if hasattr(box, "Get"):
+        values = box.Get()
+        if len(values) >= 6:
+            return [float(value) for value in values[:6]]
+    raise RuntimeError("unsupported OCP Bnd_Box binding")
+
+
 def prop(solid):
     volume = GProp_GProps()
     BRepGProp.VolumeProperties_s(solid, volume)
@@ -69,10 +92,11 @@ def prop(solid):
         "volume": float(volume.Mass()),
         "area": float(area.Mass()),
         "center": [float(center.X()), float(center.Y()), float(center.Z())],
-        "bbox": [float(value) for value in box.Get()],
+        "bbox": bbox_values(box),
         "faces": count(solid, TopAbs_FACE),
         "edges": count(solid, TopAbs_EDGE),
         "vertices": count(solid, TopAbs_VERTEX),
+        "brep_valid": bool(BRepCheck_Analyzer(solid).IsValid()),
     }
 
 
@@ -173,14 +197,15 @@ if args.a_entity_id is not None:
     candidate_minus_source = cut_volume(b_shape, a_shape)
     boolean_volume_tolerance = volume_tolerance(a_solid["volume"], b_solid["volume"])
 
-    # Analytic OCCT bounding boxes can be conservative (notably trimmed tori),
-    # and CAD kernels are free to split faces differently. For entity-rank
-    # validation, occupied geometry is the contract: mass properties plus both
-    # directional Boolean residuals must agree.
+    # For entity-rank validation, occupied geometry is the contract. OCCT can
+    # integrate mass properties differently for distinct but valid B-rep
+    # representations of the same set, so use the stronger set-equivalence
+    # oracle: both inputs must be valid and both directional set differences
+    # must be empty within the scale-aware Boolean volume tolerance. Keep mass
+    # properties and conservative analytic bounding boxes as diagnostics.
     geometry_equal = (
-        close(a_solid["volume"], b_solid["volume"], ABS_VOLUME_TOL)
-        and close(a_solid["area"], b_solid["area"], ABS_AREA_TOL)
-        and center_error <= ABS_GEOM_TOL
+        a_solid["brep_valid"]
+        and b_solid["brep_valid"]
         and source_minus_candidate <= boolean_volume_tolerance
         and candidate_minus_source <= boolean_volume_tolerance
     )

@@ -16,6 +16,7 @@ mod clean_pipeline;
 pub mod compatibility;
 pub mod complete_ir;
 mod curve_replicas;
+pub mod dominant_extrusions;
 mod face_coalesce;
 pub mod formed_sheet;
 mod geometric_intern;
@@ -265,16 +266,20 @@ pub struct BoundaryFeatureDecompositionReport {
     pub total_interface_bounds_healed: usize,
 }
 
-/// Recursively peel regular additive/subtractive boundary-feature families into
-/// a simpler analysis residual.
+/// Recursively peel proven additive/subtractive boundary features into a
+/// simpler analysis residual.
 ///
 /// The returned STEP is deliberately an INTERNAL RESIDUAL, not a geometry-
 /// equivalent replacement for the input. Each peel heals the carrier face(s)
 /// and removes the feature boundary patch; callers reconstruct the original by
 /// replaying the recorded families in reverse order with Union/Difference.
-pub fn peel_patterned_boundary_features_for_analysis_bytes(
+///
+/// # Errors
+///
+/// Returns an error when the STEP exchange cannot be parsed, a proven feature
+/// decomposition cannot be materialized safely, or `max_passes` is zero.
+pub fn peel_boundary_features_for_analysis_bytes(
     input: &[u8],
-    min_instances: usize,
     max_passes: usize,
 ) -> Result<(Vec<u8>, BoundaryFeatureDecompositionReport)> {
     if max_passes == 0 {
@@ -290,10 +295,7 @@ pub fn peel_patterned_boundary_features_for_analysis_bytes(
 
         for section in &mut exchange.data {
             let (diagnostics, stats) =
-                planar_features::peel_patterned_boundary_features_for_analysis(
-                    &mut section.entities,
-                    min_instances,
-                )?;
+                planar_features::peel_boundary_features_for_analysis(&mut section.entities)?;
             pass_diagnostics.shell_contexts += diagnostics.shell_contexts;
             pass_diagnostics.planar_hosts += diagnostics.planar_hosts;
             pass_diagnostics.raw_candidates += diagnostics.raw_candidates;
@@ -554,6 +556,22 @@ pub fn detect_solid_extrusions_bytes(
         .iter()
         .flat_map(|section| solid_extrusions::detect_solid_extrusions(&section.entities))
         .collect())
+}
+
+/// Diagnose solids that are mostly a linear extrusion but retain non-ruled treatment faces.
+///
+/// This is deliberately diagnostic rather than constructive permission: candidates are ranked
+/// from analytic surface signatures and preserve the residual face subset explicitly.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn detect_dominant_extrusion_candidates_bytes(
+    input: &[u8],
+) -> Result<Vec<dominant_extrusions::DominantExtrusionCandidate>> {
+    let signatures = detect_solid_surface_signatures_bytes(input)?;
+    Ok(dominant_extrusions::detect_dominant_extrusion_candidates(
+        &signatures,
+    ))
 }
 
 /// Detect closed round-profile composite sweeps such as bent wire frames.

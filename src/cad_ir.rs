@@ -49,6 +49,19 @@ impl CadModel {
         Ok(())
     }
 
+    pub(crate) fn append_model(&mut self, other: &Self) -> Result<usize> {
+        other.validate()?;
+        let offset = self.nodes.len();
+        for node in &other.nodes {
+            self.nodes.push(node.shifted(offset)?);
+        }
+        for (&id, provenance) in &other.provenance {
+            let shifted = shift_node_id(id, offset)?;
+            self.provenance.insert(shifted, provenance.clone());
+        }
+        Ok(offset)
+    }
+
     ///
     /// # Errors
     /// Returns an error if `id` is outside the model node table.
@@ -192,6 +205,12 @@ impl CadModel {
     }
 }
 
+fn shift_node_id(id: NodeId, offset: usize) -> Result<NodeId> {
+    Ok(NodeId(id.0.checked_add(offset).ok_or_else(|| {
+        anyhow::anyhow!("CAD node id overflow while composing models")
+    })?))
+}
+
 impl Default for CadModel {
     fn default() -> Self {
         Self::new()
@@ -243,6 +262,57 @@ impl CadNode {
             Self::Transform { child, .. } | Self::Pattern { child, .. } => vec![*child],
             _ => Vec::new(),
         }
+    }
+
+    fn shifted(&self, offset: usize) -> Result<Self> {
+        let shift = |id| shift_node_id(id, offset);
+        Ok(match self {
+            Self::Primitive(value) => Self::Primitive(value.clone()),
+            Self::Extrude { profile, vector_mm } => Self::Extrude {
+                profile: profile.clone(),
+                vector_mm: *vector_mm,
+            },
+            Self::Revolve {
+                profile,
+                axis,
+                angle_rad,
+            } => Self::Revolve {
+                profile: profile.clone(),
+                axis: *axis,
+                angle_rad: *angle_rad,
+            },
+            Self::Sweep { profile, path } => Self::Sweep {
+                profile: profile.clone(),
+                path: path.clone(),
+            },
+            Self::Loft { sections } => Self::Loft {
+                sections: sections.clone(),
+            },
+            Self::Boolean { op, children } => Self::Boolean {
+                op: *op,
+                children: children
+                    .iter()
+                    .copied()
+                    .map(shift)
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            Self::Transform { transform, child } => Self::Transform {
+                transform: *transform,
+                child: shift(*child)?,
+            },
+            Self::Pattern { pattern, child } => Self::Pattern {
+                pattern: pattern.clone(),
+                child: shift(*child)?,
+            },
+            Self::Assembly { children } => Self::Assembly {
+                children: children
+                    .iter()
+                    .copied()
+                    .map(shift)
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            Self::PeriodicChain(chain) => Self::PeriodicChain(chain.clone()),
+        })
     }
 
     fn local_complexity(&self) -> u64 {
