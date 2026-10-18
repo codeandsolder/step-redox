@@ -874,7 +874,7 @@ mod tests {
             root,
         };
         let selected = select_cheapest_whole_solid_fragments(&[&descriptive, &constructive])?;
-        assert!(std::ptr::eq(selected[&7], &constructive));
+        assert!(std::ptr::eq(selected[&7], &raw const constructive));
         Ok(())
     }
 }
