@@ -6,7 +6,7 @@ rust-version = "1.88"
 
 [features]
 default = []
-cad-kernel-monstertruck = ["dep:monstertruck-modeling", "dep:monstertruck-io", "dep:monstertruck-solid"]
+cad-kernel-monstertruck = ["dep:monstertruck-modeling", "dep:monstertruck-io", "dep:monstertruck-solid", "dep:monstertruck-fillet"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -15,9 +15,10 @@ encoding_rs = "0.8.41"
 ruststep = { package = "step-p21", version = "0.1.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", branch = "master", optional = true }
+monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", branch = "master", features = ["fillet"], optional = true }
 monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", branch = "master", optional = true }
 monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", branch = "master", optional = true }
+monstertruck-fillet = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", branch = "master", optional = true }
 num-traits = "0.2.19"
 
 [lints.rust]

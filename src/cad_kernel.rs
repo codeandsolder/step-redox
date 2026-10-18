@@ -35,10 +35,12 @@ pub trait CadKernel {
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{
-        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Primitive, Profile2d,
-        RigidTransform, SweepPath3d, SweepSegment3d,
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, EdgeSelector, EdgeTreatmentEdge,
+        EdgeTreatmentProfile, LoftSection, NodeId, Primitive, Profile2d, RigidTransform,
+        SweepPath3d, SweepSegment3d,
     };
     use anyhow::{Result, bail};
+    use monstertruck_fillet::{FilletOptions, FilletProfile, RadiusSpec, fillet_edges_generic};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::*;
 
@@ -562,6 +564,70 @@ pub mod monstertruck {
         }
     }
 
+    const EDGE_SELECTOR_TOLERANCE_MM: f64 = 1.0e-7;
+
+    fn segment_point(point_mm: [f64; 3]) -> Point3 {
+        Point3::new(point_mm[0], point_mm[1], point_mm[2])
+    }
+
+    fn points_match(left: Point3, right: Point3) -> bool {
+        (left - right).magnitude() <= EDGE_SELECTOR_TOLERANCE_MM
+    }
+
+    fn select_edge(shell: &Shell, selector: &EdgeSelector) -> Result<Edge> {
+        match selector {
+            EdgeSelector::Segment { start_mm, end_mm } => {
+                let start = segment_point(*start_mm);
+                let end = segment_point(*end_mm);
+                let mut matched = None;
+                let mut matched_id = None;
+                for edge in shell.edge_iter() {
+                    let front = edge.absolute_front().point();
+                    let back = edge.absolute_back().point();
+                    let endpoints_match = (points_match(front, start) && points_match(back, end))
+                        || (points_match(front, end) && points_match(back, start));
+                    if !endpoints_match || matched_id == Some(edge.id()) {
+                        continue;
+                    }
+                    if matched_id.is_some() {
+                        bail!("edge-treatment selector matched more than one topological edge");
+                    }
+                    matched_id = Some(edge.id());
+                    matched = Some(edge.clone());
+                }
+                matched.ok_or_else(|| anyhow::anyhow!("edge-treatment selector matched no edge"))
+            }
+        }
+    }
+
+    fn evaluate_edge_treatment(
+        model: &CadModel,
+        child: NodeId,
+        profile: EdgeTreatmentProfile,
+        edges: &[EdgeTreatmentEdge],
+    ) -> Result<Solid> {
+        let child = evaluate_node(model, child)?;
+        let mut boundaries = child.into_boundaries();
+        let [shell] = boundaries.as_mut_slice() else {
+            bail!("edge treatment currently requires exactly one boundary shell");
+        };
+        let selected = edges
+            .iter()
+            .map(|edge| select_edge(shell, &edge.selector))
+            .collect::<Result<Vec<_>>>()?;
+        let fillet_profile = match profile {
+            EdgeTreatmentProfile::Round => FilletProfile::Round,
+            EdgeTreatmentProfile::Chamfer => FilletProfile::Chamfer,
+        };
+        let options = FilletOptions {
+            radius: RadiusSpec::PerEdge(edges.iter().map(|edge| edge.radius_mm).collect()),
+            profile: fillet_profile,
+            ..FilletOptions::default()
+        };
+        fillet_edges_generic(shell, &selected, Some(&options))?;
+        Ok(Solid::try_new(boundaries)?)
+    }
+
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
         match model.node(root)? {
             CadNode::Primitive(primitive) => primitive_solid(primitive),
@@ -579,6 +645,11 @@ pub mod monstertruck {
             CadNode::Sweep { profile, path } => sweep_profile(profile, path),
             CadNode::Loft { sections } => loft_sections(sections),
             CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
+            CadNode::EdgeTreatment {
+                child,
+                profile,
+                edges,
+            } => evaluate_edge_treatment(model, *child, *profile, edges),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
                     profile,
@@ -760,6 +831,43 @@ pub mod monstertruck {
             let step = kernel.to_step(&evaluated)?;
             ruststep::parser::parse(&step)?;
             Ok(())
+        }
+
+        fn box_edge_treatment(profile: EdgeTreatmentProfile) -> Result<()> {
+            let mut model = CadModel::new();
+            let box_node = model.add_node(CadNode::Primitive(Primitive::Box {
+                size_mm: [4.0, 3.0, 2.0],
+            }));
+            let root = model.add_node(CadNode::EdgeTreatment {
+                child: box_node,
+                profile,
+                edges: vec![EdgeTreatmentEdge {
+                    selector: EdgeSelector::Segment {
+                        start_mm: [0.0, 0.0, 0.0],
+                        end_mm: [4.0, 0.0, 0.0],
+                    },
+                    radius_mm: 0.25,
+                }],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert!(summary.faces > 6);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_round_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::Round)
+        }
+
+        #[test]
+        fn evaluates_chamfer_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::Chamfer)
         }
 
         #[test]
