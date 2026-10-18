@@ -629,6 +629,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "monstertruck-fillet"
+version = "0.4.1"
+source = "git+https://github.com/codeandsolder/monstertruck.git?branch=master#6bb17bd2d8fb356209299fb81bee7beb4fc62a95"
+dependencies = [
+ "ahash",
+ "derive_more",
+ "getrandom 0.3.4",
+ "itertools 0.14.0",
+ "monstertruck-core",
+ "monstertruck-geometry",
+ "monstertruck-meshing",
+ "monstertruck-topology",
+ "monstertruck-traits",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
 name = "monstertruck-geometry"
 version = "0.4.1"
 source = "git+https://github.com/codeandsolder/monstertruck.git?branch=master#6bb17bd2d8fb356209299fb81bee7beb4fc62a95"
@@ -705,6 +723,7 @@ dependencies = [
  "derive_more",
  "itertools 0.14.0",
  "monstertruck-core",
+ "monstertruck-fillet",
  "monstertruck-geometry",
  "monstertruck-mesh",
  "monstertruck-topology",
@@ -1172,6 +1191,7 @@ dependencies = [
  "anyhow",
  "clap",
  "encoding_rs",
+ "monstertruck-fillet",
  "monstertruck-io",
  "monstertruck-modeling",
  "monstertruck-solid",

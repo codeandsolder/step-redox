@@ -82,6 +82,130 @@ pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSoli
     detect_solid_extrusions_with_index(entities, &index)
 }
 
+/// Detect sharp extrusion cores implied by translated planar cap pairs.
+///
+/// These candidates deliberately prove only the cap-to-cap translation and
+/// canonical profile. They do not claim the source side faces are ruled
+/// extrusion walls, so callers must separately explain every residual source
+/// face before treating a candidate as whole-solid recovery.
+#[must_use]
+pub fn detect_extrusion_core_candidates(
+    entities: &[EntityInstance],
+) -> Vec<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    detect_extrusion_core_candidates_with_index(entities, &index)
+}
+
+pub(crate) fn detect_extrusion_core_candidates_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        out.extend(extrusion_core_candidates_for_solid(
+            solid_id, entities, index,
+        ));
+    }
+    out.sort_by(|first, second| {
+        first
+            .solid_id
+            .cmp(&second.solid_id)
+            .then_with(|| candidate_order(first, second))
+    });
+    out
+}
+
+/// Recover the sharp extrusion core implied by one explicit planar cap pair.
+///
+/// Unlike [`detect_solid_extrusions`], this proves the two cap loops are exact
+/// translations directly from their analytic boundary curves and deliberately
+/// does not claim that the source side faces are extrusion walls. It is only a
+/// core for a higher-level reconstruction that separately proves and replays
+/// every source-side treatment.
+#[must_use]
+pub fn recover_extrusion_core_from_cap_faces(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+) -> Option<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    recover_extrusion_core_from_cap_faces_with_index(solid_id, cap_face_ids, entities, &index)
+}
+
+pub(crate) fn recover_extrusion_core_from_cap_faces_with_index(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredSolidExtrusion> {
+    extrusion_core_candidates_for_solid(solid_id, entities, index)
+        .into_iter()
+        .find(|candidate| {
+            candidate.cap_face_ids == cap_face_ids
+                || candidate.cap_face_ids == [cap_face_ids[1], cap_face_ids[0]]
+        })
+}
+
+fn extrusion_core_candidates_for_solid(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let Some(face_ids) = brep::solid_face_ids(solid_id, entities, index) else {
+        return Vec::new();
+    };
+    let Some(faces) = face_ids
+        .iter()
+        .copied()
+        .map(|face_id| face_info(face_id, entities, index))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for first_index in 0..faces.len() {
+        for second_index in first_index + 1..faces.len() {
+            if let Some(candidate) =
+                extrusion_core_candidate(solid_id, first_index, second_index, &faces)
+            {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+fn extrusion_core_candidate(
+    solid_id: u64,
+    first_index: usize,
+    second_index: usize,
+    faces: &[FaceInfo],
+) -> Option<RecoveredSolidExtrusion> {
+    let pair = ordered_cap_pair(first_index, second_index, faces)?;
+    let max_residual_mm = prove_translated_caps(&pair)?;
+    let profile = canonical_profile(pair.bottom, pair.z_axis, &pair.bottom_loop_roles)?;
+    Some(RecoveredSolidExtrusion {
+        solid_id,
+        cap_face_ids: [pair.bottom.id, pair.top.id],
+        side_face_ids: Vec::new(),
+        profile_curves: profile.curves,
+        inner_profile_loops: profile.inner_loops,
+        origin_mm: profile.origin_mm,
+        x_axis: profile.x_axis,
+        y_axis: profile.y_axis,
+        z_axis: pair.z_axis,
+        height_mm: pair.height_mm,
+        max_residual_mm,
+    })
+}
+
 pub(crate) fn detect_solid_extrusions_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -272,6 +396,44 @@ fn ordered_cap_pair(
         top_loop_roles: cap_loop_roles(top, z_axis)?,
         max_residual_mm: bottom_plane.max_residual_mm.max(top_plane.max_residual_mm),
     })
+}
+
+fn prove_translated_caps(pair: &CapPairProof<'_>) -> Option<f64> {
+    let mut translated_edges = HashMap::<u64, u64>::new();
+    let mut used_top_edges = HashSet::<u64>::new();
+    let mut max_residual_mm = pair.max_residual_mm;
+
+    for bottom_edge in &pair.bottom.loop_edges {
+        let matches = pair
+            .top
+            .loop_edges
+            .iter()
+            .filter(|top_edge| !used_top_edges.contains(&top_edge.edge_id))
+            .filter_map(|top_edge| {
+                let residual =
+                    translated_profile_edge_residual(bottom_edge, top_edge, pair.extrusion)?;
+                (residual <= GEOM_TOL_MM).then_some((top_edge.edge_id, residual))
+            })
+            .collect::<Vec<_>>();
+        let [(top_edge_id, residual)] = matches.as_slice() else {
+            return None;
+        };
+        used_top_edges.insert(*top_edge_id);
+        translated_edges.insert(bottom_edge.edge_id, *top_edge_id);
+        max_residual_mm = max_residual_mm.max(*residual);
+    }
+    if used_top_edges.len() != pair.top.loop_edges.len()
+        || !translated_cap_loops_match(
+            pair.bottom,
+            pair.top,
+            &translated_edges,
+            &pair.bottom_loop_roles,
+            &pair.top_loop_roles,
+        )
+    {
+        return None;
+    }
+    Some(max_residual_mm)
 }
 
 fn prove_extrusion_sides(
