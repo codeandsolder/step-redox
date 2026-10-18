@@ -488,23 +488,8 @@ pub mod monstertruck {
             bail!("boolean node needs at least one child");
         };
         let mut result = evaluate_node(model, first)?;
-        for (stage, &child) in rest.iter().enumerate() {
+        for &child in rest {
             let rhs = evaluate_node(model, child)?;
-            if matches!(op, BooleanOp::Union) {
-                let lb = result.boundaries();
-                let rb = rhs.boundaries();
-                eprintln!(
-                    "DEBUG_OR stage {} child {:?} lhs shells={} faces={} consistent={} rhs shells={} faces={} consistent={}",
-                    stage + 1,
-                    child,
-                    lb.len(),
-                    lb.iter().map(|shell| shell.len()).sum::<usize>(),
-                    result.is_geometric_consistent(),
-                    rb.len(),
-                    rb.iter().map(|shell| shell.len()).sum::<usize>(),
-                    rhs.is_geometric_consistent(),
-                );
-            }
             result = match op {
                 BooleanOp::Union => monstertruck_solid::or(&result, &rhs, BOOLEAN_TOLERANCE_MM)?,
                 BooleanOp::Intersection => {
