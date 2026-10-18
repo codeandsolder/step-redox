@@ -651,8 +651,8 @@ fn plane_intersection_segment(
     {
         return None;
     }
-    let start_t = 0.5 * (first_range.0 + second_range.0);
-    let end_t = 0.5 * (first_range.1 + second_range.1);
+    let start_t = first_range.0.midpoint(second_range.0);
+    let end_t = first_range.1.midpoint(second_range.1);
     if end_t - start_t <= GEOM_TOL_MM {
         return None;
     }

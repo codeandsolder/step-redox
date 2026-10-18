@@ -566,7 +566,7 @@ pub mod monstertruck {
 
     const EDGE_SELECTOR_TOLERANCE_MM: f64 = 1.0e-7;
 
-    fn segment_point(point_mm: [f64; 3]) -> Point3 {
+    const fn segment_point(point_mm: [f64; 3]) -> Point3 {
         Point3::new(point_mm[0], point_mm[1], point_mm[2])
     }
 
