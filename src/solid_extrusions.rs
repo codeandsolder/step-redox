@@ -62,6 +62,7 @@ impl RecoveredSolidExtrusion {
 struct FaceInfo {
     id: u64,
     surface: SurfaceSupport,
+    surface_forward: bool,
     loops: Vec<brep::FaceLoop>,
     /// Flattened boundary edges retained for the existing manifold/side proof.
     loop_edges: Vec<OrientedEdgeUse>,
@@ -384,6 +385,22 @@ fn ordered_cap_pair(
         return None;
     }
 
+    // A cap-derived core can only occupy source material when the two source
+    // faces bound the interval from the outside: the lower cap must face
+    // opposite the extrusion direction and the upper cap must face along it.
+    // This is necessary, not sufficient, for containment (an hourglass-shaped
+    // side wall can still cut into the prism), but it rejects translated planar
+    // pairs that geometrically match while bounding empty/outside space.
+    if !cap_faces_bound_material_interval(
+        *bottom_plane,
+        bottom.surface_forward,
+        *top_plane,
+        top.surface_forward,
+        z_axis,
+    ) {
+        return None;
+    }
+
     Some(CapPairProof {
         bottom_index,
         top_index,
@@ -396,6 +413,26 @@ fn ordered_cap_pair(
         top_loop_roles: cap_loop_roles(top, z_axis)?,
         max_residual_mm: bottom_plane.max_residual_mm.max(top_plane.max_residual_mm),
     })
+}
+
+fn cap_faces_bound_material_interval(
+    bottom: PlaneSupport,
+    bottom_forward: bool,
+    top: PlaneSupport,
+    top_forward: bool,
+    z_axis: [f64; 3],
+) -> bool {
+    let bottom_outward = if bottom_forward {
+        bottom.normal
+    } else {
+        mul(bottom.normal, -1.0)
+    };
+    let top_outward = if top_forward {
+        top.normal
+    } else {
+        mul(top.normal, -1.0)
+    };
+    dot(bottom_outward, z_axis) <= -1.0 + DIR_TOL && dot(top_outward, z_axis) >= 1.0 - DIR_TOL
 }
 
 fn prove_translated_caps(pair: &CapPairProof<'_>) -> Option<f64> {
@@ -916,9 +953,16 @@ fn face_info(
         .flat_map(|loop_| loop_.edges.iter().cloned())
         .collect::<Vec<_>>();
 
+    let surface_forward = match brep::face_sense(face_id, entities, index)?.as_str() {
+        "T" => true,
+        "F" => false,
+        _ => return None,
+    };
+
     Some(FaceInfo {
         id: face_id,
         surface,
+        surface_forward,
         loops,
         loop_edges,
     })
@@ -1729,6 +1773,28 @@ mod tests {
     fn canonical_axis_has_deterministic_sign() {
         assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
         assert_eq!(canonical_direction([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cap_pair_requires_opposite_outward_normals() {
+        let down = PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let up = PlaneSupport {
+            origin_mm: [0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let z = [0.0, 0.0, 1.0];
+
+        assert!(cap_faces_bound_material_interval(down, false, up, true, z));
+        assert!(!cap_faces_bound_material_interval(down, true, up, false, z));
+        assert!(!cap_faces_bound_material_interval(
+            down, false, up, false, z
+        ));
+        assert!(!cap_faces_bound_material_interval(down, true, up, true, z));
     }
 
     #[test]
