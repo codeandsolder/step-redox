@@ -1,5 +1,5 @@
 use crate::cad_ir::{
-    CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus, Provenance,
+    BooleanOp, CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus, Provenance,
 };
 use crate::periodic_chains::PeriodicChainPattern;
 use anyhow::{Result, bail};
@@ -59,6 +59,45 @@ pub enum CadFragmentSource {
         feature_families: usize,
         feature_instances: usize,
     },
+}
+
+/// Compose two or more already-recovered CAD fragments into a union model.
+///
+/// This helper only composes executable CAD models; it deliberately does not create a
+/// `CadFragmentSource` claim for the union. Callers must independently prove that the input
+/// fragments form the intended source solid before admitting the composite into Complete IR.
+///
+/// # Errors
+/// Returns an error if fewer than two fragments are provided, an input model is invalid, or a
+/// fragment root cannot be remapped into the composed model.
+pub fn compose_union_model(fragments: &[CadFragment]) -> Result<(CadModel, NodeId)> {
+    if fragments.len() < 2 {
+        bail!("a CAD union composite needs at least two fragments");
+    }
+
+    let mut model = CadModel::new();
+    let mut children = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        fragment.model.validate()?;
+        let offset = model.append_model(&fragment.model)?;
+        let root = NodeId(
+            fragment
+                .root
+                .0
+                .checked_add(offset)
+                .ok_or_else(|| anyhow::anyhow!("CAD root id overflow while composing union"))?,
+        );
+        model.node(root)?;
+        children.push(root);
+    }
+
+    let root = model.add_node(CadNode::Boolean {
+        op: BooleanOp::Union,
+        children,
+    });
+    model.add_root(root)?;
+    model.validate()?;
+    Ok((model, root))
 }
 
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.
@@ -250,6 +289,36 @@ fn validate_periodic_chain(chain: &PeriodicChainPattern) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn primitive_fragment(solid_id: u64) -> Result<CadFragment> {
+        let mut model = CadModel::new();
+        let root = model.add_node(CadNode::Primitive(crate::cad_ir::Primitive::Box {
+            size_mm: [1.0, 1.0, 1.0],
+        }));
+        model.add_root(root)?;
+        Ok(CadFragment {
+            source: CadFragmentSource::SolidExtrusion {
+                solid_id,
+                cap_face_ids: [solid_id + 1, solid_id + 2],
+                side_face_ids: Vec::new(),
+            },
+            model,
+            root,
+        })
+    }
+
+    #[test]
+    fn union_model_composes_fragment_roots_without_claiming_semantics() -> Result<()> {
+        let fragments = [primitive_fragment(10)?, primitive_fragment(20)?];
+        let (model, root) = compose_union_model(&fragments)?;
+        let CadNode::Boolean { op, children } = model.node(root)? else {
+            bail!("expected union root");
+        };
+        assert_eq!(*op, BooleanOp::Union);
+        assert_eq!(children.as_slice(), &[NodeId(0), NodeId(1)]);
+        assert_eq!(model.roots.as_slice(), &[root]);
+        Ok(())
+    }
 
     fn periodic_chain_fixture() -> PeriodicChainPattern {
         PeriodicChainPattern {
