@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 const POINT_Q_MM: f64 = 1.0e-7;
 const DIRECTION_Q: f64 = 1.0e-10;
 const SCALAR_Q_MM: f64 = 1.0e-7;
+pub(crate) const ANALYTIC_BOUNDARY_PROOF_TOL_MM: f64 = 4.0 * SCALAR_Q_MM;
 
 type PointKey = [i64; 3];
 

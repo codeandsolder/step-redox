@@ -1,7 +1,10 @@
 use crate::cad_ir::{
     BooleanOp, CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus, Provenance,
 };
+use crate::cad_kernel::CadKernel;
 use crate::periodic_chains::PeriodicChainPattern;
+use crate::step_graph::{build_index, entity_id, simple_record};
+use crate::step_io::ParsedExchange;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -53,6 +56,10 @@ pub enum CadFragmentSource {
         solid_id: u64,
         sites: usize,
     },
+    ExtrusionCoreUnion {
+        solid_id: u64,
+        cap_face_ids: Vec<[u64; 2]>,
+    },
     BoundaryFeatureComposite {
         solid_id: u64,
         passes: usize,
@@ -98,6 +105,130 @@ pub fn compose_union_model(fragments: &[CadFragment]) -> Result<(CadModel, NodeI
     model.add_root(root)?;
     model.validate()?;
     Ok((model, root))
+}
+
+/// Recover and admit a union of sharp extrusion cores only when an independent
+/// analytic boundary proof establishes that the evaluated union is the source solid.
+///
+/// Cap-pair recovery is source-derived and fail-closed. The supplied CAD kernel
+/// merely proposes executable geometry: after evaluation and STEP serialization,
+/// the result must contain exactly one manifold solid and its complete oriented
+/// plane/cylinder boundary signature must equal the source signature. Unsupported
+/// carriers, unproven edge loci, disconnected kernel results, or any signature
+/// mismatch return `Ok(None)` rather than manufacturing semantic IR.
+///
+/// # Errors
+/// Returns an error for malformed API input, STEP parsing failures, invalid CAD IR,
+/// or a backend evaluation/serialization failure.
+pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
+    source_step: &[u8],
+    solid_id: u64,
+    cap_face_ids: &[[u64; 2]],
+    kernel: &K,
+) -> Result<Option<CadFragment>> {
+    if solid_id == 0 || cap_face_ids.len() < 2 {
+        bail!("extrusion-core union admission needs one solid and at least two cap pairs");
+    }
+
+    let mut canonical_pairs = cap_face_ids
+        .iter()
+        .copied()
+        .map(|mut pair| {
+            pair.sort_unstable();
+            pair
+        })
+        .collect::<Vec<_>>();
+    if canonical_pairs
+        .iter()
+        .any(|pair| pair[0] == 0 || pair[0] == pair[1])
+    {
+        bail!("extrusion-core union cap pairs must contain two distinct nonzero face ids");
+    }
+    canonical_pairs.sort_unstable();
+    if canonical_pairs.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("extrusion-core union cap pairs must be unique");
+    }
+
+    let source = ParsedExchange::parse(source_step)?.exchange;
+    if source.data.len() != 1 {
+        bail!("extrusion-core union admission currently requires exactly one DATA section");
+    }
+    let entities = &source.data[0].entities;
+    let index = build_index(entities);
+    let Some(source_face_ids) = crate::brep::solid_face_ids(solid_id, entities, &index) else {
+        return Ok(None);
+    };
+
+    let mut fragments = Vec::with_capacity(canonical_pairs.len());
+    let mut max_residual_mm = crate::boundary_proof::ANALYTIC_BOUNDARY_PROOF_TOL_MM;
+    for &pair in &canonical_pairs {
+        let Some(core) = crate::solid_extrusions::recover_extrusion_core_from_cap_faces_with_index(
+            solid_id, pair, entities, &index,
+        ) else {
+            return Ok(None);
+        };
+        max_residual_mm = max_residual_mm.max(core.max_residual_mm);
+        fragments.push(recover_solid_extrusion_fragment(&core)?);
+    }
+
+    let (mut model, root) = compose_union_model(&fragments)?;
+    let evaluated = kernel.evaluate(&model, root)?;
+    let summary = kernel.summarize(&evaluated);
+    if !summary.geometrically_consistent || summary.shells != 1 {
+        return Ok(None);
+    }
+
+    let rebuilt_step = kernel.to_step(&evaluated)?;
+    let rebuilt = ParsedExchange::parse(rebuilt_step.as_bytes())?.exchange;
+    if rebuilt.data.len() != 1 {
+        return Ok(None);
+    }
+    let rebuilt_entities = &rebuilt.data[0].entities;
+    let rebuilt_solid_ids = rebuilt_entities
+        .iter()
+        .filter_map(|entity| {
+            simple_record(entity)
+                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+                .then_some(entity_id(entity))
+        })
+        .collect::<Vec<_>>();
+    let [rebuilt_solid_id] = rebuilt_solid_ids.as_slice() else {
+        return Ok(None);
+    };
+
+    let comparison = crate::boundary_proof::compare_analytic_boundaries(
+        solid_id,
+        entities,
+        *rebuilt_solid_id,
+        rebuilt_entities,
+    );
+    if !comparison.equivalent {
+        return Ok(None);
+    }
+
+    let mut source_entity_ids = Vec::with_capacity(source_face_ids.len() + 1);
+    source_entity_ids.push(solid_id);
+    source_entity_ids.extend(source_face_ids);
+    source_entity_ids.sort_unstable();
+    source_entity_ids.dedup();
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids,
+            proof: ProofStatus::WithinTolerance,
+            max_residual_mm: Some(max_residual_mm),
+        },
+    )?;
+    model.validate()?;
+
+    Ok(Some(CadFragment {
+        source: CadFragmentSource::ExtrusionCoreUnion {
+            solid_id,
+            cap_face_ids: canonical_pairs,
+        },
+        model,
+        root,
+    }))
 }
 
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.

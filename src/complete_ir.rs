@@ -767,6 +767,7 @@ fn source_solid_id(source: &CadFragmentSource) -> u64 {
         | CadFragmentSource::SolidSweep { solid_id, .. }
         | CadFragmentSource::RevolvedRoundTail { solid_id, .. }
         | CadFragmentSource::PeriodicChain { solid_id, .. }
+        | CadFragmentSource::ExtrusionCoreUnion { solid_id, .. }
         | CadFragmentSource::BoundaryFeatureComposite { solid_id, .. } => *solid_id,
     }
 }
