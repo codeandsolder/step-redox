@@ -191,6 +191,9 @@ fn extrusion_core_candidate(
 ) -> Option<RecoveredSolidExtrusion> {
     let pair = ordered_cap_pair(first_index, second_index, faces)?;
     let max_residual_mm = prove_translated_caps(&pair)?;
+    if has_intervening_translated_boundary(&pair, faces) {
+        return None;
+    }
     let profile = canonical_profile(pair.bottom, pair.z_axis, &pair.bottom_loop_roles)?;
     Some(RecoveredSolidExtrusion {
         solid_id,
@@ -473,6 +476,51 @@ fn prove_translated_caps(pair: &CapPairProof<'_>) -> Option<f64> {
     Some(max_residual_mm)
 }
 
+fn has_intervening_translated_boundary(pair: &CapPairProof<'_>, faces: &[FaceInfo]) -> bool {
+    let SurfaceSupport::Plane(bottom_plane) = pair.bottom.surface else {
+        return true;
+    };
+
+    faces.iter().enumerate().any(|(face_index, face)| {
+        if face_index == pair.bottom_index || face_index == pair.top_index {
+            return false;
+        }
+        let SurfaceSupport::Plane(plane) = face.surface else {
+            return false;
+        };
+        if !parallel(plane.normal, bottom_plane.normal) || !face_lies_on_plane(face, plane) {
+            return false;
+        }
+
+        let offset = dot(pair.z_axis, sub(plane.origin_mm, bottom_plane.origin_mm));
+        if offset <= GEOM_TOL_MM || offset >= pair.height_mm - GEOM_TOL_MM {
+            return false;
+        }
+        if face.loops.len() != pair.bottom.loops.len()
+            || face.loop_edges.len() != pair.bottom.loop_edges.len()
+        {
+            return false;
+        }
+        let Some(top_loop_roles) = cap_loop_roles(face, pair.z_axis) else {
+            return false;
+        };
+        let intermediate = CapPairProof {
+            bottom_index: pair.bottom_index,
+            top_index: face_index,
+            bottom: pair.bottom,
+            top: face,
+            z_axis: pair.z_axis,
+            height_mm: offset,
+            extrusion: mul(pair.z_axis, offset),
+            bottom_loop_roles: pair.bottom_loop_roles.clone(),
+            top_loop_roles,
+            max_residual_mm: pair.max_residual_mm.max(plane.max_residual_mm),
+        };
+        prove_translated_caps(&intermediate).is_some()
+    })
+}
+
+/// Prove all source side faces themselves are the exact ruled walls of an extrusion.
 fn prove_extrusion_sides(
     pair: &CapPairProof<'_>,
     faces: &[FaceInfo],
@@ -1767,6 +1815,58 @@ mod tests {
                 direction,
             }),
         }
+    }
+
+    fn square_face_info(id: u64, edge_base: u64, z: f64, surface_forward: bool) -> FaceInfo {
+        let points = [[0.0, 0.0, z], [1.0, 0.0, z], [1.0, 1.0, z], [0.0, 1.0, z]];
+        let edges = (0..4)
+            .map(|index| {
+                line_edge(
+                    edge_base + index as u64,
+                    edge_base + 100 + index as u64,
+                    edge_base + 100 + ((index + 1) % 4) as u64,
+                    points[index],
+                    points[(index + 1) % 4],
+                )
+            })
+            .collect::<Vec<_>>();
+        let loop_ = brep::FaceLoop {
+            bound_id: id + 1_000,
+            loop_id: id + 2_000,
+            outer: true,
+            orientation: true,
+            edges: edges.clone(),
+        };
+        FaceInfo {
+            id,
+            surface: SurfaceSupport::Plane(PlaneSupport {
+                origin_mm: [0.0, 0.0, z],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            surface_forward,
+            loops: vec![loop_],
+            loop_edges: edges,
+        }
+    }
+
+    #[test]
+    fn intervening_translated_boundary_rejects_spanning_core() {
+        let bottom = square_face_info(1, 10, 0.0, false);
+        let middle = square_face_info(2, 20, 0.5, true);
+        let top = square_face_info(3, 30, 1.0, true);
+        let faces = vec![bottom.clone(), middle, top.clone()];
+        let pair = ordered_cap_pair(0, 2, &faces).expect("outer caps must form a candidate");
+        assert!(prove_translated_caps(&pair).is_some());
+        assert!(has_intervening_translated_boundary(&pair, &faces));
+
+        let faces_without_middle = vec![bottom, top];
+        let pair =
+            ordered_cap_pair(0, 1, &faces_without_middle).expect("outer caps must still match");
+        assert!(!has_intervening_translated_boundary(
+            &pair,
+            &faces_without_middle
+        ));
     }
 
     #[test]
