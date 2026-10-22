@@ -170,12 +170,25 @@ fn extrusion_core_candidates_for_solid(
     else {
         return Vec::new();
     };
+    // A face already carrying one unambiguous edge-treatment interpretation
+    // is not a sound cap for a *sharp* core. This is deliberately fail-closed:
+    // continuation candidates are not promoted to semantic treatment recovery;
+    // they are only grounds for declining this competing core interpretation.
+    let treatment_face_ids = crate::edge_treatments::unique_treatment_face_ids_for_solid(
+        solid_id, &face_ids, entities, index,
+    )
+    .into_iter()
+    .collect::<HashSet<_>>();
     let mut out = Vec::new();
     for first_index in 0..faces.len() {
         for second_index in first_index + 1..faces.len() {
-            if let Some(candidate) =
-                extrusion_core_candidate(solid_id, first_index, second_index, &faces)
-            {
+            if let Some(candidate) = extrusion_core_candidate(
+                solid_id,
+                first_index,
+                second_index,
+                &faces,
+                &treatment_face_ids,
+            ) {
                 out.push(candidate);
             }
         }
@@ -188,7 +201,13 @@ fn extrusion_core_candidate(
     first_index: usize,
     second_index: usize,
     faces: &[FaceInfo],
+    treatment_face_ids: &HashSet<u64>,
 ) -> Option<RecoveredSolidExtrusion> {
+    if treatment_face_ids.contains(&faces[first_index].id)
+        || treatment_face_ids.contains(&faces[second_index].id)
+    {
+        return None;
+    }
     let pair = ordered_cap_pair(first_index, second_index, faces)?;
     let max_residual_mm = prove_translated_caps(&pair)?;
     if has_intervening_translated_boundary(&pair, faces) {
