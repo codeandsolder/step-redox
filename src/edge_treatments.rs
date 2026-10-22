@@ -122,6 +122,29 @@ pub fn detect_edge_treatment_evidence(entities: &[EntityInstance]) -> Vec<EdgeTr
     out
 }
 
+/// Return faces with exactly one treatment carrier-pair interpretation.
+///
+/// This helper is for conservative rejection, not positive semantic recovery.
+/// In particular, continuation-candidate chamfers remain non-admission-grade:
+/// refusing such a face as a sharp extrusion-core cap can only drop a candidate.
+pub(crate) fn unique_treatment_face_ids_for_solid(
+    solid_id: u64,
+    face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<u64> {
+    let mut evidence = detect_solid_edge_treatments(solid_id, face_ids, entities, index);
+    mark_unique_carrier_pairs(&mut evidence);
+    let mut face_ids = evidence
+        .into_iter()
+        .filter(|evidence| evidence.carrier_pair_unique)
+        .map(|evidence| evidence.treatment_face_id)
+        .collect::<Vec<_>>();
+    face_ids.sort_unstable();
+    face_ids.dedup();
+    face_ids
+}
+
 fn detect_solid_edge_treatments(
     solid_id: u64,
     face_ids: &[u64],
