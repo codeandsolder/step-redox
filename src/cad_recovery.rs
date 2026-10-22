@@ -231,6 +231,96 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
     }))
 }
 
+/// Detect and admit one exact union of strict extrusion-core candidates.
+///
+/// The search is intentionally bounded. It first tries every strict source-derived
+/// core. If that does not admit and there are at most eight candidates, it tries
+/// each single-core omission. Exactly one successful omission is required; this
+/// avoids exponential subset search and arbitrary construction choices. Candidate
+/// selection is never semantic authority: every attempted set still passes through
+/// [`recover_proven_extrusion_core_union_fragment`] and its complete analytic
+/// source/rebuild boundary proof.
+///
+/// # Errors
+/// Returns an error for malformed STEP input or when the canonical full-set
+/// backend evaluation fails and no exact single-omission alternative succeeds.
+/// Failures from exploratory omission attempts do not turn an otherwise clean
+/// semantic refusal into an error.
+pub fn recover_auto_proven_extrusion_core_union_fragment<K: CadKernel>(
+    source_step: &[u8],
+    solid_id: u64,
+    kernel: &K,
+) -> Result<Option<CadFragment>> {
+    const MAX_SINGLE_OMISSION_CANDIDATES: usize = 8;
+
+    let source = ParsedExchange::parse(source_step)?.exchange;
+    if source.data.len() != 1 {
+        bail!("automatic extrusion-core union recovery requires exactly one DATA section");
+    }
+    let entities = &source.data[0].entities;
+    let index = build_index(entities);
+    let mut cap_pairs =
+        crate::solid_extrusions::detect_extrusion_core_candidates_with_index(entities, &index)
+            .into_iter()
+            .filter(|candidate| candidate.solid_id == solid_id)
+            .map(|candidate| {
+                let mut pair = candidate.cap_face_ids;
+                pair.sort_unstable();
+                pair
+            })
+            .collect::<Vec<_>>();
+    cap_pairs.sort_unstable();
+    cap_pairs.dedup();
+    if cap_pairs.len() < 2 {
+        return Ok(None);
+    }
+
+    let remembered_error = match recover_proven_extrusion_core_union_fragment(
+        source_step,
+        solid_id,
+        &cap_pairs,
+        kernel,
+    ) {
+        Ok(Some(fragment)) => return Ok(Some(fragment)),
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+
+    if !(3..=MAX_SINGLE_OMISSION_CANDIDATES).contains(&cap_pairs.len()) {
+        return remembered_error.map_or(Ok(None), Err);
+    }
+
+    let mut admitted = None;
+    for omitted in 0..cap_pairs.len() {
+        let subset = cap_pairs
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != omitted)
+            .map(|(_, pair)| *pair)
+            .collect::<Vec<_>>();
+        match recover_proven_extrusion_core_union_fragment(source_step, solid_id, &subset, kernel) {
+            Ok(Some(fragment)) => {
+                if admitted.is_some() {
+                    // Multiple exact constructions are semantically valid but this
+                    // bounded selector has no source-derived reason to prefer one.
+                    return Ok(None);
+                }
+                admitted = Some(fragment);
+            }
+            Ok(None) => {}
+            Err(_error) => {
+                // Omission attempts are optional recall probes. A kernel failure
+                // here must not turn a clean full-set semantic refusal into an error.
+            }
+        }
+    }
+
+    match admitted {
+        Some(fragment) => Ok(Some(fragment)),
+        None => remembered_error.map_or(Ok(None), Err),
+    }
+}
+
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.
 ///
 /// This node is descriptive, not yet executable by Monstertruck/KCL. It references the exact
