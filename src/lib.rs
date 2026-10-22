@@ -8,6 +8,7 @@ pub use analysis::AnalysisSession;
 mod bezier_recovery;
 #[doc(hidden)]
 pub mod body_corpus;
+pub mod boundary_proof;
 mod brep;
 pub mod cad_ir;
 pub mod cad_kernel;
@@ -477,6 +478,38 @@ pub fn detect_formed_sheet_evidence_bytes(
         .iter()
         .flat_map(|section| formed_sheet::detect_formed_sheet_evidence(&section.entities))
         .collect())
+}
+
+/// Compare two closed analytic solid boundaries after collapsing representational partitions.
+///
+/// This is fail-closed proof evidence, not Complete IR admission by itself. The
+/// comparator accepts only plane/cylinder carriers, requires every physical
+/// boundary edge to be proven on the exact intersection locus of its two
+/// carriers, collapses same-support face partitions and degree-two edge splits,
+/// then compares the resulting oriented support-adjacency chains. Rational
+/// quadratic spline-extrusion cylinders are accepted only after a whole-span
+/// homogeneous polynomial circle certificate.
+///
+/// # Errors
+/// Returns an error if either STEP exchange cannot be parsed or does not contain
+/// exactly one DATA section.
+pub fn compare_analytic_solid_boundaries_bytes(
+    first: &[u8],
+    first_solid_id: u64,
+    second: &[u8],
+    second_solid_id: u64,
+) -> Result<boundary_proof::AnalyticBoundaryComparison> {
+    let first = ParsedExchange::parse(first)?.exchange;
+    let second = ParsedExchange::parse(second)?.exchange;
+    if first.data.len() != 1 || second.data.len() != 1 {
+        bail!("analytic boundary comparison currently requires one DATA section per exchange");
+    }
+    Ok(boundary_proof::compare_analytic_boundaries(
+        first_solid_id,
+        &first.data[0].entities,
+        second_solid_id,
+        &second.data[0].entities,
+    ))
 }
 
 /// Report per-solid analytic surface and loop-topology signatures.
