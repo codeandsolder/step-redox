@@ -1,6 +1,7 @@
 use crate::brep::{self, BSplineSupport, CurveSupport, SplineExtrusionSupport, SurfaceSupport};
 use crate::math3::{add, canonical_direction, cross, distance, dot, mul, norm, normalize, sub};
 use crate::step_graph::{build_index, entity_ref_value, simple_record};
+use num_traits::ToPrimitive;
 use ruststep::ast::{EntityInstance, Parameter};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -8,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 const POINT_Q_MM: f64 = 1.0e-7;
 const DIRECTION_Q: f64 = 1.0e-10;
 const SCALAR_Q_MM: f64 = 1.0e-7;
+const BINOMIAL_2: [f64; 3] = [1.0, 2.0, 1.0];
+const BINOMIAL_4: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
 pub(crate) const ANALYTIC_BOUNDARY_PROOF_TOL_MM: f64 = 4.0 * SCALAR_Q_MM;
 
 type PointKey = [i64; 3];
@@ -130,6 +133,7 @@ impl UnionFind {
     }
 }
 
+#[must_use]
 pub fn compare_analytic_boundaries(
     first_solid_id: u64,
     first_entities: &[EntityInstance],
@@ -170,6 +174,10 @@ pub fn analytic_boundary_diagnostic(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fail-closed boundary proof is intentionally kept as one linear audit pipeline"
+)]
 fn analytic_boundary_signature(
     solid_id: u64,
     entities: &[EntityInstance],
@@ -302,7 +310,7 @@ fn analytic_boundary_signature(
 
     let mut chains = Vec::new();
     for (supports, segments) in grouped_segments {
-        chains.extend(normalize_support_pair_chains(supports, &segments)?);
+        chains.extend(normalize_support_pair_chains(&supports, &segments)?);
     }
     chains.sort();
 
@@ -329,7 +337,7 @@ fn analytic_boundary_signature(
 }
 
 fn normalize_support_pair_chains(
-    supports: [OrientedSupportKey; 2],
+    supports: &[OrientedSupportKey; 2],
     segments: &[(PointKey, PointKey)],
 ) -> Result<Vec<BoundaryChainKey>, String> {
     if segments.is_empty() {
@@ -383,14 +391,14 @@ fn normalize_support_pair_chains(
 
         if endpoints.len() == 2 {
             let mut endpoints_mm = [endpoints[0], endpoints[1]];
-            endpoints_mm.sort();
+            endpoints_mm.sort_unstable();
             out.push(BoundaryChainKey::Open {
-                supports: supports.clone(),
+                supports: supports.to_owned(),
                 endpoints_mm,
             });
         } else if endpoints.is_empty() && all_degree_two {
             out.push(BoundaryChainKey::Cycle {
-                supports: supports.clone(),
+                supports: supports.to_owned(),
             });
         } else {
             return Err("support-pair component is neither a simple path nor cycle".to_owned());
@@ -399,7 +407,7 @@ fn normalize_support_pair_chains(
     Ok(out)
 }
 
-fn support_locus_key(support: &OrientedSupportKey) -> SupportLocusKey {
+const fn support_locus_key(support: &OrientedSupportKey) -> SupportLocusKey {
     match support {
         OrientedSupportKey::Plane {
             normal, offset_mm, ..
@@ -550,14 +558,24 @@ fn bspline_is_circular_section_of_supports(
         ) => (*normal, *offset_mm, *axis, *closest_mm, *radius_mm),
         _ => return false,
     };
-    let normal = dequantize_vector(normal, DIRECTION_Q);
-    let axis = dequantize_vector(axis, DIRECTION_Q);
+    let Some(normal) = dequantize_vector(normal, DIRECTION_Q) else {
+        return false;
+    };
+    let Some(axis) = dequantize_vector(axis, DIRECTION_Q) else {
+        return false;
+    };
     if norm(cross(normal, axis)) > ANGULAR_TOLERANCE {
         return false;
     }
-    let closest = dequantize_vector(closest_mm, POINT_Q_MM);
-    let offset = offset_mm as f64 * SCALAR_Q_MM;
-    let radius = radius_mm as f64 * SCALAR_Q_MM;
+    let Some(closest) = dequantize_vector(closest_mm, POINT_Q_MM) else {
+        return false;
+    };
+    let Some(offset) = dequantize_scalar(offset_mm) else {
+        return false;
+    };
+    let Some(radius) = dequantize_scalar(radius_mm) else {
+        return false;
+    };
     let denominator = dot(normal, axis);
     if denominator.abs() <= ANGULAR_TOLERANCE {
         return false;
@@ -577,8 +595,12 @@ fn support_pair_can_intersect(loci: &[SupportLocusKey; 2]) -> bool {
             SupportLocusKey::Plane { normal: first, .. },
             SupportLocusKey::Plane { normal: second, .. },
         ) => {
-            let first = dequantize_vector(*first, DIRECTION_Q);
-            let second = dequantize_vector(*second, DIRECTION_Q);
+            let Some(first) = dequantize_vector(*first, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(second) = dequantize_vector(*second, DIRECTION_Q) else {
+                return false;
+            };
             norm(cross(first, second)) > ANGULAR_TOLERANCE
         }
         (
@@ -597,14 +619,24 @@ fn support_pair_can_intersect(loci: &[SupportLocusKey; 2]) -> bool {
             },
             SupportLocusKey::Plane { normal, offset_mm },
         ) => {
-            let normal = dequantize_vector(*normal, DIRECTION_Q);
-            let axis = dequantize_vector(*axis, DIRECTION_Q);
+            let Some(normal) = dequantize_vector(*normal, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(axis) = dequantize_vector(*axis, DIRECTION_Q) else {
+                return false;
+            };
             if dot(normal, axis).abs() > ANGULAR_TOLERANCE {
                 return true;
             }
-            let closest = dequantize_vector(*closest_mm, POINT_Q_MM);
-            let offset = *offset_mm as f64 * SCALAR_Q_MM;
-            let radius = *radius_mm as f64 * SCALAR_Q_MM;
+            let Some(closest) = dequantize_vector(*closest_mm, POINT_Q_MM) else {
+                return false;
+            };
+            let Some(offset) = dequantize_scalar(*offset_mm) else {
+                return false;
+            };
+            let Some(radius) = dequantize_scalar(*radius_mm) else {
+                return false;
+            };
             (dot(normal, closest) - offset).abs() <= radius + LOCUS_TOLERANCE_MM
         }
         (SupportLocusKey::Cylinder { .. }, SupportLocusKey::Cylinder { .. }) => false,
@@ -619,8 +651,12 @@ fn line_lies_on_support(line: brep::LineSupport, support: &SupportLocusKey) -> b
     };
     match support {
         SupportLocusKey::Plane { normal, offset_mm } => {
-            let normal = dequantize_vector(*normal, DIRECTION_Q);
-            let offset = *offset_mm as f64 * SCALAR_Q_MM;
+            let Some(normal) = dequantize_vector(*normal, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(offset) = dequantize_scalar(*offset_mm) else {
+                return false;
+            };
             (dot(normal, line.origin_mm) - offset).abs() <= LOCUS_TOLERANCE_MM
                 && dot(normal, direction).abs() <= ANGULAR_TOLERANCE
         }
@@ -629,9 +665,15 @@ fn line_lies_on_support(line: brep::LineSupport, support: &SupportLocusKey) -> b
             closest_mm,
             radius_mm,
         } => {
-            let axis = dequantize_vector(*axis, DIRECTION_Q);
-            let closest = dequantize_vector(*closest_mm, POINT_Q_MM);
-            let radius = *radius_mm as f64 * SCALAR_Q_MM;
+            let Some(axis) = dequantize_vector(*axis, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(closest) = dequantize_vector(*closest_mm, POINT_Q_MM) else {
+                return false;
+            };
+            let Some(radius) = dequantize_scalar(*radius_mm) else {
+                return false;
+            };
             let delta = sub(line.origin_mm, closest);
             let radial = sub(delta, mul(axis, dot(delta, axis)));
             norm(cross(direction, axis)) <= ANGULAR_TOLERANCE
@@ -651,8 +693,12 @@ fn circle_lies_on_support(circle: brep::CircleSupport, support: &SupportLocusKey
             normal: plane_normal,
             offset_mm,
         } => {
-            let plane_normal = dequantize_vector(*plane_normal, DIRECTION_Q);
-            let offset = *offset_mm as f64 * SCALAR_Q_MM;
+            let Some(plane_normal) = dequantize_vector(*plane_normal, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(offset) = dequantize_scalar(*offset_mm) else {
+                return false;
+            };
             norm(cross(normal, plane_normal)) <= ANGULAR_TOLERANCE
                 && (dot(plane_normal, circle.center_mm) - offset).abs() <= LOCUS_TOLERANCE_MM
         }
@@ -661,9 +707,15 @@ fn circle_lies_on_support(circle: brep::CircleSupport, support: &SupportLocusKey
             closest_mm,
             radius_mm,
         } => {
-            let axis = dequantize_vector(*axis, DIRECTION_Q);
-            let closest = dequantize_vector(*closest_mm, POINT_Q_MM);
-            let radius = *radius_mm as f64 * SCALAR_Q_MM;
+            let Some(axis) = dequantize_vector(*axis, DIRECTION_Q) else {
+                return false;
+            };
+            let Some(closest) = dequantize_vector(*closest_mm, POINT_Q_MM) else {
+                return false;
+            };
+            let Some(radius) = dequantize_scalar(*radius_mm) else {
+                return false;
+            };
             let delta = sub(circle.center_mm, closest);
             let radial_center = sub(delta, mul(axis, dot(delta, axis)));
             norm(cross(normal, axis)) <= ANGULAR_TOLERANCE
@@ -673,8 +725,16 @@ fn circle_lies_on_support(circle: brep::CircleSupport, support: &SupportLocusKey
     }
 }
 
-fn dequantize_vector(vector: [i64; 3], quantum: f64) -> [f64; 3] {
-    vector.map(|coordinate| coordinate as f64 * quantum)
+fn dequantize_scalar(value: i64) -> Option<f64> {
+    Some(value.to_f64()? * SCALAR_Q_MM)
+}
+
+fn dequantize_vector(vector: [i64; 3], quantum: f64) -> Option<[f64; 3]> {
+    Some([
+        vector[0].to_f64()? * quantum,
+        vector[1].to_f64()? * quantum,
+        vector[2].to_f64()? * quantum,
+    ])
 }
 
 fn oriented_support_key(
@@ -760,7 +820,7 @@ fn spline_extrusion_cylinder_key(
         return None;
     }
     let center_x = q1x * 0.5;
-    let center_y = (q2x.mul_add(q2x, q2y * q2y) - q1x * q2x) / (2.0 * q2y);
+    let center_y = q1x.mul_add(-q2x, q2x.mul_add(q2x, q2y * q2y)) / (2.0 * q2y);
     if !center_y.is_finite() {
         return None;
     }
@@ -845,7 +905,7 @@ fn certify_rational_bspline_circle(
         let hm = evaluate_homogeneous_bspline(spline, middle)?;
         let h2 = evaluate_homogeneous_bspline(spline, end)?;
         let h1 = std::array::from_fn(|coordinate| {
-            2.0 * hm[coordinate] - 0.5 * (h0[coordinate] + h2[coordinate])
+            f64::midpoint(h0[coordinate], h2[coordinate]).mul_add(-1.0, 2.0 * hm[coordinate])
         });
         let controls = [h0, h1, h2];
         if controls.iter().flatten().any(|value| !value.is_finite())
@@ -860,9 +920,9 @@ fn certify_rational_bspline_circle(
             .fold(f64::INFINITY, f64::min);
         let centered = controls.map(|control| {
             [
-                control[0] - center[0] * control[3],
-                control[1] - center[1] * control[3],
-                control[2] - center[2] * control[3],
+                center[0].mul_add(-control[3], control[0]),
+                center[1].mul_add(-control[3], control[1]),
+                center[2].mul_add(-control[3], control[2]),
             ]
         });
 
@@ -874,8 +934,6 @@ fn certify_rational_bspline_circle(
             return Some(false);
         }
 
-        const BINOMIAL_2: [f64; 3] = [1.0, 2.0, 1.0];
-        const BINOMIAL_4: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
         let mut circle_coefficients = [0.0_f64; 5];
         for first in 0..3 {
             for second in 0..3 {
@@ -883,13 +941,14 @@ fn certify_rational_bspline_circle(
                 let factor = BINOMIAL_2[first] * BINOMIAL_2[second] / BINOMIAL_4[degree];
                 let radial_dot = dot(centered[first], centered[second]);
                 let weight_product = controls[first][3] * controls[second][3];
-                circle_coefficients[degree] +=
-                    factor * (radial_dot - radius * radius * weight_product);
+                let residual = (radius * radius).mul_add(-weight_product, radial_dot);
+                circle_coefficients[degree] = factor.mul_add(residual, circle_coefficients[degree]);
             }
         }
 
-        let radial_bound =
-            (2.0 * radius * tolerance_mm + tolerance_mm * tolerance_mm) * min_weight * min_weight;
+        let radial_bound = tolerance_mm.mul_add(tolerance_mm, 2.0 * radius * tolerance_mm)
+            * min_weight
+            * min_weight;
         if circle_coefficients
             .iter()
             .any(|coefficient| coefficient.abs() > radial_bound)
@@ -921,7 +980,7 @@ fn evaluate_homogeneous_bspline(spline: &BSplineSupport, parameter: f64) -> Opti
     {
         return None;
     }
-    if parameter == domain_end {
+    if parameter >= domain_end {
         let point = *spline.control_points_mm.last()?;
         let weight = *weights.last()?;
         return Some([
@@ -933,9 +992,9 @@ fn evaluate_homogeneous_bspline(spline: &BSplineSupport, parameter: f64) -> Opti
     }
 
     let mut basis = vec![0.0; control_count + spline.degree];
-    for index in 0..control_count {
+    for (index, basis_value) in basis.iter_mut().enumerate().take(control_count) {
         if spline.knots[index] <= parameter && parameter < spline.knots[index + 1] {
-            basis[index] = 1.0;
+            *basis_value = 1.0;
         }
     }
     for degree in 1..=spline.degree {
@@ -998,7 +1057,7 @@ fn evaluate_bspline(spline: &BSplineSupport, parameter: f64) -> Option<[f64; 3]>
     if !parameter.is_finite() || parameter < domain_start || parameter > domain_end {
         return None;
     }
-    if parameter == domain_end {
+    if parameter >= domain_end {
         return spline.control_points_mm.last().copied();
     }
 
@@ -1015,9 +1074,9 @@ fn evaluate_bspline(spline: &BSplineSupport, parameter: f64) -> Option<[f64; 3]>
     }
 
     let mut basis = vec![0.0; control_count + spline.degree];
-    for index in 0..control_count {
+    for (index, basis_value) in basis.iter_mut().enumerate().take(control_count) {
         if spline.knots[index] <= parameter && parameter < spline.knots[index + 1] {
-            basis[index] = 1.0;
+            *basis_value = 1.0;
         }
     }
     for degree in 1..=spline.degree {
@@ -1086,11 +1145,7 @@ fn quantize(value: f64, quantum: f64) -> Option<i64> {
     if !value.is_finite() || !quantum.is_finite() || quantum <= 0.0 {
         return None;
     }
-    let scaled = (value / quantum).round();
-    if scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
-        return None;
-    }
-    Some(scaled as i64)
+    (value / quantum).round().to_i64()
 }
 
 #[cfg(test)]
@@ -1175,9 +1230,9 @@ mod tests {
     #[test]
     fn open_chain_normalization_ignores_degree_two_partitions() {
         let supports = [plane(0, true), plane(10_000_000, true)];
-        let one = normalize_support_pair_chains(supports.clone(), &[([0, 0, 0], [20, 0, 0])]);
+        let one = normalize_support_pair_chains(&supports, &[([0, 0, 0], [20, 0, 0])]);
         let split = normalize_support_pair_chains(
-            supports,
+            &supports,
             &[([0, 0, 0], [7, 0, 0]), ([7, 0, 0], [20, 0, 0])],
         );
         assert!(one.is_ok());
@@ -1188,7 +1243,7 @@ mod tests {
     fn cycle_normalization_ignores_partition_vertices() {
         let supports = [plane(0, true), plane(10_000_000, true)];
         let first = normalize_support_pair_chains(
-            supports.clone(),
+            &supports,
             &[
                 ([0, 0, 0], [10, 0, 0]),
                 ([10, 0, 0], [10, 10, 0]),
@@ -1197,7 +1252,7 @@ mod tests {
             ],
         );
         let split = normalize_support_pair_chains(
-            supports,
+            &supports,
             &[
                 ([0, 0, 0], [5, 0, 0]),
                 ([5, 0, 0], [10, 0, 0]),
@@ -1214,7 +1269,7 @@ mod tests {
     fn branch_is_rejected() {
         let supports = [plane(0, true), plane(10_000_000, true)];
         let result = normalize_support_pair_chains(
-            supports,
+            &supports,
             &[
                 ([0, 0, 0], [10, 0, 0]),
                 ([10, 0, 0], [20, 0, 0]),
