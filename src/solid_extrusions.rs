@@ -1870,22 +1870,24 @@ mod tests {
     }
 
     #[test]
-    fn intervening_translated_boundary_rejects_spanning_core() {
+    fn intervening_translated_boundary_rejects_spanning_core() -> anyhow::Result<()> {
         let bottom = square_face_info(1, 10, 0.0, false);
         let middle = square_face_info(2, 20, 0.5, true);
         let top = square_face_info(3, 30, 1.0, true);
         let faces = vec![bottom.clone(), middle, top.clone()];
-        let pair = ordered_cap_pair(0, 2, &faces).expect("outer caps must form a candidate");
+        let pair = ordered_cap_pair(0, 2, &faces)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must form a candidate"))?;
         assert!(prove_translated_caps(&pair).is_some());
         assert!(has_intervening_translated_boundary(&pair, &faces));
 
         let faces_without_middle = vec![bottom, top];
-        let pair =
-            ordered_cap_pair(0, 1, &faces_without_middle).expect("outer caps must still match");
+        let pair = ordered_cap_pair(0, 1, &faces_without_middle)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must still match"))?;
         assert!(!has_intervening_translated_boundary(
             &pair,
             &faces_without_middle
         ));
+        Ok(())
     }
 
     #[test]
