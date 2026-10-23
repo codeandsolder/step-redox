@@ -2,6 +2,7 @@ use crate::cad_ir::{
     BooleanOp, CadModel, CadNode, FusedPeriodicChain, IndexedCount, NodeId, ProofStatus, Provenance,
 };
 use crate::cad_kernel::CadKernel;
+use crate::math3::dot;
 use crate::periodic_chains::PeriodicChainPattern;
 use crate::step_graph::{build_index, entity_id, simple_record};
 use crate::step_io::ParsedExchange;
@@ -98,15 +99,88 @@ pub fn compose_union_model(fragments: &[CadFragment]) -> Result<(CadModel, NodeI
         children.push(root);
     }
 
-    let root = model.add_node(CadNode::Boolean {
-        op: BooleanOp::Union,
-        children,
-    });
+    let root = add_bounded_union_tree(&mut model, children);
     model.add_root(root)?;
     model.validate()?;
     Ok((model, root))
 }
 
+const MAX_FLAT_UNION_CHILDREN: usize = 8;
+const AXIS_GROUP_DOT_TOLERANCE: f64 = 1.0e-10;
+
+fn add_bounded_union_tree(model: &mut CadModel, children: Vec<NodeId>) -> NodeId {
+    if children.len() == 1 {
+        return children[0];
+    }
+    if children.len() <= MAX_FLAT_UNION_CHILDREN {
+        return model.add_node(CadNode::Boolean {
+            op: BooleanOp::Union,
+            children,
+        });
+    }
+
+    let mut level = children;
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            if let [first, second] = pair {
+                next.push(model.add_node(CadNode::Boolean {
+                    op: BooleanOp::Union,
+                    children: vec![*first, *second],
+                }));
+            } else {
+                next.push(pair[0]);
+            }
+        }
+        level = next;
+    }
+    level[0]
+}
+
+fn compose_extrusion_core_union_model(
+    fragments: &[CadFragment],
+    axes: &[[f64; 3]],
+) -> Result<(CadModel, NodeId)> {
+    if fragments.len() != axes.len() || fragments.len() < 2 {
+        bail!("extrusion-core union composition needs matching fragments and axes");
+    }
+    if fragments.len() <= MAX_FLAT_UNION_CHILDREN {
+        return compose_union_model(fragments);
+    }
+
+    let mut model = CadModel::new();
+    let mut groups = Vec::<([f64; 3], Vec<NodeId>)>::new();
+    for (fragment, &axis) in fragments.iter().zip(axes) {
+        fragment.model.validate()?;
+        let offset = model.append_model(&fragment.model)?;
+        let root = NodeId(
+            fragment
+                .root
+                .0
+                .checked_add(offset)
+                .ok_or_else(|| anyhow::anyhow!("CAD root id overflow while composing union"))?,
+        );
+        model.node(root)?;
+
+        if let Some((_, roots)) = groups
+            .iter_mut()
+            .find(|(group_axis, _)| dot(*group_axis, axis).abs() >= 1.0 - AXIS_GROUP_DOT_TOLERANCE)
+        {
+            roots.push(root);
+        } else {
+            groups.push((axis, vec![root]));
+        }
+    }
+
+    let group_roots = groups
+        .into_iter()
+        .map(|(_, roots)| add_bounded_union_tree(&mut model, roots))
+        .collect::<Vec<_>>();
+    let root = add_bounded_union_tree(&mut model, group_roots);
+    model.add_root(root)?;
+    model.validate()?;
+    Ok((model, root))
+}
 /// Recover and admit a union of sharp extrusion cores only when an independent
 /// analytic boundary proof establishes that the evaluated union is the source solid.
 ///
@@ -160,6 +234,7 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
     };
 
     let mut fragments = Vec::with_capacity(canonical_pairs.len());
+    let mut axes = Vec::with_capacity(canonical_pairs.len());
     let mut max_residual_mm = crate::boundary_proof::ANALYTIC_BOUNDARY_PROOF_TOL_MM;
     for &pair in &canonical_pairs {
         let Some(core) = crate::solid_extrusions::recover_extrusion_core_from_cap_faces_with_index(
@@ -168,10 +243,11 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
             return Ok(None);
         };
         max_residual_mm = max_residual_mm.max(core.max_residual_mm);
+        axes.push(core.z_axis);
         fragments.push(recover_solid_extrusion_fragment(&core)?);
     }
 
-    let (mut model, root) = compose_union_model(&fragments)?;
+    let (mut model, root) = compose_extrusion_core_union_model(&fragments, &axes)?;
     let evaluated = kernel.evaluate(&model, root)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent || summary.shells != 1 {
@@ -538,6 +614,70 @@ mod tests {
         assert_eq!(*op, BooleanOp::Union);
         assert_eq!(children.as_slice(), &[NodeId(0), NodeId(1)]);
         assert_eq!(model.roots.as_slice(), &[root]);
+        Ok(())
+    }
+
+    #[test]
+    fn union_model_keeps_bounded_fragment_roots_flat() -> Result<()> {
+        let fragments = [
+            primitive_fragment(10)?,
+            primitive_fragment(20)?,
+            primitive_fragment(30)?,
+            primitive_fragment(40)?,
+        ];
+        let (model, root) = compose_union_model(&fragments)?;
+        assert_eq!(root, NodeId(4));
+        let CadNode::Boolean { op, children } = model.node(root)? else {
+            bail!("expected flat union node");
+        };
+        assert_eq!(*op, BooleanOp::Union);
+        assert_eq!(
+            children.as_slice(),
+            &[NodeId(0), NodeId(1), NodeId(2), NodeId(3)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn union_model_balances_large_fragment_sets() -> Result<()> {
+        let fragments = (0..9)
+            .map(|index| primitive_fragment(index))
+            .collect::<Result<Vec<_>>>()?;
+        let (model, root) = compose_union_model(&fragments)?;
+        assert_eq!(root, NodeId(16));
+        for node_index in 9..=16 {
+            let CadNode::Boolean { op, children } = model.node(NodeId(node_index))? else {
+                bail!("expected binary union node");
+            };
+            assert_eq!(*op, BooleanOp::Union);
+            assert_eq!(children.len(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extrusion_core_union_groups_large_sets_by_axis() -> Result<()> {
+        let fragments = (0..9)
+            .map(|index| primitive_fragment(index))
+            .collect::<Result<Vec<_>>>()?;
+        let axes = vec![[0.0, 0.0, 1.0]; 5]
+            .into_iter()
+            .chain(vec![[1.0, 0.0, 0.0]; 4])
+            .collect::<Vec<_>>();
+        let (model, root) = compose_extrusion_core_union_model(&fragments, &axes)?;
+        assert_eq!(root, NodeId(11));
+        let CadNode::Boolean { op, children } = model.node(root)? else {
+            bail!("expected grouped union root");
+        };
+        assert_eq!(*op, BooleanOp::Union);
+        assert_eq!(children.as_slice(), &[NodeId(9), NodeId(10)]);
+        for (node, expected_len) in [(NodeId(9), 5), (NodeId(10), 4)] {
+            let CadNode::Boolean { op, children } = model.node(node)? else {
+                bail!("expected axis-group union node");
+            };
+            assert_eq!(*op, BooleanOp::Union);
+            assert_eq!(children.len(), expected_len);
+        }
         Ok(())
     }
 
