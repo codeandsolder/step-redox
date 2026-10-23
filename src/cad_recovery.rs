@@ -315,10 +315,10 @@ pub fn recover_auto_proven_extrusion_core_union_fragment<K: CadKernel>(
         }
     }
 
-    match admitted {
-        Some(fragment) => Ok(Some(fragment)),
-        None => remembered_error.map_or(Ok(None), Err),
-    }
+    admitted.map_or_else(
+        || remembered_error.map_or(Ok(None), Err),
+        |fragment| Ok(Some(fragment)),
+    )
 }
 
 /// Recover a first-class fused periodic-chain IR fragment from a proven source partition.
