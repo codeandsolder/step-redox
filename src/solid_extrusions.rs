@@ -62,6 +62,7 @@ impl RecoveredSolidExtrusion {
 struct FaceInfo {
     id: u64,
     surface: SurfaceSupport,
+    surface_forward: bool,
     loops: Vec<brep::FaceLoop>,
     /// Flattened boundary edges retained for the existing manifold/side proof.
     loop_edges: Vec<OrientedEdgeUse>,
@@ -80,6 +81,152 @@ struct CanonicalProfile {
 pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSolidExtrusion> {
     let index = build_index(entities);
     detect_solid_extrusions_with_index(entities, &index)
+}
+
+/// Detect sharp extrusion cores implied by translated planar cap pairs.
+///
+/// These candidates deliberately prove only the cap-to-cap translation and
+/// canonical profile. They do not claim the source side faces are ruled
+/// extrusion walls, so callers must separately explain every residual source
+/// face before treating a candidate as whole-solid recovery.
+#[must_use]
+pub fn detect_extrusion_core_candidates(
+    entities: &[EntityInstance],
+) -> Vec<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    detect_extrusion_core_candidates_with_index(entities, &index)
+}
+
+pub(crate) fn detect_extrusion_core_candidates_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        out.extend(extrusion_core_candidates_for_solid(
+            solid_id, entities, index,
+        ));
+    }
+    out.sort_by(|first, second| {
+        first
+            .solid_id
+            .cmp(&second.solid_id)
+            .then_with(|| candidate_order(first, second))
+    });
+    out
+}
+
+/// Recover the sharp extrusion core implied by one explicit planar cap pair.
+///
+/// Unlike [`detect_solid_extrusions`], this proves the two cap loops are exact
+/// translations directly from their analytic boundary curves and deliberately
+/// does not claim that the source side faces are extrusion walls. It is only a
+/// core for a higher-level reconstruction that separately proves and replays
+/// every source-side treatment.
+#[must_use]
+pub fn recover_extrusion_core_from_cap_faces(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+) -> Option<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    recover_extrusion_core_from_cap_faces_with_index(solid_id, cap_face_ids, entities, &index)
+}
+
+pub(crate) fn recover_extrusion_core_from_cap_faces_with_index(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredSolidExtrusion> {
+    extrusion_core_candidates_for_solid(solid_id, entities, index)
+        .into_iter()
+        .find(|candidate| {
+            candidate.cap_face_ids == cap_face_ids
+                || candidate.cap_face_ids == [cap_face_ids[1], cap_face_ids[0]]
+        })
+}
+
+fn extrusion_core_candidates_for_solid(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let Some(face_ids) = brep::solid_face_ids(solid_id, entities, index) else {
+        return Vec::new();
+    };
+    let Some(faces) = face_ids
+        .iter()
+        .copied()
+        .map(|face_id| face_info(face_id, entities, index))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    // A face already carrying one unambiguous edge-treatment interpretation
+    // is not a sound cap for a *sharp* core. This is deliberately fail-closed:
+    // continuation candidates are not promoted to semantic treatment recovery;
+    // they are only grounds for declining this competing core interpretation.
+    let treatment_face_ids = crate::edge_treatments::unique_treatment_face_ids_for_solid(
+        solid_id, &face_ids, entities, index,
+    )
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let mut out = Vec::new();
+    for first_index in 0..faces.len() {
+        for second_index in first_index + 1..faces.len() {
+            if let Some(candidate) = extrusion_core_candidate(
+                solid_id,
+                first_index,
+                second_index,
+                &faces,
+                &treatment_face_ids,
+            ) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+fn extrusion_core_candidate(
+    solid_id: u64,
+    first_index: usize,
+    second_index: usize,
+    faces: &[FaceInfo],
+    treatment_face_ids: &HashSet<u64>,
+) -> Option<RecoveredSolidExtrusion> {
+    if treatment_face_ids.contains(&faces[first_index].id)
+        || treatment_face_ids.contains(&faces[second_index].id)
+    {
+        return None;
+    }
+    let pair = ordered_cap_pair(first_index, second_index, faces)?;
+    let max_residual_mm = prove_translated_caps(&pair)?;
+    if has_intervening_translated_boundary(&pair, faces) {
+        return None;
+    }
+    let profile = canonical_profile(pair.bottom, pair.z_axis, &pair.bottom_loop_roles)?;
+    Some(RecoveredSolidExtrusion {
+        solid_id,
+        cap_face_ids: [pair.bottom.id, pair.top.id],
+        side_face_ids: Vec::new(),
+        profile_curves: profile.curves,
+        inner_profile_loops: profile.inner_loops,
+        origin_mm: profile.origin_mm,
+        x_axis: profile.x_axis,
+        y_axis: profile.y_axis,
+        z_axis: pair.z_axis,
+        height_mm: pair.height_mm,
+        max_residual_mm,
+    })
 }
 
 pub(crate) fn detect_solid_extrusions_with_index(
@@ -260,6 +407,22 @@ fn ordered_cap_pair(
         return None;
     }
 
+    // A cap-derived core can only occupy source material when the two source
+    // faces bound the interval from the outside: the lower cap must face
+    // opposite the extrusion direction and the upper cap must face along it.
+    // This is necessary, not sufficient, for containment (an hourglass-shaped
+    // side wall can still cut into the prism), but it rejects translated planar
+    // pairs that geometrically match while bounding empty/outside space.
+    if !cap_faces_bound_material_interval(
+        *bottom_plane,
+        bottom.surface_forward,
+        *top_plane,
+        top.surface_forward,
+        z_axis,
+    ) {
+        return None;
+    }
+
     Some(CapPairProof {
         bottom_index,
         top_index,
@@ -274,6 +437,109 @@ fn ordered_cap_pair(
     })
 }
 
+fn cap_faces_bound_material_interval(
+    bottom: PlaneSupport,
+    bottom_forward: bool,
+    top: PlaneSupport,
+    top_forward: bool,
+    z_axis: [f64; 3],
+) -> bool {
+    let bottom_outward = if bottom_forward {
+        bottom.normal
+    } else {
+        mul(bottom.normal, -1.0)
+    };
+    let top_outward = if top_forward {
+        top.normal
+    } else {
+        mul(top.normal, -1.0)
+    };
+    dot(bottom_outward, z_axis) <= -1.0 + DIR_TOL && dot(top_outward, z_axis) >= 1.0 - DIR_TOL
+}
+
+fn prove_translated_caps(pair: &CapPairProof<'_>) -> Option<f64> {
+    let mut translated_edges = HashMap::<u64, u64>::new();
+    let mut used_top_edges = HashSet::<u64>::new();
+    let mut max_residual_mm = pair.max_residual_mm;
+
+    for bottom_edge in &pair.bottom.loop_edges {
+        let matches = pair
+            .top
+            .loop_edges
+            .iter()
+            .filter(|top_edge| !used_top_edges.contains(&top_edge.edge_id))
+            .filter_map(|top_edge| {
+                let residual =
+                    translated_profile_edge_residual(bottom_edge, top_edge, pair.extrusion)?;
+                (residual <= GEOM_TOL_MM).then_some((top_edge.edge_id, residual))
+            })
+            .collect::<Vec<_>>();
+        let [(top_edge_id, residual)] = matches.as_slice() else {
+            return None;
+        };
+        used_top_edges.insert(*top_edge_id);
+        translated_edges.insert(bottom_edge.edge_id, *top_edge_id);
+        max_residual_mm = max_residual_mm.max(*residual);
+    }
+    if used_top_edges.len() != pair.top.loop_edges.len()
+        || !translated_cap_loops_match(
+            pair.bottom,
+            pair.top,
+            &translated_edges,
+            &pair.bottom_loop_roles,
+            &pair.top_loop_roles,
+        )
+    {
+        return None;
+    }
+    Some(max_residual_mm)
+}
+
+fn has_intervening_translated_boundary(pair: &CapPairProof<'_>, faces: &[FaceInfo]) -> bool {
+    let SurfaceSupport::Plane(bottom_plane) = pair.bottom.surface else {
+        return true;
+    };
+
+    faces.iter().enumerate().any(|(face_index, face)| {
+        if face_index == pair.bottom_index || face_index == pair.top_index {
+            return false;
+        }
+        let SurfaceSupport::Plane(plane) = face.surface else {
+            return false;
+        };
+        if !parallel(plane.normal, bottom_plane.normal) || !face_lies_on_plane(face, plane) {
+            return false;
+        }
+
+        let offset = dot(pair.z_axis, sub(plane.origin_mm, bottom_plane.origin_mm));
+        if offset <= GEOM_TOL_MM || offset >= pair.height_mm - GEOM_TOL_MM {
+            return false;
+        }
+        if face.loops.len() != pair.bottom.loops.len()
+            || face.loop_edges.len() != pair.bottom.loop_edges.len()
+        {
+            return false;
+        }
+        let Some(top_loop_roles) = cap_loop_roles(face, pair.z_axis) else {
+            return false;
+        };
+        let intermediate = CapPairProof {
+            bottom_index: pair.bottom_index,
+            top_index: face_index,
+            bottom: pair.bottom,
+            top: face,
+            z_axis: pair.z_axis,
+            height_mm: offset,
+            extrusion: mul(pair.z_axis, offset),
+            bottom_loop_roles: pair.bottom_loop_roles.clone(),
+            top_loop_roles,
+            max_residual_mm: pair.max_residual_mm.max(plane.max_residual_mm),
+        };
+        prove_translated_caps(&intermediate).is_some()
+    })
+}
+
+/// Prove all source side faces themselves are the exact ruled walls of an extrusion.
 fn prove_extrusion_sides(
     pair: &CapPairProof<'_>,
     faces: &[FaceInfo],
@@ -754,9 +1020,16 @@ fn face_info(
         .flat_map(|loop_| loop_.edges.iter().cloned())
         .collect::<Vec<_>>();
 
+    let surface_forward = match brep::face_sense(face_id, entities, index)?.as_str() {
+        "T" => true,
+        "F" => false,
+        _ => return None,
+    };
+
     Some(FaceInfo {
         id: face_id,
         surface,
+        surface_forward,
         loops,
         loop_edges,
     })
@@ -1563,10 +1836,86 @@ mod tests {
         }
     }
 
+    fn square_face_info(id: u64, edge_base: u64, z: f64, surface_forward: bool) -> FaceInfo {
+        let points = [[0.0, 0.0, z], [1.0, 0.0, z], [1.0, 1.0, z], [0.0, 1.0, z]];
+        let edges = (0..4)
+            .map(|index| {
+                line_edge(
+                    edge_base + index as u64,
+                    edge_base + 100 + index as u64,
+                    edge_base + 100 + ((index + 1) % 4) as u64,
+                    points[index],
+                    points[(index + 1) % 4],
+                )
+            })
+            .collect::<Vec<_>>();
+        let loop_ = brep::FaceLoop {
+            bound_id: id + 1_000,
+            loop_id: id + 2_000,
+            outer: true,
+            orientation: true,
+            edges: edges.clone(),
+        };
+        FaceInfo {
+            id,
+            surface: SurfaceSupport::Plane(PlaneSupport {
+                origin_mm: [0.0, 0.0, z],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            surface_forward,
+            loops: vec![loop_],
+            loop_edges: edges,
+        }
+    }
+
+    #[test]
+    fn intervening_translated_boundary_rejects_spanning_core() -> anyhow::Result<()> {
+        let bottom = square_face_info(1, 10, 0.0, false);
+        let middle = square_face_info(2, 20, 0.5, true);
+        let top = square_face_info(3, 30, 1.0, true);
+        let faces = vec![bottom.clone(), middle, top.clone()];
+        let pair = ordered_cap_pair(0, 2, &faces)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must form a candidate"))?;
+        assert!(prove_translated_caps(&pair).is_some());
+        assert!(has_intervening_translated_boundary(&pair, &faces));
+
+        let faces_without_middle = vec![bottom, top];
+        let pair = ordered_cap_pair(0, 1, &faces_without_middle)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must still match"))?;
+        assert!(!has_intervening_translated_boundary(
+            &pair,
+            &faces_without_middle
+        ));
+        Ok(())
+    }
+
     #[test]
     fn canonical_axis_has_deterministic_sign() {
         assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
         assert_eq!(canonical_direction([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cap_pair_requires_opposite_outward_normals() {
+        let down = PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let up = PlaneSupport {
+            origin_mm: [0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let z = [0.0, 0.0, 1.0];
+
+        assert!(cap_faces_bound_material_interval(down, false, up, true, z));
+        assert!(!cap_faces_bound_material_interval(down, true, up, false, z));
+        assert!(!cap_faces_bound_material_interval(
+            down, false, up, false, z
+        ));
+        assert!(!cap_faces_bound_material_interval(down, true, up, true, z));
     }
 
     #[test]
