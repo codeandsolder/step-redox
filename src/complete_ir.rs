@@ -1,11 +1,13 @@
 use crate::cad_ir::{
     BooleanOp, CadModel, CadNode, NodeId, ProofStatus, Provenance, RigidTransform,
 };
+use crate::cad_kernel::CadKernel;
 use crate::cad_recovery::{
-    CadFragment, CadFragmentSource, recover_closed_round_sweep_fragments,
-    recover_open_rectangular_sweep_fragments, recover_periodic_chain_fragments,
-    recover_radial_slot_revolution_fragments, recover_revolved_round_tail_fragments,
-    recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
+    CadFragment, CadFragmentSource, recover_auto_proven_extrusion_core_union_fragment,
+    recover_closed_round_sweep_fragments, recover_open_rectangular_sweep_fragments,
+    recover_periodic_chain_fragments, recover_radial_slot_revolution_fragments,
+    recover_revolved_round_tail_fragments, recover_solid_extrusion_fragments,
+    recover_solid_revolution_fragments,
 };
 use crate::patterns::InstancePattern;
 use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
@@ -17,6 +19,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v8";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -54,6 +57,12 @@ pub struct BodyScanSummary {
     pub solids: Vec<SourceSolidSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KernelRecoveryFailure {
+    pub solid_id: u64,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CompleteIr {
     pub schema: &'static str,
@@ -67,6 +76,10 @@ pub struct CompleteIr {
     pub solid_sweeps: Vec<CadFragment>,
     pub periodic_chains: Vec<CadFragment>,
     pub boundary_feature_composites: Vec<CadFragment>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extrusion_core_unions: Vec<CadFragment>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kernel_recovery_failures: Vec<KernelRecoveryFailure>,
     pub unrecovered_solids: Vec<SourceSolidSummary>,
     pub body_scan: BodyScanSummary,
     pub body_count: usize,
@@ -100,6 +113,72 @@ const MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES: usize = 32;
 pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let session = crate::AnalysisSession::from_bytes(input)?;
     session.complete_ir()
+}
+
+/// Build Complete IR and opportunistically recover otherwise-unrecovered solids
+/// through a supplied CAD kernel plus the independent analytic boundary proof.
+///
+/// The parser-only [`recover_complete_ir_bytes`] path remains schema v8 and never
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v9,
+/// records admitted extrusion-core unions separately, and leaves any unsupported
+/// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per
+/// solid rather than aborting the rest of the report.
+///
+/// # Errors
+/// Returns an error if the parser-only Complete IR pass itself fails.
+pub fn recover_complete_ir_with_kernel_bytes<K: CadKernel>(
+    input: &[u8],
+    kernel: &K,
+) -> Result<CompleteIr> {
+    let report = recover_complete_ir_bytes(input)?;
+    Ok(apply_kernel_recovery(report, |solid_id| {
+        recover_auto_proven_extrusion_core_union_fragment(input, solid_id, kernel)
+    }))
+}
+
+fn apply_kernel_recovery<F>(mut report: CompleteIr, mut recover: F) -> CompleteIr
+where
+    F: FnMut(u64) -> Result<Option<CadFragment>>,
+{
+    let candidates = report.unrecovered_solids.clone();
+    let mut recovered = Vec::new();
+    let mut failures = Vec::new();
+
+    for solid in candidates {
+        match recover(solid.solid_id) {
+            Ok(Some(fragment)) if source_solid_id(&fragment.source) == solid.solid_id => {
+                recovered.push(fragment);
+            }
+            Ok(Some(fragment)) => failures.push(KernelRecoveryFailure {
+                solid_id: solid.solid_id,
+                error: format!(
+                    "kernel recovery returned solid #{} while recovering #{}",
+                    source_solid_id(&fragment.source),
+                    solid.solid_id
+                ),
+            }),
+            Ok(None) => {}
+            Err(error) => failures.push(KernelRecoveryFailure {
+                solid_id: solid.solid_id,
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    let recovered_ids = recovered
+        .iter()
+        .map(|fragment| source_solid_id(&fragment.source))
+        .collect::<BTreeSet<_>>();
+    report
+        .unrecovered_solids
+        .retain(|solid| !recovered_ids.contains(&solid.solid_id));
+    report.constructively_recovered_solid_count += recovered.len();
+    report.semantically_recovered_solid_count += recovered.len();
+    report.unrecovered_solid_count = report.unrecovered_solids.len();
+    report.extrusion_core_unions = recovered;
+    report.kernel_recovery_failures = failures;
+    report.schema = KERNEL_COMPLETE_IR_SCHEMA;
+    report
 }
 
 pub(crate) fn recover_complete_ir_exchange(
@@ -275,6 +354,8 @@ pub(crate) fn recover_complete_ir_exchange(
         boundary_feature_composites: selected_category(&selected, |source| {
             matches!(source, CadFragmentSource::BoundaryFeatureComposite { .. })
         }),
+        extrusion_core_unions: Vec::new(),
+        kernel_recovery_failures: Vec::new(),
         unrecovered_solid_count: unrecovered_solids.len(),
         body_count: body_scan.len(),
         constructively_recovered_solid_count: selected_constructive,
@@ -821,6 +902,39 @@ mod tests {
     use super::*;
     use crate::cad_ir::{CadModel, CadNode, Primitive};
 
+    fn report_with_unrecovered(solid_ids: &[u64]) -> CompleteIr {
+        let solids = solid_ids
+            .iter()
+            .map(|&solid_id| SourceSolidSummary {
+                solid_id,
+                faces: 0,
+                edges: 0,
+                closure_entities: 0,
+            })
+            .collect::<Vec<_>>();
+        CompleteIr {
+            schema: COMPLETE_IR_SCHEMA,
+            idempotent_compact_rewrite: true,
+            compact_second_pass_stats: Stats::default(),
+            surface_signature_summaries: Vec::new(),
+            instance_pattern_diagnostics: Vec::new(),
+            solid_extrusions: Vec::new(),
+            solid_revolutions: Vec::new(),
+            radial_slot_revolutions: Vec::new(),
+            solid_sweeps: Vec::new(),
+            periodic_chains: Vec::new(),
+            boundary_feature_composites: Vec::new(),
+            extrusion_core_unions: Vec::new(),
+            kernel_recovery_failures: Vec::new(),
+            unrecovered_solids: solids.clone(),
+            body_scan: BodyScanSummary { solids },
+            body_count: solid_ids.len(),
+            constructively_recovered_solid_count: 0,
+            semantically_recovered_solid_count: 0,
+            unrecovered_solid_count: solid_ids.len(),
+        }
+    }
+
     fn constructive_fragment(solid_id: u64, boxes: usize) -> CadFragment {
         assert!(boxes > 0);
         let mut model = CadModel::new();
@@ -846,6 +960,69 @@ mod tests {
             model,
             root,
         }
+    }
+
+    fn extrusion_core_union_fragment(solid_id: u64) -> Result<CadFragment> {
+        let mut model = CadModel::new();
+        let root = model.add_node(CadNode::Primitive(Primitive::Box {
+            size_mm: [1.0, 1.0, 1.0],
+        }));
+        model.add_root(root)?;
+        Ok(CadFragment {
+            source: CadFragmentSource::ExtrusionCoreUnion {
+                solid_id,
+                cap_face_ids: vec![[1, 2], [3, 4]],
+            },
+            model,
+            root,
+        })
+    }
+
+    #[test]
+    fn kernel_augmentation_skips_recovery_when_nothing_is_unrecovered() {
+        let mut calls = 0usize;
+        let report = apply_kernel_recovery(report_with_unrecovered(&[]), |_| {
+            calls += 1;
+            Ok(None)
+        });
+        assert_eq!(calls, 0);
+        assert_eq!(report.schema, KERNEL_COMPLETE_IR_SCHEMA);
+        assert!(report.kernel_recovery_failures.is_empty());
+    }
+
+    #[test]
+    fn kernel_augmentation_rejects_fragment_for_another_solid() -> Result<()> {
+        let mut fragment = Some(extrusion_core_union_fragment(8)?);
+        let report = apply_kernel_recovery(report_with_unrecovered(&[7]), |_| Ok(fragment.take()));
+        assert_eq!(report.unrecovered_solid_count, 1);
+        assert_eq!(report.semantically_recovered_solid_count, 0);
+        assert!(report.extrusion_core_unions.is_empty());
+        assert_eq!(report.kernel_recovery_failures.len(), 1);
+        assert_eq!(report.kernel_recovery_failures[0].solid_id, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn kernel_augmentation_records_backend_failure_per_solid() {
+        let report = apply_kernel_recovery(report_with_unrecovered(&[7]), |solid_id| {
+            Err(anyhow::anyhow!("kernel refused solid #{solid_id}"))
+        });
+        assert_eq!(report.unrecovered_solid_count, 1);
+        assert_eq!(report.semantically_recovered_solid_count, 0);
+        assert_eq!(report.kernel_recovery_failures.len(), 1);
+        assert_eq!(report.kernel_recovery_failures[0].solid_id, 7);
+    }
+
+    #[test]
+    fn kernel_augmentation_moves_admitted_union_out_of_unrecovered() -> Result<()> {
+        let mut fragment = Some(extrusion_core_union_fragment(7)?);
+        let report = apply_kernel_recovery(report_with_unrecovered(&[7]), |_| Ok(fragment.take()));
+        assert_eq!(report.unrecovered_solid_count, 0);
+        assert_eq!(report.constructively_recovered_solid_count, 1);
+        assert_eq!(report.semantically_recovered_solid_count, 1);
+        assert_eq!(report.extrusion_core_unions.len(), 1);
+        assert!(report.kernel_recovery_failures.is_empty());
+        Ok(())
     }
 
     #[test]
