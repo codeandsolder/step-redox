@@ -987,7 +987,7 @@ mod tests {
         });
         assert_eq!(calls, 0);
         assert_eq!(report.schema, KERNEL_COMPLETE_IR_SCHEMA);
-        assert!(report.kernel_recovery_failures.is_empty());
+        assert_eq!(report.kernel_recovery_failures, Vec::new());
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod tests {
         let report = apply_kernel_recovery(report_with_unrecovered(&[7]), |_| Ok(fragment.take()));
         assert_eq!(report.unrecovered_solid_count, 1);
         assert_eq!(report.semantically_recovered_solid_count, 0);
-        assert!(report.extrusion_core_unions.is_empty());
+        assert_eq!(report.extrusion_core_unions, Vec::new());
         assert_eq!(report.kernel_recovery_failures.len(), 1);
         assert_eq!(report.kernel_recovery_failures[0].solid_id, 7);
         Ok(())
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(report.constructively_recovered_solid_count, 1);
         assert_eq!(report.semantically_recovered_solid_count, 1);
         assert_eq!(report.extrusion_core_unions.len(), 1);
-        assert!(report.kernel_recovery_failures.is_empty());
+        assert_eq!(report.kernel_recovery_failures, Vec::new());
         Ok(())
     }
 
