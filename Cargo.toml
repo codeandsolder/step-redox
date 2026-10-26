@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 
+[package.metadata.rust-skills2]
+allow-test-panics = true
+allow-test-panics-reason = "Assertion-oriented unit tests; production remains strict"
+
 [features]
 default = []
 cad-kernel-monstertruck = ["dep:monstertruck-modeling", "dep:monstertruck-io", "dep:monstertruck-solid"]
