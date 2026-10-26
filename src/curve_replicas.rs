@@ -40,6 +40,10 @@ struct CurveInfo {
 /// Factor 3-D `B_SPLINE_CURVE_WITH_KNOTS` entities that differ only by one
 /// translation.  Degree/knots/multiplicities/flags stay exact, so the curve
 /// parameterization is unchanged.  Pole geometry is compared at 1e-5 mm.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn instance_translated_bspline_curves(entities: &mut Vec<EntityInstance>) -> CurveReplicaStats {
     let mut stats = CurveReplicaStats::default();
     if entities.is_empty() {
@@ -347,10 +351,18 @@ fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, p: [f64; 3]
     )
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quant(v: f64) -> i64 {
     (v / GEOMETRY_TOLERANCE_MM).round() as i64
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quant_transform(v: f64) -> i64 {
     (v / TRANSFORM_TOLERANCE_MM).round() as i64
 }

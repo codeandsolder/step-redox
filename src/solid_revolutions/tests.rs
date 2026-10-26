@@ -1,3 +1,19 @@
+#![expect(
+    clippy::unreadable_literal,
+    reason = "legacy numeric fixtures preserve source-derived expected coordinates"
+)]
+#![expect(
+    clippy::suboptimal_flops,
+    reason = "fixture arithmetic mirrors the geometric construction directly"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "large fixture constructors remain linear for reviewability"
+)]
+#![expect(
+    clippy::assert_is_empty,
+    reason = "test assertions intentionally state emptiness expectations explicitly"
+)]
 use super::*;
 
 fn test_linear_profile_segment(

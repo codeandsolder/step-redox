@@ -76,6 +76,10 @@ struct Candidate {
     old_points: Vec<u64>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn recover_v_extrusion_surfaces(entities: &mut Vec<EntityInstance>) -> VExtrusionStats {
     let mut stats = VExtrusionStats::default();
     if entities.is_empty() {
@@ -234,7 +238,7 @@ fn parse_surface(
             parse_simple_bspline_surface(record)
         }
         EntityInstance::Complex { subsuper, .. } => parse_complex_rational_surface(subsuper),
-        _ => None,
+        EntityInstance::Simple { .. } => None,
     }
 }
 
@@ -621,7 +625,7 @@ fn bspline_curve_with_knots(
             name: "B_SPLINE_CURVE_WITH_KNOTS".to_string(),
             parameter: Parameter::List(vec![
                 name,
-                Parameter::Integer(degree as i64),
+                Parameter::Integer(i64::try_from(degree).unwrap_or(i64::MAX)),
                 Parameter::List(points.iter().copied().map(entity_ref).collect()),
                 Parameter::Enumeration("UNSPECIFIED".to_string()),
                 closed,
@@ -657,7 +661,7 @@ fn rational_bspline_curve(
             Record {
                 name: "B_SPLINE_CURVE".to_string(),
                 parameter: Parameter::List(vec![
-                    Parameter::Integer(degree as i64),
+                    Parameter::Integer(i64::try_from(degree).unwrap_or(i64::MAX)),
                     Parameter::List(points.iter().copied().map(entity_ref).collect()),
                     Parameter::Enumeration("UNSPECIFIED".to_string()),
                     closed,
@@ -704,10 +708,10 @@ fn surface_is_face_support_only(
     };
     !parent_ids.is_empty()
         && parent_ids.iter().all(|parent_id| {
-            let Some(&parent_idx) = index.get(parent_id) else {
+            let Some(&parent_index) = index.get(parent_id) else {
                 return false;
             };
-            let Some(record) = simple_record(&entities[parent_idx]) else {
+            let Some(record) = simple_record(&entities[parent_index]) else {
                 return false;
             };
             if record.name != "ADVANCED_FACE" {

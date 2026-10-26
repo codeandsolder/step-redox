@@ -7,24 +7,28 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
-pub(super) struct ConsolidateStats {
+pub struct ConsolidateStats {
     pub(super) total: usize,
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+pub fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
     use std::collections::{HashMap, HashSet};
-
-    let mut refcounts: HashMap<u64, usize> = HashMap::new();
-    for entity in entities.iter() {
-        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
-    }
 
     struct Merge {
         into: usize,
         from: usize,
         item_param_index: usize,
         ty: &'static str,
+    }
+
+    let mut refcounts: HashMap<u64, usize> = HashMap::new();
+    for entity in entities.iter() {
+        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
     }
 
     let mut groups: HashMap<u64, IndexBucket> = HashMap::new();
@@ -172,12 +176,16 @@ fn presentation_keys_equal(
 }
 
 #[derive(Default)]
-pub(super) struct InternStats {
+pub struct InternStats {
     pub(super) total: usize,
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+pub fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
     // Store redirects only. An identity map for a million-entity STEP file is
     // a surprisingly expensive way of spelling "most things survive".
     let mut alias: HashMap<u64, u64> = HashMap::new();
@@ -214,7 +222,7 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
     // primitives -> placements/surfaces). Keep the defensive hard cap, but do
     // expensive key construction only for nodes affected by the prior round.
     for _ in 0..16 {
-        for index in dirty.drain(..) {
+        for index in std::mem::take(&mut dirty) {
             dirty_flags[index] = false;
             let id = entity_id(&entities[index]);
             if internable[index] && !alias.contains_key(&id) {
@@ -232,7 +240,7 @@ pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats 
             if alias.contains_key(&id) {
                 continue;
             }
-            let hash = hashes[index].expect("internable entity must have a cached structural hash");
+            let hash = hashes[index].unwrap_or_else(|| entity_structural_hash(entity, &alias));
             match seen.entry(hash) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(IndexBucket::one(index));
@@ -373,7 +381,7 @@ fn records_equivalent(left: &Record, right: &Record, alias: &HashMap<u64, u64>) 
         && parameters_equivalent_with_alias(&left.parameter, &right.parameter, alias)
 }
 
-pub(super) fn dense_renumber(entities: &mut [EntityInstance]) {
+pub fn dense_renumber(entities: &mut [EntityInstance]) {
     let id_map: HashMap<u64, u64> = entities
         .iter()
         .enumerate()
@@ -535,7 +543,7 @@ const PLACEHOLDER_NAME_TYPES: &[&str] = &[
     "VERTEX_POINT",
 ];
 
-pub(super) fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
+pub fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
     let mut changed = 0usize;
     for entity in entities {
         match entity {

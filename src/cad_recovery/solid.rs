@@ -235,6 +235,10 @@ pub fn recover_closed_round_sweep_fragments(
 ///
 /// # Errors
 /// Returns an error if the proof is malformed or the resulting CAD IR is invalid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn recover_revolved_round_tail_fragment(
     recovered: &RecoveredRevolvedRoundTail,
 ) -> Result<CadFragment> {
@@ -461,6 +465,10 @@ pub fn recover_revolved_round_tail_fragments(
 /// # Errors
 /// Returns an error if the recovered dimensions/frame are malformed or the
 /// resulting constructive union is not valid CAD IR.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn recover_open_rectangular_sweep_fragment(
     sweep: &RecoveredOpenRectangularSweep,
 ) -> Result<CadFragment> {
@@ -1354,6 +1362,14 @@ fn normalize3(vector: [f64; 3]) -> Result<[f64; 3]> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::too_many_lines,
+        reason = "legacy test fixture code is allowed a narrow long-fixture exception"
+    )]
+    #![expect(
+        clippy::redundant_clone,
+        reason = "test fixtures favor explicit ownership over incidental move optimization"
+    )]
     use super::*;
 
     #[test]

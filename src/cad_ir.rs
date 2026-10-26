@@ -501,7 +501,7 @@ pub struct SweepPath3d {
 }
 
 impl SweepPath3d {
-    fn complexity(&self) -> u64 {
+    const fn complexity(&self) -> u64 {
         1 + self.segments.len() as u64
     }
 

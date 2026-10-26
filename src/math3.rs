@@ -1,22 +1,22 @@
-pub(crate) fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-pub(crate) fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-pub(crate) fn scale(v: [f64; 3], scalar: f64) -> [f64; 3] {
+pub fn scale(v: [f64; 3], scalar: f64) -> [f64; 3] {
     [v[0] * scalar, v[1] * scalar, v[2] * scalar]
 }
 
-pub(crate) use scale as mul;
+pub use scale as mul;
 
-pub(crate) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
 }
 
-pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[2].mul_add(-b[1], a[1] * b[2]),
         a[0].mul_add(-b[2], a[2] * b[0]),
@@ -24,17 +24,17 @@ pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-pub(crate) fn norm(v: [f64; 3]) -> f64 {
+pub fn norm(v: [f64; 3]) -> f64 {
     v[0].hypot(v[1]).hypot(v[2])
 }
 
-pub(crate) fn normalize(v: [f64; 3], min_norm: f64) -> Option<[f64; 3]> {
+pub fn normalize(v: [f64; 3], min_norm: f64) -> Option<[f64; 3]> {
     let length = normalization_length(v, min_norm)?;
     // Divide each component directly so each coordinate gets one rounding step.
     Some([v[0] / length, v[1] / length, v[2] / length])
 }
 
-pub(crate) fn canonical_direction(mut direction: [f64; 3]) -> [f64; 3] {
+pub fn canonical_direction(mut direction: [f64; 3]) -> [f64; 3] {
     let dominant = (0..3)
         .max_by(|&a, &b| direction[a].abs().total_cmp(&direction[b].abs()))
         .unwrap_or(0);
@@ -44,22 +44,15 @@ pub(crate) fn canonical_direction(mut direction: [f64; 3]) -> [f64; 3] {
     direction.map(|value| if value == 0.0 { 0.0 } else { value })
 }
 
-pub(crate) fn canonical_unit_direction(direction: [f64; 3], min_norm: f64) -> Option<[f64; 3]> {
+pub fn canonical_unit_direction(direction: [f64; 3], min_norm: f64) -> Option<[f64; 3]> {
     Some(canonical_direction(normalize(direction, min_norm)?))
 }
 
-pub(crate) fn closest_point_on_unit_line_to_origin(
-    origin: [f64; 3],
-    direction: [f64; 3],
-) -> [f64; 3] {
+pub fn closest_point_on_unit_line_to_origin(origin: [f64; 3], direction: [f64; 3]) -> [f64; 3] {
     sub(origin, scale(direction, dot(origin, direction)))
 }
 
-pub(crate) fn point_to_unit_line_distance(
-    point: [f64; 3],
-    origin: [f64; 3],
-    direction: [f64; 3],
-) -> f64 {
+pub fn point_to_unit_line_distance(point: [f64; 3], origin: [f64; 3], direction: [f64; 3]) -> f64 {
     norm(cross(sub(point, origin), direction))
 }
 
@@ -71,7 +64,7 @@ fn normalization_length(v: [f64; 3], min_norm: f64) -> Option<f64> {
     Some(length)
 }
 
-pub(crate) fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     norm(sub(a, b))
 }
 

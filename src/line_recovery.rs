@@ -38,6 +38,10 @@ struct DirectionGroup {
     candidate_ids: Vec<u64>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn recover_straight_bspline_lines(entities: &mut Vec<EntityInstance>) -> LineRecoveryStats {
     let mut stats = LineRecoveryStats::default();
     if entities.is_empty() {
@@ -202,6 +206,14 @@ pub fn recover_straight_bspline_lines(entities: &mut Vec<EntityInstance>) -> Lin
     stats
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn analyze_candidate(
     id: u64,
     edge_id: u64,
@@ -241,8 +253,10 @@ fn analyze_candidate(
     if multiplicities.len() != knots.len() || knots.len() < 2 {
         return None;
     }
-    if multiplicities.first().copied()? != (degree + 1) as i64
-        || multiplicities.last().copied()? != (degree + 1) as i64
+    let degree_i64 = i64::try_from(degree).ok()?;
+    let end_multiplicity = degree_i64.checked_add(1)?;
+    if multiplicities.first().copied()? != end_multiplicity
+        || multiplicities.last().copied()? != end_multiplicity
     {
         return None;
     }
@@ -251,7 +265,7 @@ fn analyze_candidate(
             .iter()
             .skip(1)
             .take(multiplicities.len().saturating_sub(2))
-            .any(|value| *value > degree as i64)
+            .any(|value| *value > degree_i64)
     {
         return None;
     }

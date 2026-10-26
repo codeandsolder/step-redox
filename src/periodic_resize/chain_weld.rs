@@ -59,6 +59,10 @@ fn mapped_seam_edges(mapping: &HashMap<u64, u64>, edges: &[u64], label: &str) ->
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub(super) fn plan_chain_expansion_welds(
     graph: &GraphEditor<'_>,
     chain: &PeriodicChainPattern,
@@ -343,6 +347,18 @@ fn chain_complex_record<'a>(records: &'a [Record], name: &str) -> Result<&'a Rec
     Ok(record)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "STEP knot equality is an exact single-span predicate"
+)]
 fn chain_rational_single_span_key(
     graph: &GraphEditor<'_>,
     curve: u64,
@@ -381,7 +397,9 @@ fn chain_rational_single_span_key(
         .get(1)
         .and_then(entity_ref_list)
         .ok_or_else(|| anyhow!("complex seam curve #{curve} has invalid pole list"))?;
-    if poles.len() != degree as usize + 1 {
+    let degree_usize = usize::try_from(degree)
+        .map_err(|_| anyhow!("complex seam curve #{curve} degree is out of range"))?;
+    if poles.len() != degree_usize + 1 {
         bail!("complex seam curve #{curve} is not a single-span Bezier-equivalent spline");
     }
     if !matches!(bp.get(2), Some(Parameter::Enumeration(value)) if value == "UNSPECIFIED")
@@ -468,7 +486,7 @@ pub(super) fn chain_curve_key(graph: &GraphEditor<'_>, edge: u64) -> Result<Chai
         EntityInstance::Complex { subsuper, .. } => {
             chain_rational_single_span_key(graph, curve, &subsuper.0)
         }
-        entity => bail!(
+        entity @ EntityInstance::Simple { .. } => bail!(
             "periodic-chain seam edge #{edge} uses unsupported {} curve support",
             match entity {
                 EntityInstance::Simple { record, .. } => record.name.as_str(),

@@ -73,6 +73,10 @@ fn coalesce_with_supports(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn coalesce_inner(
     entities: &mut Vec<EntityInstance>,
     allowed_supports: &[&str],

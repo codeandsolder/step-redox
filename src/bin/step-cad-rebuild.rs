@@ -43,7 +43,9 @@ fn main() -> Result<()> {
             fragments.len()
         );
     }
-    let fragment = fragments.pop().expect("length checked");
+    let fragment = fragments
+        .pop()
+        .context("selected fragment disappeared after cardinality check")?;
     let kernel = MonstertruckKernel;
     let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
     let summary = kernel.summarize(&evaluated);

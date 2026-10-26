@@ -72,6 +72,18 @@ pub fn detect_periodic_bodies(
     detect_periodic_bodies_with_index(entities, &index, instance_patterns)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub(crate) fn detect_periodic_bodies_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -101,7 +113,7 @@ pub(crate) fn detect_periodic_bodies_with_index(
         }
 
         for &solid in &solids {
-            let Some(face_ids) = solid_faces(solid, entities, &index) else {
+            let Some(face_ids) = solid_faces(solid, entities, index) else {
                 continue;
             };
             if face_ids.len() < candidate.sites.saturating_mul(4) {
@@ -115,7 +127,7 @@ pub(crate) fn detect_periodic_bodies_with_index(
             for face in face_ids.iter().copied() {
                 all_face_ids.push(face);
                 let Some(info) =
-                    analyze_planar_line_face(face, candidate.axis, v, w, entities, &index)
+                    analyze_planar_line_face(face, candidate.axis, v, w, entities, index)
                 else {
                     continue;
                 };
@@ -281,6 +293,10 @@ fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn analyze_planar_line_face(
     face: u64,
     axis: [f64; 3],
@@ -526,10 +542,18 @@ fn orthogonal_basis(axis: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
     Some((v, w))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_dir(v: [f64; 3]) -> Option<[i64; 3]> {
     let mut out = [0i64; 3];
     for (i, value) in v.into_iter().enumerate() {

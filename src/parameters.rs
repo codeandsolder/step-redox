@@ -20,6 +20,10 @@ pub struct RecoveredCountParameter {
     pub max_residual_mm: f64,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn detect_count_parameters(
     patterns: &[InstancePattern],
     bodies: &[PeriodicBodyPattern],

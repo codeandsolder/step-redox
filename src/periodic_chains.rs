@@ -221,6 +221,10 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
                 .then_with(|| b.site_family_rows.cmp(&a.site_family_rows))
         })
 }
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 fn choose_partition(
     geoms: &HashMap<u64, FaceGeom>,
     candidate: &LatticeCandidate,
@@ -266,7 +270,8 @@ fn choose_partition(
                 let observation_score = ticks
                     .iter()
                     .filter(|&&tick| tick >= window[0] && tick <= window[sites - 1])
-                    .count() as i64;
+                    .count();
+                let observation_score = i64::try_from(observation_score).ok()?;
                 windows.push((
                     observation_score,
                     window
@@ -446,6 +451,10 @@ fn overlay_site_alignment(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn classify_faces(
     geoms: &HashMap<u64, FaceGeom>,
     centers: &[f64],
@@ -591,10 +600,10 @@ fn partition_score(
     let site_counts = partition.sites.iter().map(Vec::len).collect::<Vec<_>>();
     let gap_counts = partition.gaps.iter().map(Vec::len).collect::<Vec<_>>();
 
-    let site_mode_n = mode_frequency(&site_counts) as i64;
-    let gap_mode_n = mode_frequency(&gap_counts) as i64;
-    let site_sym = symmetric_abs_difference(&site_counts) as i64;
-    let gap_sym = symmetric_abs_difference(&gap_counts) as i64;
+    let site_mode_n = i64::try_from(mode_frequency(&site_counts)).unwrap_or(i64::MAX);
+    let gap_mode_n = i64::try_from(mode_frequency(&gap_counts)).unwrap_or(i64::MAX);
+    let site_sym = i64::try_from(symmetric_abs_difference(&site_counts)).unwrap_or(i64::MAX);
+    let gap_sym = i64::try_from(symmetric_abs_difference(&gap_counts)).unwrap_or(i64::MAX);
 
     let midpoint = f64::midpoint(
         partition.centers[0],
@@ -615,17 +624,25 @@ fn partition_score(
     }
 
     [
-        -(negative.abs_diff(positive) as i64),
+        -i64::try_from(negative.abs_diff(positive)).unwrap_or(i64::MAX),
         -site_sym,
         -gap_sym,
         gap_mode_n,
         site_mode_n,
-        -(partition.fixed.len() as i64),
-        -(middle as i64),
+        -i64::try_from(partition.fixed.len()).unwrap_or(i64::MAX),
+        -i64::try_from(middle).unwrap_or(i64::MAX),
         observation_score,
     ]
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 fn build_pattern(
     solid_id: u64,
     all_face_ids: &[u64],
@@ -803,16 +820,24 @@ fn add_adjacency(
     match source {
         ("site", Some(site)) => {
             let label = match target {
-                ("site", Some(other)) => format!("site:{:+}", other as isize - site as isize),
-                ("gap", Some(other)) => format!("gap:{:+}", other as isize - site as isize),
+                ("site", Some(other)) => {
+                    format!("site:{:+}", other.cast_signed() - site.cast_signed())
+                }
+                ("gap", Some(other)) => {
+                    format!("gap:{:+}", other.cast_signed() - site.cast_signed())
+                }
                 (name, _) => name.to_string(),
             };
             *site_adj[site].entry(label).or_insert(0) += 1;
         }
         ("gap", Some(gap)) => {
             let label = match target {
-                ("site", Some(other)) => format!("site:{:+}", other as isize - gap as isize),
-                ("gap", Some(other)) => format!("gap:{:+}", other as isize - gap as isize),
+                ("site", Some(other)) => {
+                    format!("site:{:+}", other.cast_signed() - gap.cast_signed())
+                }
+                ("gap", Some(other)) => {
+                    format!("gap:{:+}", other.cast_signed() - gap.cast_signed())
+                }
                 (name, _) => name.to_string(),
             };
             *gap_adj[gap].entry(label).or_insert(0) += 1;
@@ -1035,10 +1060,18 @@ const fn other_axes(axis: usize) -> [usize; 2] {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_dir(value: f64) -> i64 {
     (value / 1.0e-10).round() as i64
 }
@@ -1113,6 +1146,10 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unnecessary_wraps,
+        reason = "legacy test fixture code is allowed narrow lint exceptions; production paths remain strict"
+    )]
     use super::*;
 
     fn test_face(id: u64, center: [f64; 3]) -> FaceGeom {

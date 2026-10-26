@@ -313,7 +313,11 @@ pub mod monstertruck {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "curve-type validation and topology construction stay contiguous to preserve profile invariants"
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "clamped B-spline endpoint knots require exact equality"
     )]
     fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
         let starts = curves
@@ -685,7 +689,7 @@ pub mod monstertruck {
                         bail!("edge-treatment selector matched more than one topological edge");
                     }
                     matched_id = Some(edge.id());
-                    matched = Some(edge.clone());
+                    matched = Some(edge);
                 }
                 Ok(vec![matched.ok_or_else(|| {
                     anyhow::anyhow!("edge-treatment selector matched no edge")
@@ -710,7 +714,7 @@ pub mod monstertruck {
                     {
                         continue;
                     }
-                    matched.push(edge.clone());
+                    matched.push(edge);
                 }
                 if matched.is_empty() {
                     bail!("edge-treatment circle selector matched no edge");
@@ -841,6 +845,10 @@ pub mod monstertruck {
 
     #[cfg(test)]
     mod tests {
+        #![expect(
+            clippy::manual_let_else,
+            reason = "legacy test fixture code is allowed narrow lint exceptions; production paths remain strict"
+        )]
         use super::*;
         use crate::cad_ir::{
             Axis3, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, RigidTransform,

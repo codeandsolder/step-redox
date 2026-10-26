@@ -22,7 +22,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod mapped_emitter;
-pub(crate) use mapped_emitter::instance_boundary_features;
+pub use mapped_emitter::instance_boundary_features;
 
 const MIN_GROUP: usize = 8;
 const MAX_FEATURE_FACES: usize = 128;
@@ -40,6 +40,10 @@ pub struct PlanarFeatureStats {
     pub styles_replaced: usize,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "all fields are explicit STEP entity identifiers"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellContext {
     representation_id: u64,
@@ -279,6 +283,10 @@ enum PlaneSide {
     Coplanar,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn diagnose_open_chain_patterns(entities: &[EntityInstance]) -> OpenChainDiagnostics {
     const MIN_LOOP_EDGES: usize = 16;
     const MAX_MOTIF_EDGES: usize = 32;
@@ -447,7 +455,7 @@ fn collect_cyclic_open_chain_runs(
     out: &mut Vec<OpenChainRunEvidence>,
 ) {
     let n = loop_data.edges.len();
-    if period == 0 || n % period != 0 {
+    if period == 0 || !n.is_multiple_of(period) {
         return;
     }
     let block_count = n / period;
@@ -668,7 +676,11 @@ fn coplanar_feature_cap_holes(
     Some(out)
 }
 
-pub(crate) fn materialize_boundary_feature_tools_for_analysis(
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+pub fn materialize_boundary_feature_tools_for_analysis(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
 ) -> Result<(
@@ -731,7 +743,7 @@ fn materialize_boundary_feature_tools_for_analysis_filtered(
         let index = &initial_index;
         let mut bound_owner = HashMap::<u64, u64>::new();
         for &host in &family.host_face_ids {
-            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+            let Some(bounds) = ref_list_param(host, 1, entities, index) else {
                 bail!("feature host face #{host} has no readable bounds");
             };
             for bound in bounds {
@@ -749,7 +761,7 @@ fn materialize_boundary_feature_tools_for_analysis_filtered(
             let Some(&host_id) = bound_owner.get(&bound_id) else {
                 bail!("feature interface bound #{bound_id} has no owning host face");
             };
-            let Some(frame) = plane_frame(host_id, entities, &index) else {
+            let Some(frame) = plane_frame(host_id, entities, index) else {
                 bail!("feature host face #{host_id} is not a supported plane");
             };
             let Some(&bound_index) = index.get(&bound_id) else {
@@ -926,7 +938,7 @@ pub fn leaf_feature_family_indices(families: &[BoundaryFeatureFamilyEvidence]) -
 }
 
 pub fn peel_boundary_features_for_analysis(
-    entities: &mut Vec<EntityInstance>,
+    entities: &mut [EntityInstance],
 ) -> Result<(BoundaryFeatureDiagnostics, BoundaryFeaturePeelStats)> {
     let index = build_index(entities);
     let report = diagnose_boundary_features_with_index(entities, &index);
@@ -981,10 +993,10 @@ pub(crate) fn peel_boundary_feature_family_indices_with_index(
                 bail!("feature host face #{host} has no readable bounds");
             };
             for bound in bounds {
-                if let Some(previous) = bound_owner.insert(bound, host) {
-                    if previous != host {
-                        bail!("interface bound #{bound} is owned by multiple host faces");
-                    }
+                if let Some(previous) = bound_owner.insert(bound, host)
+                    && previous != host
+                {
+                    bail!("interface bound #{bound} is owned by multiple host faces");
                 }
             }
         }
@@ -1122,6 +1134,10 @@ fn diagnose_boundary_features_with_index_filtered(
     report
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn grouped_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1278,6 +1294,14 @@ fn grouped_boundary_features_with_index(
     (report, grouped)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "topology proof keeps all evidence inputs explicit at the candidate boundary"
+)]
+#[expect(
+    clippy::type_complexity,
+    reason = "nested STEP lookup maps preserve their source-domain structure"
+)]
 fn boundary_feature_candidate(
     context: &ShellContext,
     component: HashSet<u64>,
@@ -1403,6 +1427,10 @@ fn component_is_two_manifold_with_hosts(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDiagnostics {
     let mut report = PlanarFeatureDiagnostics::default();
     if entities.is_empty() {

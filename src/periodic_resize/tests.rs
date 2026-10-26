@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unreadable_literal,
+    reason = "legacy numeric fixtures prioritize explicit expected geometry over style-only rewrites"
+)]
 use super::graph_editor::GraphEditor;
 use super::{
     chain_curve_key, collect_style_container_parents, entity_ref, list_params,

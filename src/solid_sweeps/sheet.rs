@@ -77,6 +77,14 @@ pub fn detect_open_rectangular_sweeps(
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::similar_names,
+    reason = "orthogonal profile x/y axes intentionally share a descriptive stem"
+)]
 fn detect_one(
     evidence: &formed_sheet::FormedSheetEvidence,
     entities: &[EntityInstance],
@@ -254,6 +262,10 @@ struct ExpectedPlane {
     offset_mm: f64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn prove_source_supports_covered(
     face_ids: &[u64],
     legs: [&RecoveredPlanarSweepLeg; 2],
@@ -652,20 +664,24 @@ fn line_polygon(
     if loops.len() != 1 || !loops[0].outer || loops[0].edges.len() < 3 {
         return None;
     }
-    let loop_ = &loops[0];
-    let mut points = Vec::with_capacity(loop_.edges.len());
-    for (edge_index, edge) in loop_.edges.iter().enumerate() {
+    let face_loop = &loops[0];
+    let mut points = Vec::with_capacity(face_loop.edges.len());
+    for (edge_index, edge) in face_loop.edges.iter().enumerate() {
         if !matches!(edge.support, CurveSupport::Line(_)) {
             return None;
         }
         if edge_index > 0
-            && distance(loop_.edges[edge_index - 1].end_mm, edge.start_mm) > SHEET_TOL_MM
+            && distance(face_loop.edges[edge_index - 1].end_mm, edge.start_mm) > SHEET_TOL_MM
         {
             return None;
         }
         points.push(edge.start_mm);
     }
-    if distance(loop_.edges.last()?.end_mm, loop_.edges.first()?.start_mm) > SHEET_TOL_MM {
+    if distance(
+        face_loop.edges.last()?.end_mm,
+        face_loop.edges.first()?.start_mm,
+    ) > SHEET_TOL_MM
+    {
         return None;
     }
     Some(points)
@@ -745,7 +761,7 @@ fn prove_skin_tangent(
         }
         match entry.surface {
             SheetReferenceSurface::Plane { offset_mm, .. } => Some(offset_mm),
-            _ => None,
+            SheetReferenceSurface::Cylinder { .. } => None,
         }
     })?;
     let normal = normalize(pair.normal, 0.0)?;
@@ -760,7 +776,7 @@ fn prove_skin_tangent(
 
     let boundary = &skin.boundary_loops[0].curves;
     let mut inward_vectors = Vec::with_capacity(2);
-    for seam_point in [seam.0, seam.1] {
+    for seam_point in <[[f64; 3]; 2]>::from(seam) {
         let matches = boundary
             .iter()
             .filter_map(|curve| match curve {
@@ -802,6 +818,10 @@ fn prove_skin_tangent(
     })
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn choose_bend_order(
     axis: [f64; 3],
     radials: &[[f64; 3]],

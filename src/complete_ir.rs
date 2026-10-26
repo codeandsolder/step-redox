@@ -470,6 +470,10 @@ where
     failures
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],
@@ -1759,7 +1763,7 @@ mod tests {
         let cheap = constructive_fragment(7, 1)?;
         let selected = select_cheapest_whole_solid_fragments(&[&expensive, &cheap])?;
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[&7], &cheap);
+        assert!(std::ptr::eq(selected[&7], std::ptr::from_ref(&cheap)));
         Ok(())
     }
 

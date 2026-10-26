@@ -585,6 +585,10 @@ fn validate_periodic_chain(chain: &PeriodicChainPattern) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::redundant_closure,
+        reason = "legacy test fixture code is allowed narrow lint exceptions; production paths remain strict"
+    )]
     use super::*;
 
     fn primitive_fragment(solid_id: u64) -> Result<CadFragment> {

@@ -143,6 +143,10 @@ fn complementary_skin(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn build_reference_skin(
     skin: &[(SheetPatchId, usize, u64)],
     plane_pairs: &[SheetPlanePair],
@@ -168,8 +172,8 @@ fn build_reference_skin(
             SheetPatchId::Plane(patch_index) => {
                 let pair = plane_pairs.get(patch_index)?;
                 let offsets = [
-                    pair.mid_offset_mm - pair.separation_mm * 0.5,
-                    pair.mid_offset_mm + pair.separation_mm * 0.5,
+                    f64::mul_add(pair.separation_mm, -0.5, pair.mid_offset_mm),
+                    f64::mul_add(pair.separation_mm, 0.5, pair.mid_offset_mm),
                 ];
                 let faces = [pair.negative_face_id, pair.positive_face_id];
                 (
@@ -239,7 +243,7 @@ fn build_reference_skin(
         return None;
     }
 
-    let mut unused = boundary_edges.clone();
+    let mut unused = boundary_edges;
     let mut boundary_loops = Vec::new();
     while let Some(&first_edge) = unused.iter().next() {
         let (first_start, first_end, _, _) = edge_curve_info(first_edge, entities, index)?;
@@ -315,7 +319,7 @@ fn build_reference_skin(
     })
 }
 
-fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
+const fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
     match curve {
         SheetReferenceCurve::Line { source_edge_id, .. }
         | SheetReferenceCurve::CircleArc { source_edge_id, .. }
@@ -323,6 +327,10 @@ fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn reference_curve(
     edge_id: u64,
     traversal_start: u64,
@@ -389,10 +397,14 @@ fn reference_curve(
             entities,
             index,
         ),
-        _ => None,
+        EntityInstance::Simple { .. } => None,
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn reference_ellipse_seam(
     edge_id: u64,
     curve_id: u64,
@@ -482,7 +494,7 @@ fn reference_ellipse_seam(
         }
         let u = dot(sub(*sample, center_mm), first_axis);
         let v = dot(sub(*sample, center_mm), second_axis);
-        if (u - branch_sign * v).abs() > GEOM_TOL_MM * 5.0 {
+        if f64::mul_add(branch_sign, -v, u).abs() > GEOM_TOL_MM * 5.0 {
             return None;
         }
     }
@@ -597,7 +609,7 @@ fn rational_single_span_samples(
     let bspline = record("B_SPLINE_CURVE")?;
     let bspline_params = list_params(bspline)?;
     let degree = match bspline_params.first()? {
-        Parameter::Integer(value) if *value >= 1 => *value as usize,
+        Parameter::Integer(value) if *value >= 1 => usize::try_from(*value).ok()?,
         _ => return None,
     };
     let Parameter::List(pole_params) = bspline_params.get(1)? else {
@@ -621,7 +633,7 @@ fn rational_single_span_samples(
     };
     if multiplicities.len() != 2
         || !multiplicities.iter().all(
-            |parameter| matches!(parameter, Parameter::Integer(value) if *value == degree as i64 + 1),
+            |parameter| matches!(parameter, Parameter::Integer(value) if *value == i64::try_from(degree).unwrap_or(i64::MAX).saturating_add(1)),
         )
     {
         return None;
@@ -646,6 +658,10 @@ fn rational_single_span_samples(
         .collect()
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "Bezier endpoint parameters 0 and 1 are exact sentinels"
+)]
 pub(super) fn rational_bezier_point(
     poles: &[[f64; 3]],
     weights: &[f64],
@@ -670,7 +686,7 @@ pub(super) fn rational_bezier_point(
         return poles.last().copied();
     }
 
-    let weight_scale = weights.iter().copied().max_by(|a, b| a.total_cmp(b))?;
+    let weight_scale = weights.iter().copied().max_by(f64::total_cmp)?;
     let mut homogeneous = poles
         .iter()
         .zip(weights)
@@ -790,6 +806,10 @@ fn edge_curve_info(
     Some((start, end, curve, same_sense))
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn circle_support(
     curve_id: u64,
     entities: &[EntityInstance],

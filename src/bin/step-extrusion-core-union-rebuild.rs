@@ -23,7 +23,7 @@ fn main() -> Result<()> {
 
     let bytes = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
     let mut fragments = Vec::with_capacity(pair_args.len() / 2);
-    for pair in pair_args.chunks_exact(2) {
+    for pair in pair_args.as_chunks::<2>().0 {
         let cap_a = pair[0]
             .parse::<u64>()
             .with_context(|| format!("parse CAP_A {}", pair[0]))?;

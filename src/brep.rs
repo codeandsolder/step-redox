@@ -249,6 +249,10 @@ pub fn oriented_edge_use(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn surface_support(
     surface_id: u64,
     entities: &[EntityInstance],
