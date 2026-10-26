@@ -41,10 +41,9 @@ pub mod monstertruck {
     use anyhow::{Result, bail};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::{
-        Angle, Array, BoundedCurve, BoundedSurface, BsplineCurve, Curve, CurveScalarFunction, Edge,
-        EuclideanSpace, InnerSpace, Invertible, KnotVector, Matrix4, NurbsCurve, ParametricCurve,
-        ParametricSurface, Point3, Rad, ScalarFunctionD1, ScalarFunctionD2, Shell, Solid,
-        SurfaceScalarFunction, Vector3, Vector4, Wire, builder, primitive, profile,
+        BoundedCurve, BsplineCurve, Curve, Edge, EuclideanSpace, InnerSpace, KnotVector, Matrix4,
+        NurbsCurve, ParametricCurve, Point3, Rad, Shell, Solid, Vector3, Vector4, Wire, builder,
+        primitive, profile,
     };
 
     #[derive(Debug, Default, Clone, Copy)]
