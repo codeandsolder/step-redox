@@ -9,6 +9,9 @@ import csv
 import json
 import subprocess
 from pathlib import Path
+from typing import Any, cast
+
+type JsonMap = dict[str, Any]
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,19 +26,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_manifest(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = cast(list[dict[str, str]], list(csv.DictReader(handle, delimiter="\t")))
     required = {"uuid", "path"}
     if not rows or not required.issubset(rows[0]):
         raise SystemExit(f"{path}: expected TSV columns {sorted(required)}")
     return rows
 
 
-def scan_one(scanner: Path, row: dict[str, str]) -> dict:
+def scan_one(scanner: Path, row: dict[str, str]) -> JsonMap:
     proc = subprocess.run(
         [str(scanner), row["path"]],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -56,7 +58,7 @@ def scan_one(scanner: Path, row: dict[str, str]) -> dict:
     return result
 
 
-def matches(solid: dict, face_count: int | None, supports: list[str]) -> bool:
+def matches(solid: JsonMap, face_count: int | None, supports: list[str]) -> bool:
     if face_count is not None and solid.get("face_count") != face_count:
         return False
     counts = solid.get("support_counts", {})
@@ -93,7 +95,7 @@ def main() -> int:
                 "output": str(args.out),
             },
             separators=(",", ":"),
-        )
+        ),
     )
     return 1 if failures else 0
 

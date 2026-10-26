@@ -5,31 +5,46 @@ import argparse
 import gzip
 import hashlib
 import json
-import math
-import os
-from pathlib import Path
+import operator
 import shutil
 import struct
 import subprocess
 import zipfile
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Never
 from urllib.request import Request, urlopen
 
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw
-
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.BRepGProp import BRepGProp
-from OCP.GProp import GProp_GProps
 from OCP.Bnd import Bnd_Box
+from OCP.BRep import BRep_Tool
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX, TopAbs_SOLID, TopAbs_SHELL
-from OCP.TopExp import TopExp_Explorer
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRep import BRep_Tool
+from OCP.gp import gp_Pnt
+from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
+from OCP.TopAbs import (
+    TopAbs_EDGE,
+    TopAbs_FACE,
+    TopAbs_ShapeEnum,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
+    TopAbs_VERTEX,
+)
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
-from OCP.TopoDS import TopoDS
+from OCP.TopoDS import TopoDS, TopoDS_Shape
+from PIL import Image, ImageChops, ImageDraw
+
+type JsonMap = dict[str, Any]
+type JsonList = list[JsonMap]
+type ViewVector = Sequence[float] | np.ndarray
+type ProjectionFrame = tuple[
+    tuple[np.ndarray, np.ndarray, np.ndarray], tuple[float, float, float, float]
+]
 
 VIEWS = {
     "px": (1, 0, 0),
@@ -54,41 +69,36 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _download_one_verified(url: str, tmp: Path, expected: str, label: str) -> None:
+    req = Request(url, headers={"User-Agent": "step-redox-validation/0.1"})
+    with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
+        shutil.copyfileobj(response, out, length=1024 * 1024)
+    if expected:
+        got = sha256_file(tmp)
+        if got != expected:
+            raise RuntimeError(
+                f"{label} SHA-256 mismatch from {url}: expected {expected}, got {got}"
+            )
+
+
 def download_verified(
-    name: str,
-    urls: list[str],
-    tmp: Path,
-    expected: str,
-    label: str,
+    name: str, urls: list[str], tmp: Path, expected: str, label: str
 ) -> None:
-    errors = []
+    errors: list[str] = []
     for url in urls:
         tmp.unlink(missing_ok=True)
         try:
-            req = Request(
-                url,
-                headers={"User-Agent": "step-redox-validation/0.1"},
-            )
-            with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 1024)
-            if expected:
-                got = sha256_file(tmp)
-                if got != expected:
-                    raise RuntimeError(
-                        f"{label} SHA-256 mismatch from {url}: "
-                        f"expected {expected}, got {got}"
-                    )
+            _download_one_verified(url, tmp, expected, label)
             return
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
     tmp.unlink(missing_ok=True)
     raise RuntimeError(
-        f"fixture {name}: all {label} download URLs failed: "
-        + " | ".join(errors)
+        f"fixture {name}: all {label} download URLs failed: " + " | ".join(errors)
     )
 
 
-def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
+def fetch_fixture(name: str, spec: JsonMap, cache: Path) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     filename = spec.get("filename") or f"{name}.step"
     path = cache / filename
@@ -109,15 +119,16 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
                 tmp.unlink(missing_ok=True)
                 raise RuntimeError(
                     f"fixture {name}: bundled SHA-256 mismatch: "
-                    f"expected {expected}, got {got}"
+                    f"expected {expected}, got {got}",
                 )
-            os.replace(tmp, path)
+            Path(tmp).replace(path)
             return path
 
     archive_kind = spec.get("archive")
     if archive_kind:
         archive_path = cache / spec.get(
-            "archive_filename", filename + "." + archive_kind
+            "archive_filename",
+            filename + "." + archive_kind,
         )
         archive_expected = spec.get("archive_sha256", "").lower()
         archive_ok = archive_path.exists()
@@ -140,41 +151,44 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
                         tmp.unlink(missing_ok=True)
                         raise RuntimeError(
                             f"fixture {name}: bundled archive SHA-256 mismatch: "
-                            f"expected {archive_expected}, got {got}"
+                            f"expected {archive_expected}, got {got}",
                         )
-                os.replace(tmp, archive_path)
+                Path(tmp).replace(archive_path)
             else:
                 tmp = archive_path.with_suffix(archive_path.suffix + ".part")
                 urls = [spec["url"], *spec.get("fallback_urls", [])]
                 download_verified(name, urls, tmp, archive_expected, "archive")
-                os.replace(tmp, archive_path)
+                Path(tmp).replace(archive_path)
 
         if archive_kind != "zip":
             raise RuntimeError(f"fixture {name}: unsupported archive {archive_kind!r}")
         member = spec["member"]
         tmp = path.with_suffix(path.suffix + ".part")
         tmp.unlink(missing_ok=True)
-        with zipfile.ZipFile(archive_path) as zf:
-            with zf.open(member) as src, tmp.open("wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
+        with (
+            zipfile.ZipFile(archive_path) as zf,
+            zf.open(member) as src,
+            tmp.open("wb") as dst,
+        ):
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
         got = sha256_file(tmp)
         if got != expected:
             tmp.unlink(missing_ok=True)
             raise RuntimeError(
                 f"fixture {name}: extracted STEP SHA-256 mismatch: "
-                f"expected {expected}, got {got}"
+                f"expected {expected}, got {got}",
             )
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
         return path
 
     tmp = path.with_suffix(path.suffix + ".part")
     urls = [spec["url"], *spec.get("fallback_urls", [])]
     download_verified(name, urls, tmp, expected, "STEP")
-    os.replace(tmp, path)
+    Path(tmp).replace(path)
     return path
 
 
-def count(shape, kind) -> int:
+def count(shape: TopoDS_Shape, kind: TopAbs_ShapeEnum) -> int:
     ex = TopExp_Explorer(shape, kind)
     n = 0
     while ex.More():
@@ -183,7 +197,7 @@ def count(shape, kind) -> int:
     return n
 
 
-def load_step(path: Path):
+def load_step(path: Path) -> tuple[TopoDS_Shape, int, int]:
     reader = STEPControl_Reader()
     status = reader.ReadFile(str(path))
     if status != IFSelect_RetDone:
@@ -193,16 +207,16 @@ def load_step(path: Path):
     return reader.OneShape(), roots, transferred
 
 
-def props_vec(p):
+def props_vec(p: gp_Pnt) -> list[float]:
     return [float(p.X()), float(p.Y()), float(p.Z())]
 
 
-def inertia_matrix(props: GProp_GProps):
+def inertia_matrix(props: GProp_GProps) -> list[list[float]]:
     m = props.MatrixOfInertia()
     return [[float(m.Value(i, j)) for j in range(1, 4)] for i in range(1, 4)]
 
 
-def bbox_values(box: Bnd_Box):
+def bbox_values(box: Bnd_Box) -> list[float]:
     # cadquery-ocp bindings changed the Python surface of Bnd_Box across
     # OpenCascade releases. Support the forms used by both our local OCP 8
     # validator and the public OCP 7.9 wheels used in GitHub Actions.
@@ -213,8 +227,12 @@ def bbox_values(box: Bnd_Box):
         lo = box.CornerMin()
         hi = box.CornerMax()
         return [
-            float(lo.X()), float(lo.Y()), float(lo.Z()),
-            float(hi.X()), float(hi.Y()), float(hi.Z()),
+            float(lo.X()),
+            float(lo.Y()),
+            float(lo.Z()),
+            float(hi.X()),
+            float(hi.Y()),
+            float(hi.Z()),
         ]
     if hasattr(box, "Get"):
         values = box.Get()
@@ -222,7 +240,8 @@ def bbox_values(box: Bnd_Box):
             return [float(value) for value in values[:6]]
     raise RuntimeError("unsupported OCP Bnd_Box binding")
 
-def solid_inventory(shape):
+
+def solid_inventory(shape: TopoDS_Shape) -> JsonList:
     solids = []
     ex = TopExp_Explorer(shape, TopAbs_SOLID)
     while ex.More():
@@ -234,20 +253,22 @@ def solid_inventory(shape):
         box = Bnd_Box()
         BRepBndLib.Add_s(solid, box, True)
         bbox = bbox_values(box)
-        solids.append({
-            "volume": float(volume.Mass()),
-            "area": float(surface.Mass()),
-            "bbox_center": [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)],
-            "bbox_extent": [bbox[i + 3] - bbox[i] for i in range(3)],
-            "faces": count(solid, TopAbs_FACE),
-            "edges": count(solid, TopAbs_EDGE),
-            "vertices": count(solid, TopAbs_VERTEX),
-        })
+        solids.append(
+            {
+                "volume": float(volume.Mass()),
+                "area": float(surface.Mass()),
+                "bbox_center": [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)],
+                "bbox_extent": [bbox[i + 3] - bbox[i] for i in range(3)],
+                "faces": count(solid, TopAbs_FACE),
+                "edges": count(solid, TopAbs_EDGE),
+                "vertices": count(solid, TopAbs_VERTEX),
+            },
+        )
         ex.Next()
     return solids
 
 
-def analyze(path: Path):
+def analyze(path: Path) -> tuple[JsonMap, TopoDS_Shape]:
     shape, roots, transferred = load_step(path)
     volume = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, volume)
@@ -287,7 +308,11 @@ def analyze(path: Path):
     return report, shape
 
 
-def tessellate(shape, linear=0.03, angular=0.3) -> np.ndarray:
+def tessellate(
+    shape: TopoDS_Shape,
+    linear: float = 0.03,
+    angular: float = 0.3,
+) -> np.ndarray:
     BRepMesh_IncrementalMesh(shape, linear, False, angular, True)
     faces = TopExp_Explorer(shape, TopAbs_FACE)
     tris = []
@@ -309,11 +334,11 @@ def tessellate(shape, linear=0.03, angular=0.3) -> np.ndarray:
     return np.asarray(tris, dtype=np.float64)
 
 
-def strict_mesh_hash(tris: np.ndarray, quantum_mm=1e-9) -> str:
+def strict_mesh_hash(tris: np.ndarray, quantum_mm: float = 1e-9) -> str:
     scale = 1.0 / quantum_mm
     packed = []
     for tri in tris:
-        pts = sorted(tuple(int(round(float(x) * scale)) for x in p) for p in tri)
+        pts = sorted(tuple(round(float(x) * scale) for x in p) for p in tri)
         packed.append(tuple(pts))
     packed.sort()
     h = hashlib.sha256()
@@ -323,7 +348,7 @@ def strict_mesh_hash(tris: np.ndarray, quantum_mm=1e-9) -> str:
     return h.hexdigest()
 
 
-def unit(v):
+def unit(v: ViewVector) -> np.ndarray:
     v = np.asarray(v, dtype=np.float64)
     n = np.linalg.norm(v)
     if n == 0:
@@ -331,7 +356,7 @@ def unit(v):
     return v / n
 
 
-def camera_basis(direction):
+def camera_basis(direction: ViewVector) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     d = unit(direction)
     up = np.array([0.0, 0.0, 1.0])
     if abs(float(np.dot(d, up))) > 0.9:
@@ -341,7 +366,11 @@ def camera_basis(direction):
     return u, v, d
 
 
-def projection_frame(ref_tris: np.ndarray, direction, margin=0.06):
+def projection_frame(
+    ref_tris: np.ndarray,
+    direction: ViewVector,
+    margin: float = 0.06,
+) -> ProjectionFrame:
     u, v, d = camera_basis(direction)
     flat = ref_tris.reshape(-1, 3)
     x = flat @ u
@@ -351,12 +380,19 @@ def projection_frame(ref_tris: np.ndarray, direction, margin=0.06):
     width = max(xmax - xmin, 1e-9)
     height = max(ymax - ymin, 1e-9)
     return (u, v, d), (
-        xmin - width * margin, xmax + width * margin,
-        ymin - height * margin, ymax + height * margin,
+        xmin - width * margin,
+        xmax + width * margin,
+        ymin - height * margin,
+        ymax + height * margin,
     )
 
 
-def render_triangles(tris: np.ndarray, frame, size=320, supersample=2):
+def render_triangles(
+    tris: np.ndarray,
+    frame: ProjectionFrame,
+    size: int = 320,
+    supersample: int = 2,
+) -> Image.Image:
     (u, v, d), (xmin, xmax, ymin, ymax) = frame
     n = size * supersample
     sx = (n - 1) / max(xmax - xmin, 1e-12)
@@ -376,19 +412,19 @@ def render_triangles(tris: np.ndarray, frame, size=320, supersample=2):
     for i in order:
         coords = [
             (
-                int(round((float(px[i, j]) - xmin) * sx)),
-                int(round((ymax - float(py[i, j])) * sy)),
+                round((float(px[i, j]) - xmin) * sx),
+                round((ymax - float(py[i, j])) * sy),
             )
             for j in range(3)
         ]
-        value = int(round(235 - 190 * float(shade[i])))
+        value = round(235 - 190 * float(shade[i]))
         draw.polygon(coords, fill=value)
     if supersample != 1:
         image = image.resize((size, size), Image.Resampling.LANCZOS)
     return image
 
 
-def align_translation(ref: dict, cand: dict, mode: str):
+def align_translation(ref: JsonMap, cand: JsonMap, mode: str) -> np.ndarray:
     if mode == "identity":
         return np.zeros(3, dtype=np.float64)
     if mode == "bbox_center":
@@ -398,11 +434,16 @@ def align_translation(ref: dict, cand: dict, mode: str):
     raise ValueError(f"unknown alignment mode {mode!r}")
 
 
-def rel_error(a, b):
+def rel_error(a: float, b: float) -> float:
     return abs(a - b) / max(abs(a), abs(b), 1e-30)
 
 
-def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
+def compare_solid_inventory(
+    ref_solids: JsonList,
+    cand_solids: JsonList,
+    shift: np.ndarray,
+    thresholds: JsonMap,
+) -> list[JsonMap]:
     checks = []
     if not any(
         key in thresholds
@@ -417,14 +458,16 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         return checks
 
     if len(ref_solids) != len(cand_solids):
-        checks.append({
-            "name": "solid_inventory_count",
-            "value": len(cand_solids) - len(ref_solids),
-            "reference": len(ref_solids),
-            "candidate": len(cand_solids),
-            "limit": 0,
-            "pass": False,
-        })
+        checks.append(
+            {
+                "name": "solid_inventory_count",
+                "value": len(cand_solids) - len(ref_solids),
+                "reference": len(ref_solids),
+                "candidate": len(cand_solids),
+                "limit": 0,
+                "pass": False,
+            },
+        )
         return checks
 
     unmatched = set(range(len(cand_solids)))
@@ -459,9 +502,14 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
             ref_center = np.asarray(ref["bbox_center"])
             cand_center = np.asarray(cand["bbox_center"]) + shift
             center_delta = float(np.linalg.norm(ref_center - cand_center))
-            extent_delta = float(np.max(np.abs(
-                np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
-            )))
+            extent_delta = float(
+                np.max(
+                    np.abs(
+                        np.asarray(ref["bbox_extent"])
+                        - np.asarray(cand["bbox_extent"]),
+                    ),
+                ),
+            )
             volume_delta = rel_error(ref["volume"], cand["volume"])
             area_delta = rel_error(ref["area"], cand["area"])
             # Prefer topology identity overwhelmingly, then local position and
@@ -473,21 +521,29 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
                 + volume_delta * 1.0e4
                 + area_delta * 1.0e4
             )
-            candidates.append((
-                score,
-                cand_index,
-                topology_same,
-                center_delta,
-                extent_delta,
-                volume_delta,
-                area_delta,
-            ))
+            candidates.append(
+                (
+                    score,
+                    cand_index,
+                    topology_same,
+                    center_delta,
+                    extent_delta,
+                    volume_delta,
+                    area_delta,
+                ),
+            )
 
         if not candidates:
             raise RuntimeError("solid inventory matcher exhausted candidates")
-        _, cand_index, topology_same, center_delta, extent_delta, volume_delta, area_delta = min(
-            candidates, key=lambda row: (row[0], row[1])
-        )
+        (
+            _,
+            cand_index,
+            topology_same,
+            center_delta,
+            extent_delta,
+            volume_delta,
+            area_delta,
+        ) = min(candidates, key=operator.itemgetter(0, 1))
         unmatched.remove(cand_index)
         topology_mismatches += 0 if topology_same else 1
         worst_center = max(worst_center, center_delta)
@@ -496,12 +552,14 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         worst_area = max(worst_area, area_delta)
 
     if thresholds.get("solid_topology_exact", False):
-        checks.append({
-            "name": "solid_topology_mismatches",
-            "value": topology_mismatches,
-            "limit": 0,
-            "pass": topology_mismatches == 0,
-        })
+        checks.append(
+            {
+                "name": "solid_topology_mismatches",
+                "value": topology_mismatches,
+                "limit": 0,
+                "pass": topology_mismatches == 0,
+            },
+        )
 
     for name, value, unit in [
         ("solid_center_abs_mm", worst_center, "mm"),
@@ -510,38 +568,57 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         ("solid_area_rel", worst_area, ""),
     ]:
         if name in thresholds:
-            checks.append({
-                "name": name,
-                "value": value,
-                "limit": thresholds[name],
-                "unit": unit,
-                "pass": value <= thresholds[name],
-            })
+            checks.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "limit": thresholds[name],
+                    "unit": unit,
+                    "pass": value <= thresholds[name],
+                },
+            )
     return checks
 
 
-def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
+def compare_reports(
+    ref: JsonMap,
+    cand: JsonMap,
+    alignment: str,
+    thresholds: JsonMap,
+) -> tuple[np.ndarray, list[JsonMap]]:
     shift = align_translation(ref, cand, alignment)
     checks = []
 
-    def add(name, value, limit, unit=""):
-        checks.append({
-            "name": name, "value": value, "limit": limit, "unit": unit,
-            "pass": value <= limit,
-        })
+    def add(
+        name: str,
+        value: float,
+        limit: float,
+        unit: str = "",
+    ) -> None:
+        checks.append(
+            {
+                "name": name,
+                "value": value,
+                "limit": limit,
+                "unit": unit,
+                "pass": value <= limit,
+            },
+        )
 
     add("brep_valid", 0 if cand["brep_valid"] else 1, 0)
 
-    if thresholds.get("topology_exact", False):
-        for key in ["solids", "shells", "faces", "edges", "vertices"]:
-            checks.append({
+    if thresholds.get("topology_exact"):
+        checks.extend(
+            {
                 "name": f"{key}_exact",
                 "value": cand[key] - ref[key],
                 "reference": ref[key],
                 "candidate": cand[key],
                 "limit": 0,
                 "pass": cand[key] == ref[key],
-            })
+            }
+            for key in ["solids", "shells", "faces", "edges", "vertices"]
+        )
 
     for metric, config_key in [
         ("volume", "volume_rel"),
@@ -551,12 +628,16 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         ("solid_area_sum", "solid_area_sum_rel"),
     ]:
         if config_key in thresholds:
-            add(config_key, rel_error(ref[metric], cand[metric]), thresholds[config_key])
+            add(
+                config_key,
+                rel_error(ref[metric], cand[metric]),
+                thresholds[config_key],
+            )
 
     if "bbox_extent_abs_mm" in thresholds:
-        delta = np.max(np.abs(
-            np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
-        ))
+        delta = np.max(
+            np.abs(np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])),
+        )
         add("bbox_extent_abs_mm", float(delta), thresholds["bbox_extent_abs_mm"], "mm")
 
     if "center_abs_mm" in thresholds:
@@ -573,19 +654,32 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         a = np.asarray(ref["inertia"])
         b = np.asarray(cand["inertia"])
         denom = max(float(np.linalg.norm(a)), float(np.linalg.norm(b)), 1e-30)
-        add("inertia_rel", float(np.linalg.norm(a - b) / denom), thresholds["inertia_rel"])
+        add(
+            "inertia_rel",
+            float(np.linalg.norm(a - b) / denom),
+            thresholds["inertia_rel"],
+        )
 
-    checks.extend(compare_solid_inventory(
-        ref.get("solid_inventory", []),
-        cand.get("solid_inventory", []),
-        shift,
-        thresholds,
-    ))
+    checks.extend(
+        compare_solid_inventory(
+            ref.get("solid_inventory", []),
+            cand.get("solid_inventory", []),
+            shift,
+            thresholds,
+        ),
+    )
 
     return shift, checks
 
 
-def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: dict, views):
+def render_compare(
+    ref_shape: TopoDS_Shape,
+    cand_shape: TopoDS_Shape,
+    shift: np.ndarray,
+    render_dir: Path,
+    thresholds: JsonMap,
+    views: Sequence[str],
+) -> list[JsonMap]:
     render_dir.mkdir(parents=True, exist_ok=True)
     ref_tris = tessellate(ref_shape)
     cand_tris = tessellate(cand_shape) + np.asarray(shift)[None, None, :]
@@ -628,45 +722,52 @@ def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: d
     if contact_images:
         thumb = 220
         label_h = 24
-        sheet = Image.new("L", (thumb * 3, (thumb + label_h) * len(contact_images)), 255)
+        sheet = Image.new(
+            "L",
+            (thumb * 3, (thumb + label_h) * len(contact_images)),
+            255,
+        )
         draw = ImageDraw.Draw(sheet)
         for row, (view_name, ref_img, cand_img, diff_img) in enumerate(contact_images):
             y = row * (thumb + label_h)
             draw.text((6, y + 5), view_name, fill=0)
-            for col, image in enumerate((ref_img, cand_img, diff_img)):
-                image = image.copy()
-                image.thumbnail((thumb, thumb), Image.Resampling.LANCZOS)
-                x = col * thumb + (thumb - image.width) // 2
-                yy = y + label_h + (thumb - image.height) // 2
-                sheet.paste(image, (x, yy))
+            for col, source_image in enumerate((ref_img, cand_img, diff_img)):
+                thumbnail = source_image.copy()
+                thumbnail.thumbnail((thumb, thumb), Image.Resampling.LANCZOS)
+                x = col * thumb + (thumb - thumbnail.width) // 2
+                yy = y + label_h + (thumb - thumbnail.height) // 2
+                sheet.paste(thumbnail, (x, yy))
         sheet.save(render_dir / "contact-sheet.png")
     return results
 
 
-def write_summary(results, path: Path):
+def write_summary(results: JsonList, path: Path) -> None:
     lines = ["# STEP validation", ""]
-    lines.append(f"**{sum(r['pass'] for r in results)}/{len(results)} cases passed.**")
-    lines.append("")
+    lines.extend(
+        (f"**{sum(r['pass'] for r in results)}/{len(results)} cases passed.**", "")
+    )
     for result in results:
-        lines.extend([
-            f"## {'PASS' if result['pass'] else 'FAIL'}: {result['name']}",
-            "",
-            "|" + " Check | Value | Limit | Result |",
-            "|---|---:|---:|:---:|",
-        ])
-        for check in result.get("checks", []):
-            lines.append(
-                f"| {check['name']} | {check.get('value','')} | "
-                f"{check.get('limit','')} | {'PASS' if check['pass'] else 'FAIL'} |"
-            )
-        for view in result.get("renders", []):
-            lines.append(
-                f"| render:{view['view']}:mean | {view['mean_abs']:.6g} | "
-                f"{result['thresholds'].get('render_mean_abs','')} | "
-                f"{'PASS' if view['pass'] else 'FAIL'} |"
-            )
+        lines.extend(
+            [
+                f"## {'PASS' if result['pass'] else 'FAIL'}: {result['name']}",
+                "",
+                "|" + " Check | Value | Limit | Result |",
+                "|---|---:|---:|:---:|",
+            ],
+        )
+        lines.extend(
+            f"| {check['name']} | {check.get('value', '')} | "
+            f"{check.get('limit', '')} | {'PASS' if check['pass'] else 'FAIL'} |"
+            for check in result.get("checks", [])
+        )
+        lines.extend(
+            f"| render:{view['view']}:mean | {view['mean_abs']:.6g} | "
+            f"{result['thresholds'].get('render_mean_abs', '')} | "
+            f"{'PASS' if view['pass'] else 'FAIL'} |"
+            for view in result.get("renders", [])
+        )
         lines.append("")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def run_manifest(
@@ -676,10 +777,11 @@ def run_manifest(
     step_redox: Path,
     step_count_resize: Path | None = None,
     step_chain_resize: Path | None = None,
-):
-    manifest = json.loads(manifest_path.read_text())
+) -> int:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     cases = [
-        case for case in manifest.get("cases", [])
+        case
+        for case in manifest.get("cases", [])
         if case.get("enabled", True) is not False
     ]
     needed_fixtures = {
@@ -711,16 +813,27 @@ def run_manifest(
             "reference": str(reference_path),
             "output": str(output_path),
         }
-        if any("{step_count_resize}" in part for part in case["command"]) and not step_count_resize:
+        if (
+            any(f"{step_count_resize}" in part for part in case["command"])
+            and not step_count_resize
+        ):
             raise RuntimeError(
-                f"case {name}: command requires --step-count-resize but none was supplied"
+                f"case {name}: command requires --step-count-resize but none was supplied",
             )
-        if any("{step_chain_resize}" in part for part in case["command"]) and not step_chain_resize:
+        if (
+            any(f"{step_chain_resize}" in part for part in case["command"])
+            and not step_chain_resize
+        ):
             raise RuntimeError(
-                f"case {name}: command requires --step-chain-resize but none was supplied"
+                f"case {name}: command requires --step-chain-resize but none was supplied",
             )
         command = [part.format(**values) for part in case["command"]]
-        proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         result = {
             "name": name,
             "command": command,
@@ -738,32 +851,44 @@ def run_manifest(
         ref_report, ref_shape = analyze(reference_path)
         cand_report, cand_shape = analyze(output_path)
         shift, checks = compare_reports(
-            ref_report, cand_report, case.get("alignment", "identity"),
+            ref_report,
+            cand_report,
+            case.get("alignment", "identity"),
             case.get("thresholds", {}),
         )
         renders = render_compare(
-            ref_shape, cand_shape, shift, case_dir / "renders",
-            case.get("thresholds", {}), case.get("views", list(VIEWS)),
+            ref_shape,
+            cand_shape,
+            shift,
+            case_dir / "renders",
+            case.get("thresholds", {}),
+            case.get("views", list(VIEWS)),
         )
         if case.get("thresholds", {}).get("strict_mesh_hash", False):
             ref_hash = strict_mesh_hash(tessellate(ref_shape, 0.002, 0.2))
             cand_hash = strict_mesh_hash(tessellate(cand_shape, 0.002, 0.2))
-            checks.append({
-                "name": "strict_mesh_hash",
-                "value": cand_hash,
-                "reference": ref_hash,
-                "limit": ref_hash,
-                "pass": cand_hash == ref_hash,
-            })
-        result.update({
-            "reference": ref_report,
-            "candidate": cand_report,
-            "alignment": case.get("alignment", "identity"),
-            "alignment_translation_mm": shift.tolist(),
-            "checks": checks,
-            "renders": renders,
-        })
-        result["pass"] = all(c["pass"] for c in checks) and all(r["pass"] for r in renders)
+            checks.append(
+                {
+                    "name": "strict_mesh_hash",
+                    "value": cand_hash,
+                    "reference": ref_hash,
+                    "limit": ref_hash,
+                    "pass": cand_hash == ref_hash,
+                },
+            )
+        result.update(
+            {
+                "reference": ref_report,
+                "candidate": cand_report,
+                "alignment": case.get("alignment", "identity"),
+                "alignment_translation_mm": shift.tolist(),
+                "checks": checks,
+                "renders": renders,
+            },
+        )
+        result["pass"] = all(c["pass"] for c in checks) and all(
+            r["pass"] for r in renders
+        )
         (case_dir / "report.json").write_text(json.dumps(result, indent=2))
         results.append(result)
 
@@ -772,7 +897,7 @@ def run_manifest(
     return 0 if all(result["pass"] for result in results) else 1
 
 
-def main():
+def main() -> Never:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")
@@ -802,7 +927,7 @@ def main():
                 args.step_redox,
                 args.step_count_resize,
                 args.step_chain_resize,
-            )
+            ),
         )
 
     thresholds = {
@@ -823,7 +948,12 @@ def main():
     cand_report, cand_shape = analyze(args.candidate)
     shift, checks = compare_reports(ref_report, cand_report, args.alignment, thresholds)
     renders = render_compare(
-        ref_shape, cand_shape, shift, args.out / "renders", thresholds, list(VIEWS)
+        ref_shape,
+        cand_shape,
+        shift,
+        args.out / "renders",
+        thresholds,
+        list(VIEWS),
     )
     report = {
         "reference": ref_report,

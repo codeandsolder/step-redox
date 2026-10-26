@@ -10,6 +10,9 @@ import json
 import subprocess
 from collections import Counter
 from pathlib import Path
+from typing import Any
+
+type JsonMap = dict[str, Any]
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,12 +23,10 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def corpus_fingerprint(uuid: str, solid: dict) -> str:
+def corpus_fingerprint(uuid: str, solid: JsonMap) -> str:
     geometry = solid.get("geometry_fingerprint")
     if geometry is None:
-        payload = (
-            f'body-v2:fallback:{uuid}:{solid["data_section"]}:{solid["solid_id"]}'
-        )
+        payload = f"body-v2:fallback:{uuid}:{solid['data_section']}:{solid['solid_id']}"
         return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
     scale = solid.get("unit_scale_mm")
@@ -36,7 +37,7 @@ def corpus_fingerprint(uuid: str, solid: dict) -> str:
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
-def validate_one(corpus: Path, tool: Path, body: dict) -> dict | None:
+def validate_one(corpus: Path, tool: Path, body: JsonMap) -> JsonMap | None:
     rel = body.get("body_path")
     if not body.get("extractable"):
         return None
@@ -49,8 +50,7 @@ def validate_one(corpus: Path, tool: Path, body: dict) -> dict | None:
 
     proc = subprocess.run(
         [str(tool), "scan", str(path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -119,7 +119,7 @@ def main() -> int:
     ]
     summary = json.loads(summary_path.read_text())
 
-    errors: list[dict] = []
+    errors: list[JsonMap] = []
     fingerprints = [body["fingerprint"] for body in bodies]
     if len(fingerprints) != len(set(fingerprints)):
         errors.append({"error": "duplicate fingerprint in bodies manifest"})
@@ -131,7 +131,7 @@ def main() -> int:
                 "error": "body occurrence counts do not match occurrences manifest",
                 "body_occurrence_total": occurrence_total,
                 "occurrence_rows": len(occurrences),
-            }
+            },
         )
 
     manifest_counts = {body["fingerprint"]: body["occurrences"] for body in bodies}
@@ -150,11 +150,12 @@ def main() -> int:
                 "missing_fingerprints": missing[:20],
                 "extra_fingerprints": extra[:20],
                 "mismatched_fingerprints": mismatched[:20],
-            }
+            },
         )
 
     objects_materialized = summary.get(
-        "objects_materialized", (args.corpus / "objects").is_dir()
+        "objects_materialized",
+        (args.corpus / "objects").is_dir(),
     )
     if objects_materialized:
         expected_objects = {
@@ -180,7 +181,7 @@ def main() -> int:
                         str(path.relative_to(args.corpus.resolve()))
                         for path in sorted(actual_objects - expected_objects)[:20]
                     ],
-                }
+                },
             )
 
     if len(bodies) != summary["unique_body_geometries"]:
@@ -189,16 +190,19 @@ def main() -> int:
                 "error": "body count does not match summary",
                 "bodies": len(bodies),
                 "summary": summary["unique_body_geometries"],
-            }
+            },
         )
 
     if objects_materialized:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            for error in pool.map(
-                lambda body: validate_one(args.corpus, args.body_tool, body), bodies
-            ):
-                if error is not None:
-                    errors.append(error)
+            errors.extend(
+                error
+                for error in pool.map(
+                    lambda body: validate_one(args.corpus, args.body_tool, body),
+                    bodies,
+                )
+                if error is not None
+            )
 
     result = {
         "bodies": len(bodies),

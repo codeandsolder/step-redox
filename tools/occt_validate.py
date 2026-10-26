@@ -1,17 +1,27 @@
-import argparse, hashlib, json, struct
+# ruff: file-ignore[missing-type-function-argument, missing-return-type-undocumented-public-function]
+import argparse
+import hashlib
+import json
+import struct
 from pathlib import Path
 
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.BRepGProp import BRepGProp
-from OCP.GProp import GProp_GProps
 from OCP.Bnd import Bnd_Box
+from OCP.BRep import BRep_Tool
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX, TopAbs_SOLID, TopAbs_SHELL
-from OCP.TopExp import TopExp_Explorer
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRep import BRep_Tool
+from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
+from OCP.TopAbs import (
+    TopAbs_EDGE,
+    TopAbs_FACE,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
+    TopAbs_VERTEX,
+)
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
 
@@ -26,7 +36,7 @@ def count(shape, kind):
 
 
 def q(x, scale=1e9):
-    return int(round(float(x) * scale))
+    return round(float(x) * scale)
 
 
 def mesh_hash(shape, linear=0.002, angular=0.2):
@@ -77,7 +87,14 @@ def analyze(path):
     BRepGProp.LinearProperties_s(shape, linear)
     box = Bnd_Box()
     BRepBndLib.Add_s(shape, box, True)
-    bbox = [box.GetXMin(), box.GetYMin(), box.GetZMin(), box.GetXMax(), box.GetYMax(), box.GetZMax()]
+    bbox = [
+        box.GetXMin(),
+        box.GetYMin(),
+        box.GetZMin(),
+        box.GetXMax(),
+        box.GetYMax(),
+        box.GetZMax(),
+    ]
     mh, ntri = mesh_hash(shape)
     return {
         "path": str(path),

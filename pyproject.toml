@@ -1,0 +1,13 @@
+[project]
+name = "step-redox-python-tools"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+  "cadquery-ocp==8.0.1.1.0",
+  "cadquery-ocp-stubs==8.0.1.1.0",
+  "numpy>=2.0,<3",
+  "pillow>=13,<14",
+]
+
+[tool.uv]
+package = false
