@@ -649,6 +649,29 @@ pub fn recover_extrusion_core_from_cap_faces_bytes(
     }))
 }
 
+/// Recover a sharp extrusion host after analytically undoing unique planar
+/// chamfers that trim an explicit source cap pair.
+///
+/// The result remains diagnostic until every treatment is replayed and the
+/// rebuilt whole-solid boundary is proven equivalent to the source.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn recover_treatment_healed_extrusion_core_from_cap_faces_bytes(
+    input: &[u8],
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+) -> Result<Option<solid_extrusions::TreatmentHealedExtrusionCoreCandidate>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+    Ok(exchange.data.iter().find_map(|section| {
+        solid_extrusions::recover_treatment_healed_extrusion_core_from_cap_faces(
+            solid_id,
+            cap_face_ids,
+            &section.entities,
+        )
+    }))
+}
+
 /// Detect analytically proven edge-treatment evidence without granting recovery.
 ///
 /// The diagnostic currently proves plane/plane cylindrical fillets and planar
