@@ -63,6 +63,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     let mut old_styles_to_remove = HashSet::new();
     let mut new_style_ids = Vec::new();
     let mut shape_rep_replacements = HashMap::new();
+    let mut source_representations = HashSet::new();
 
     for representation_id in representation_ids {
         let Some(&rep_idx) = initial_index.get(&representation_id) else {
@@ -234,6 +235,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
                     entity_ref(context_id),
                 ],
             );
+            source_representations.insert(source_rep);
             let rep_map = push_simple(
                 entities,
                 &mut next_id,
@@ -245,12 +247,9 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
             let mut group_new_styles = Vec::new();
 
             for (target, relative_quarter) in &mapped_group {
-                // Keep the canonical solid as the explicit parent-representation
-                // occurrence and use it as the representation-map geometry.
-                // Only noncanonical occurrences need mapped wrappers.
-                if target.root == canonical.root {
-                    continue;
-                }
+                // Every visible occurrence is represented uniformly as a MAPPED_ITEM,
+                // including the canonical identity occurrence. The canonical B-rep
+                // itself remains alive only inside source_rep as the map source.
                 let relative_quarter = *relative_quarter;
                 let translation =
                     rigid_translation(canonical.center, target.center, relative_quarter);
@@ -329,7 +328,7 @@ pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats 
     // the duplicate stays reachable and OCCT imports it as an extra solid.
     // Retarget only shape-representation item lists; arbitrary references are
     // deliberately left untouched.
-    retarget_shape_representation_items(entities, &shape_rep_replacements);
+    retarget_shape_representation_items(entities, &shape_rep_replacements, &source_representations);
 
     // Presentation lists are roots in the SolidWorks files. Remove deleted
     // styled items from them and register the new mapped-item styles.
@@ -1500,8 +1499,12 @@ fn replace_representation_items(entity: &mut EntityInstance, replacements: &Hash
 fn retarget_shape_representation_items(
     entities: &mut [EntityInstance],
     replacements: &HashMap<u64, u64>,
+    source_representations: &HashSet<u64>,
 ) {
     for entity in entities {
+        if source_representations.contains(&entity_id(entity)) {
+            continue;
+        }
         let is_shape_representation = simple_record(entity)
             .is_some_and(|record| record.name.ends_with("SHAPE_REPRESENTATION"));
         if is_shape_representation {

@@ -88,6 +88,15 @@ impl CadModel {
             {
                 bail!("boolean node {} needs at least two children", id.0);
             }
+            if let CadNode::EdgeTreatment { profile, edges, .. } = node {
+                profile.validate()?;
+                if edges.is_empty() {
+                    bail!("edge-treatment node {} needs at least one edge", id.0);
+                }
+                for edge in edges {
+                    edge.validate()?;
+                }
+            }
             if let CadNode::PeriodicChain(chain) = node {
                 chain.validate()?;
             }
@@ -240,6 +249,11 @@ pub enum CadNode {
         op: BooleanOp,
         children: Vec<NodeId>,
     },
+    EdgeTreatment {
+        child: NodeId,
+        profile: EdgeTreatmentProfile,
+        edges: Vec<EdgeTreatmentEdge>,
+    },
     Transform {
         transform: RigidTransform,
         child: NodeId,
@@ -259,7 +273,9 @@ impl CadNode {
     pub fn children(&self) -> Vec<NodeId> {
         match self {
             Self::Boolean { children, .. } | Self::Assembly { children } => children.clone(),
-            Self::Transform { child, .. } | Self::Pattern { child, .. } => vec![*child],
+            Self::EdgeTreatment { child, .. }
+            | Self::Transform { child, .. }
+            | Self::Pattern { child, .. } => vec![*child],
             _ => Vec::new(),
         }
     }
@@ -296,6 +312,15 @@ impl CadNode {
                     .map(shift)
                     .collect::<Result<Vec<_>>>()?,
             },
+            Self::EdgeTreatment {
+                child,
+                profile,
+                edges,
+            } => Self::EdgeTreatment {
+                child: shift(*child)?,
+                profile: *profile,
+                edges: edges.clone(),
+            },
             Self::Transform { transform, child } => Self::Transform {
                 transform: *transform,
                 child: shift(*child)?,
@@ -331,6 +356,7 @@ impl CadNode {
             Self::Boolean { children, .. } | Self::Assembly { children } => {
                 1 + children.len() as u64
             }
+            Self::EdgeTreatment { edges, .. } => 2 + edges.len() as u64,
             Self::Transform { .. } => 2,
             Self::Pattern { pattern, .. } => 2 + pattern.complexity(),
             Self::PeriodicChain(chain) => chain.complexity(),
@@ -535,6 +561,107 @@ pub enum BooleanOp {
     Union,
     Intersection,
     Difference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum EdgeTreatmentProfile {
+    Round,
+    Chamfer,
+    AsymmetricChamfer {
+        first_setback_mm: f64,
+        second_setback_mm: f64,
+    },
+}
+
+impl EdgeTreatmentProfile {
+    fn validate(self) -> Result<()> {
+        if let Self::AsymmetricChamfer {
+            first_setback_mm,
+            second_setback_mm,
+        } = self
+            && (!first_setback_mm.is_finite()
+                || first_setback_mm <= 0.0
+                || !second_setback_mm.is_finite()
+                || second_setback_mm <= 0.0)
+        {
+            bail!("asymmetric chamfer setbacks must be finite and positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EdgeTreatmentEdge {
+    pub selector: EdgeSelector,
+    pub radius_mm: f64,
+}
+
+impl EdgeTreatmentEdge {
+    fn validate(&self) -> Result<()> {
+        if !self.radius_mm.is_finite() || self.radius_mm <= 0.0 {
+            bail!("edge-treatment radius must be finite and positive");
+        }
+        self.selector.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum EdgeSelector {
+    Segment {
+        start_mm: [f64; 3],
+        end_mm: [f64; 3],
+    },
+    Circle {
+        center_mm: [f64; 3],
+        normal: [f64; 3],
+        radius_mm: f64,
+    },
+}
+
+impl EdgeSelector {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Segment { start_mm, end_mm } => {
+                if start_mm
+                    .iter()
+                    .chain(end_mm.iter())
+                    .any(|value| !value.is_finite())
+                {
+                    bail!("edge selector segment endpoints must be finite");
+                }
+                let squared_length = start_mm
+                    .iter()
+                    .zip(end_mm)
+                    .map(|(start, end)| (end - start) * (end - start))
+                    .sum::<f64>();
+                if squared_length <= 1.0e-24 {
+                    bail!("edge selector segment must have nonzero length");
+                }
+            }
+            Self::Circle {
+                center_mm,
+                normal,
+                radius_mm,
+            } => {
+                if center_mm
+                    .iter()
+                    .chain(normal.iter())
+                    .any(|value| !value.is_finite())
+                    || !radius_mm.is_finite()
+                {
+                    bail!("edge selector circle parameters must be finite");
+                }
+                if *radius_mm <= 0.0 {
+                    bail!("edge selector circle radius must be positive");
+                }
+                let squared_normal = normal.iter().map(|value| value * value).sum::<f64>();
+                if squared_normal <= 1.0e-24 {
+                    bail!("edge selector circle normal must be nonzero");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -959,6 +1086,74 @@ mod tests {
         model.add_root(root)?;
         assert_eq!(model.complexity_score(root)?, 4);
         Ok(())
+    }
+
+    #[test]
+    fn model_rejects_invalid_asymmetric_chamfer_setbacks() {
+        for profile in [
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: 0.0,
+                second_setback_mm: 0.2,
+            },
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: f64::NAN,
+                second_setback_mm: 0.2,
+            },
+        ] {
+            let model = CadModel {
+                nodes: vec![
+                    CadNode::Primitive(Primitive::Box {
+                        size_mm: [1.0, 1.0, 1.0],
+                    }),
+                    CadNode::EdgeTreatment {
+                        child: NodeId(0),
+                        profile,
+                        edges: vec![EdgeTreatmentEdge {
+                            selector: EdgeSelector::Segment {
+                                start_mm: [0.0, 0.0, 0.0],
+                                end_mm: [1.0, 0.0, 0.0],
+                            },
+                            radius_mm: 0.1,
+                        }],
+                    },
+                ],
+                roots: vec![NodeId(1)],
+                provenance: BTreeMap::new(),
+            };
+            assert!(model.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn circle_edge_selector_rejects_invalid_geometry() {
+        for selector in [
+            EdgeSelector::Circle {
+                center_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 0.0],
+                radius_mm: 1.0,
+            },
+            EdgeSelector::Circle {
+                center_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                radius_mm: 0.0,
+            },
+            EdgeSelector::Circle {
+                center_mm: [f64::NAN, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                radius_mm: 1.0,
+            },
+        ] {
+            assert!(selector.validate().is_err());
+        }
+        assert!(
+            EdgeSelector::Circle {
+                center_mm: [1.0, 2.0, 3.0],
+                normal: [0.0, 2.0, 0.0],
+                radius_mm: 4.0,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
