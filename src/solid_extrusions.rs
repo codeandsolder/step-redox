@@ -2067,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn planar_chamfer_heals_trimmed_cap_edge_to_virtual_edge() {
+    fn planar_chamfer_heals_trimmed_cap_edge_to_virtual_edge() -> anyhow::Result<()> {
         let mut face = square_face_info(1, 10, 0.0, false);
         face.loops[0].edges[0].start_mm = [0.0, 0.25, 0.0];
         face.loops[0].edges[0].end_mm = [1.0, 0.25, 0.0];
@@ -2110,12 +2110,13 @@ mod tests {
         };
 
         heal_cap_planar_chamfer(&mut face, &evidence)
-            .expect("single-line cap chamfer should heal analytically");
+            .ok_or_else(|| anyhow::anyhow!("single-line cap chamfer should heal analytically"))?;
         let healed = &face.loops[0].edges;
         assert_eq!(healed[0].start_mm, [0.0, 0.0, 0.0]);
         assert_eq!(healed[0].end_mm, [1.0, 0.0, 0.0]);
         assert_eq!(healed[3].end_mm, [0.0, 0.0, 0.0]);
         assert_eq!(healed[1].start_mm, [1.0, 0.0, 0.0]);
+        Ok(())
     }
 
     #[test]

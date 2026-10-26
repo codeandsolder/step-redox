@@ -14,6 +14,7 @@ const BINOMIAL_4: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
 pub(crate) const ANALYTIC_BOUNDARY_PROOF_TOL_MM: f64 = 4.0 * SCALAR_Q_MM;
 
 type PointKey = [i64; 3];
+type GroupedBoundarySegments = BTreeMap<[OrientedSupportKey; 2], Vec<(PointKey, PointKey)>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -90,6 +91,13 @@ struct EdgeGeometry {
     end: PointKey,
     curve_id: u64,
     support: CurveSupport,
+}
+
+#[derive(Debug)]
+struct BoundaryGraph {
+    faces: Vec<FaceInfo>,
+    edge_faces: HashMap<u64, Vec<usize>>,
+    edge_geometry: HashMap<u64, EdgeGeometry>,
 }
 
 #[derive(Debug)]
@@ -174,10 +182,6 @@ pub fn analytic_boundary_diagnostic(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the fail-closed boundary proof is intentionally kept as one linear audit pipeline"
-)]
 fn analytic_boundary_signature(
     solid_id: u64,
     entities: &[EntityInstance],
@@ -189,14 +193,42 @@ fn analytic_boundary_signature(
         return Err("solid has no faces".to_owned());
     }
 
+    let graph = collect_boundary_graph(&face_ids, entities, &index)?;
+    let (mut union_find, component_support) = merge_support_components(&graph)?;
+    let grouped_segments = group_physical_boundaries(
+        &graph,
+        &mut union_find,
+        &component_support,
+        entities,
+        &index,
+    )?;
+
+    let mut chains = Vec::new();
+    for (supports, segments) in grouped_segments {
+        chains.extend(normalize_support_pair_chains(&supports, &segments)?);
+    }
+    chains.sort();
+
+    let mut supports = component_support.into_values().collect::<Vec<_>>();
+    supports.sort();
+    prove_all_supports_are_bounded(&supports, &chains)?;
+
+    Ok(AnalyticBoundarySignature { supports, chains })
+}
+
+fn collect_boundary_graph(
+    face_ids: &[u64],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<BoundaryGraph, String> {
     let mut faces = Vec::with_capacity(face_ids.len());
     let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
     let mut edge_geometry = HashMap::<u64, EdgeGeometry>::new();
 
     for (face_index, face_id) in face_ids.iter().copied().enumerate() {
-        let support = oriented_support_key(face_id, entities, &index)
+        let support = oriented_support_key(face_id, entities, index)
             .ok_or_else(|| format!("face #{face_id} is not a supported plane/cylinder"))?;
-        let loops = brep::face_loops(face_id, entities, &index)
+        let loops = brep::face_loops(face_id, entities, index)
             .ok_or_else(|| format!("face #{face_id} has unsupported boundary topology"))?;
         if loops.is_empty() {
             return Err(format!("face #{face_id} has no boundary loops"));
@@ -212,43 +244,58 @@ fn analytic_boundary_signature(
                 curve_id: edge.curve_id,
                 support: edge.support.clone(),
             };
-            if let Some(existing) = edge_geometry.get(&edge.edge_id) {
-                let same = existing.start == geometry.start && existing.end == geometry.end;
-                let reversed = existing.start == geometry.end && existing.end == geometry.start;
-                if !same && !reversed {
-                    return Err(format!(
-                        "edge #{} has inconsistent endpoint geometry",
-                        edge.edge_id
-                    ));
-                }
-                if existing.curve_id != geometry.curve_id || existing.support != geometry.support {
-                    return Err(format!(
-                        "edge #{} has inconsistent curve geometry",
-                        edge.edge_id
-                    ));
-                }
-            } else {
-                edge_geometry.insert(edge.edge_id, geometry);
-            }
+            validate_or_insert_edge_geometry(edge.edge_id, geometry, &mut edge_geometry)?;
         }
         faces.push(FaceInfo { support });
     }
 
-    let mut union_find = UnionFind::new(faces.len());
-    for attached in edge_faces.values() {
+    Ok(BoundaryGraph {
+        faces,
+        edge_faces,
+        edge_geometry,
+    })
+}
+
+fn validate_or_insert_edge_geometry(
+    edge_id: u64,
+    geometry: EdgeGeometry,
+    edge_geometry: &mut HashMap<u64, EdgeGeometry>,
+) -> Result<(), String> {
+    let Some(existing) = edge_geometry.get(&edge_id) else {
+        edge_geometry.insert(edge_id, geometry);
+        return Ok(());
+    };
+    let same = existing.start == geometry.start && existing.end == geometry.end;
+    let reversed = existing.start == geometry.end && existing.end == geometry.start;
+    if !same && !reversed {
+        return Err(format!(
+            "edge #{edge_id} has inconsistent endpoint geometry"
+        ));
+    }
+    if existing.curve_id != geometry.curve_id || existing.support != geometry.support {
+        return Err(format!("edge #{edge_id} has inconsistent curve geometry"));
+    }
+    Ok(())
+}
+
+fn merge_support_components(
+    graph: &BoundaryGraph,
+) -> Result<(UnionFind, HashMap<usize, OrientedSupportKey>), String> {
+    let mut union_find = UnionFind::new(graph.faces.len());
+    for attached in graph.edge_faces.values() {
         let unique = attached.iter().copied().collect::<BTreeSet<_>>();
         if unique.len() > 2 {
             return Err("non-manifold edge has more than two attached faces".to_owned());
         }
         if let [first, second] = unique.iter().copied().collect::<Vec<_>>().as_slice()
-            && faces[*first].support == faces[*second].support
+            && graph.faces[*first].support == graph.faces[*second].support
         {
             union_find.union(*first, *second);
         }
     }
 
     let mut component_support = HashMap::<usize, OrientedSupportKey>::new();
-    for (face_index, face) in faces.iter().enumerate() {
+    for (face_index, face) in graph.faces.iter().enumerate() {
         let root = union_find.find(face_index);
         if let Some(existing) = component_support.get(&root) {
             if existing != &face.support {
@@ -258,20 +305,25 @@ fn analytic_boundary_signature(
             component_support.insert(root, face.support.clone());
         }
     }
+    Ok((union_find, component_support))
+}
 
-    let mut grouped_segments =
-        BTreeMap::<[OrientedSupportKey; 2], Vec<(PointKey, PointKey)>>::new();
-    for (edge_id, attached) in &edge_faces {
+fn group_physical_boundaries(
+    graph: &BoundaryGraph,
+    union_find: &mut UnionFind,
+    component_support: &HashMap<usize, OrientedSupportKey>,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<GroupedBoundarySegments, String> {
+    let mut grouped_segments = BTreeMap::new();
+    for (edge_id, attached) in &graph.edge_faces {
         let unique_faces = attached.iter().copied().collect::<BTreeSet<_>>();
         let roots = unique_faces
             .iter()
             .copied()
             .map(|face_index| union_find.find(face_index))
             .collect::<BTreeSet<_>>();
-
         if roots.len() == 1 {
-            // Internal face partition edge, or a periodic seam used twice by
-            // one analytic support patch. Neither bounds occupied material.
             if attached.len() >= 2 {
                 continue;
             }
@@ -282,41 +334,39 @@ fn analytic_boundary_signature(
         }
 
         let roots = roots.into_iter().collect::<Vec<_>>();
-        let first_support = component_support
+        let first = component_support
             .get(&roots[0])
             .ok_or_else(|| "missing first component support".to_owned())?
             .clone();
-        let second_support = component_support
+        let second = component_support
             .get(&roots[1])
             .ok_or_else(|| "missing second component support".to_owned())?
             .clone();
-        let supports = sorted_pair(first_support, second_support);
-        let geometry = edge_geometry
+        let supports = sorted_pair(first, second);
+        let geometry = graph
+            .edge_geometry
             .get(edge_id)
             .ok_or_else(|| format!("edge #{edge_id} has no geometry"))?;
         if geometry.start == geometry.end {
             return Err(format!("edge #{edge_id} collapses after quantization"));
         }
-        if !edge_proves_support_intersection(geometry, &supports, entities, &index) {
+        if !edge_proves_support_intersection(geometry, &supports, entities, index) {
             return Err(format!(
                 "edge #{edge_id} is not proven on the exact intersection locus of its carriers"
             ));
         }
         grouped_segments
             .entry(supports)
-            .or_default()
+            .or_insert_with(Vec::new)
             .push((geometry.start, geometry.end));
     }
+    Ok(grouped_segments)
+}
 
-    let mut chains = Vec::new();
-    for (supports, segments) in grouped_segments {
-        chains.extend(normalize_support_pair_chains(&supports, &segments)?);
-    }
-    chains.sort();
-
-    let mut supports = component_support.into_values().collect::<Vec<_>>();
-    supports.sort();
-
+fn prove_all_supports_are_bounded(
+    supports: &[OrientedSupportKey],
+    chains: &[BoundaryChainKey],
+) -> Result<(), String> {
     let used_supports = chains
         .iter()
         .flat_map(|chain| match chain {
@@ -332,8 +382,7 @@ fn analytic_boundary_signature(
     {
         return Err("analytic support component has no physical boundary".to_owned());
     }
-
-    Ok(AnalyticBoundarySignature { supports, chains })
+    Ok(())
 }
 
 fn normalize_support_pair_chains(
