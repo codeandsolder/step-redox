@@ -40,6 +40,10 @@ pub struct InstancePattern {
     pub occupancy: Vec<[i64; 2]>,
     pub grid_shape: Vec<usize>,
     pub fill_ratio: f64,
+    /// Lattice site occupied by the representation-map source directly in the parent,
+    /// rather than by a `MAPPED_ITEM`. This is proven only for an identity transform.
+    #[serde(default)]
+    pub implicit_identity_site: Option<usize>,
     #[serde(default = "default_pattern_tolerance_mm")]
     pub tolerance_mm: f64,
     pub max_residual_mm: f64,
@@ -509,6 +513,8 @@ pub(crate) fn detect_instance_patterns_with_index(
             .map(|(member, site)| (site, member.item))
             .collect::<Vec<_>>();
         ordered.sort_by_key(|(site, item)| (*site, *item));
+        let implicit_identity_site =
+            detect_implicit_identity_site(entities, index, &key, &fit, tolerance_mm);
 
         out.push(InstancePattern {
             parent_representation: key.parent_representation,
@@ -522,6 +528,7 @@ pub(crate) fn detect_instance_patterns_with_index(
             occupancy: ordered.iter().map(|(site, _)| *site).collect(),
             grid_shape: fit.grid_shape,
             fill_ratio: fit.fill_ratio,
+            implicit_identity_site,
             tolerance_mm,
             max_residual_mm: fit.max_residual_mm,
         });
@@ -535,6 +542,106 @@ pub(crate) fn detect_instance_patterns_with_index(
             .then_with(|| a.representation_map.cmp(&b.representation_map))
     });
     out
+}
+
+fn detect_implicit_identity_site(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    key: &GroupKey,
+    fit: &Fit,
+    tolerance_mm: f64,
+) -> Option<usize> {
+    if fit.dimension != 1 || fit.basis.len() != 1 || fit.grid_shape.len() != 1 {
+        return None;
+    }
+    let sites = fit.grid_shape[0];
+    if sites != fit.occupancy.len().checked_add(1)? {
+        return None;
+    }
+    let expected_orientation =
+        quantize_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])?;
+    if key.orientation != expected_orientation {
+        return None;
+    }
+
+    let occupied = fit
+        .occupancy
+        .iter()
+        .filter_map(|site| usize::try_from(site[0]).ok())
+        .collect::<HashSet<_>>();
+    let mut missing = (0..sites).filter(|site| !occupied.contains(site));
+    let site = missing.next()?;
+    if missing.next().is_some() {
+        return None;
+    }
+    let site_f64 = exact_usize_to_f64(site)?;
+    let identity_origin = add(fit.origin, scale(fit.basis[0], site_f64));
+    if norm(identity_origin) > tolerance_mm.max(1.0e-9) {
+        return None;
+    }
+
+    let rep_map = simple_record(entities.get(*index.get(&key.representation_map)?)?)?;
+    if rep_map.name != "REPRESENTATION_MAP" {
+        return None;
+    }
+    let Parameter::List(map_params) = &rep_map.parameter else {
+        return None;
+    };
+    let mapping_origin = entity_ref_value(map_params.first()?)?;
+    let (map_origin, map_orientation) = target_frame(mapping_origin, entities, index)?;
+    if norm(map_origin) > tolerance_mm.max(1.0e-9)
+        || quantize_matrix(map_orientation)? != expected_orientation
+    {
+        return None;
+    }
+    let source_representation = entity_ref_value(map_params.get(1)?)?;
+    let source = simple_record(entities.get(*index.get(&source_representation)?)?)?;
+    let parent = simple_record(entities.get(*index.get(&key.parent_representation)?)?)?;
+    let Parameter::List(source_params) = &source.parameter else {
+        return None;
+    };
+    let Parameter::List(parent_params) = &parent.parameter else {
+        return None;
+    };
+    let source_items = source_params.get(1).and_then(entity_ref_list)?;
+    let parent_items = parent_params.get(1).and_then(entity_ref_list)?;
+    source_items
+        .iter()
+        .copied()
+        .any(|item| item != mapping_origin && parent_items.contains(&item))
+        .then_some(site)
+}
+
+pub(crate) fn linear_pattern_sites(pattern: &InstancePattern) -> Option<usize> {
+    if pattern.dimension != 1
+        || pattern.basis.len() != 1
+        || pattern.grid_shape.len() != 1
+        || pattern.item_ids.len() != pattern.occupancy.len()
+    {
+        return None;
+    }
+    let sites = pattern.grid_shape[0];
+    if sites < 2 {
+        return None;
+    }
+    let expected_items =
+        sites.checked_sub(usize::from(pattern.implicit_identity_site.is_some()))?;
+    if pattern.item_ids.len() != expected_items {
+        return None;
+    }
+    let expected_fill = exact_usize_to_f64(expected_items)? / exact_usize_to_f64(sites)?;
+    if (pattern.fill_ratio - expected_fill).abs() > 1.0e-12 {
+        return None;
+    }
+    let implicit = pattern.implicit_identity_site;
+    if implicit.is_some_and(|site| site >= sites) {
+        return None;
+    }
+    let expected = (0..sites)
+        .filter(|site| Some(*site) != implicit)
+        .map(|site| i64::try_from(site).ok().map(|site| [site, 0]))
+        .collect::<Option<Vec<_>>>()?;
+    (pattern.occupancy == expected).then_some(sites)
 }
 
 struct PatternResizeTemplates {
@@ -564,7 +671,24 @@ pub(crate) fn resize_filled_linear_pattern(
     let styles = style_records_by_target(entities);
     let templates = collect_resize_templates(entities, pattern, &index, &styles)?;
     let new_origin = anchored_pattern_origin(pattern, old_count, new_count, anchor)?;
-    let rewrite = rewrite_pattern_sites(entities, pattern, new_count, new_origin, &templates)?;
+    let new_implicit_identity_site = if pattern.implicit_identity_site.is_some() {
+        Some(identity_site_for_lattice(
+            new_origin,
+            pattern.basis[0],
+            new_count,
+            pattern.tolerance_mm,
+        )?)
+    } else {
+        None
+    };
+    let rewrite = rewrite_pattern_sites(
+        entities,
+        pattern,
+        new_count,
+        new_origin,
+        new_implicit_identity_site,
+        &templates,
+    )?;
     rewrite_pattern_references(
         entities,
         pattern,
@@ -579,34 +703,53 @@ pub(crate) fn resize_filled_linear_pattern(
         old_count,
         new_count,
         reused_items: rewrite.reused,
-        added_items: new_count.saturating_sub(rewrite.reused),
-        removed_items: old_count.saturating_sub(rewrite.reused),
+        added_items: new_count
+            .saturating_sub(usize::from(new_implicit_identity_site.is_some()))
+            .saturating_sub(rewrite.reused),
+        removed_items: pattern.item_ids.len().saturating_sub(rewrite.reused),
         entities_removed,
     })
 }
 
 fn validate_resize_request(pattern: &InstancePattern, new_count: usize) -> Result<usize> {
-    if pattern.dimension != 1 || pattern.basis.len() != 1 || pattern.grid_shape.len() != 1 {
-        bail!("pattern is not one-dimensional");
-    }
     if new_count == 0 {
         bail!("new pattern count must be at least 1");
     }
-    let old_count = pattern.item_ids.len();
-    if old_count < 2 || pattern.occupancy.len() != old_count {
+    let old_count = linear_pattern_sites(pattern).ok_or_else(|| {
+        anyhow::anyhow!("pattern is not a proven editable one-dimensional lattice")
+    })?;
+    if old_count < 2 {
         bail!("pattern does not contain enough instances");
     }
-    if pattern.grid_shape[0] != old_count || (pattern.fill_ratio - 1.0).abs() > 1.0e-12 {
-        bail!("pattern is not fully occupied");
-    }
-    for (index, site) in pattern.occupancy.iter().enumerate() {
-        let expected = i64::try_from(index)
-            .map_err(|_| anyhow::anyhow!("pattern occupancy index exceeds i64 range"))?;
-        if *site != [expected, 0] {
-            bail!("pattern occupancy is not canonical contiguous 0..N-1");
-        }
-    }
     Ok(old_count)
+}
+
+fn identity_site_for_lattice(
+    origin: [f64; 3],
+    basis: [f64; 3],
+    sites: usize,
+    tolerance_mm: f64,
+) -> Result<usize> {
+    let denom = dot(basis, basis);
+    if !denom.is_finite() || denom <= 1.0e-24 {
+        bail!("implicit-identity pattern has a degenerate basis");
+    }
+    let projected = -dot(origin, basis) / denom;
+    let site = rounded_f64_to_i64(projected.round())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|site| *site < sites)
+        .ok_or_else(|| {
+            anyhow::anyhow!("resized lattice would exclude its implicit identity occurrence")
+        })?;
+    let site_f64 = exact_usize_to_f64(site)
+        .ok_or_else(|| anyhow::anyhow!("implicit identity site exceeds exact geometry range"))?;
+    let residual = norm(add(origin, scale(basis, site_f64)));
+    if residual > tolerance_mm.max(1.0e-9) {
+        bail!(
+            "resized lattice no longer places its implicit identity occurrence at zero translation"
+        );
+    }
+    Ok(site)
 }
 
 fn collect_resize_templates(
@@ -764,6 +907,7 @@ fn rewrite_pattern_sites(
     pattern: &InstancePattern,
     new_count: usize,
     new_origin: [f64; 3],
+    implicit_identity_site: Option<usize>,
     templates: &PatternResizeTemplates,
 ) -> Result<PatternRewrite> {
     let basis = pattern.basis[0];
@@ -774,12 +918,17 @@ fn rewrite_pattern_sites(
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("STEP entity id space exhausted"))?;
-    let reused = pattern.item_ids.len().min(new_count);
-    let mut new_items = Vec::with_capacity(new_count);
-    let mut new_styles = Vec::with_capacity(new_count);
+    let new_mapped_count = new_count.saturating_sub(usize::from(implicit_identity_site.is_some()));
+    let reused = pattern.item_ids.len().min(new_mapped_count);
+    let mut new_items = Vec::with_capacity(new_mapped_count);
+    let mut new_styles = Vec::with_capacity(new_mapped_count);
     let mut candidate_roots = templates.old_targets.clone();
+    let mut mapped_index = 0usize;
 
     for site in 0..new_count {
+        if Some(site) == implicit_identity_site {
+            continue;
+        }
         let site_f64 = exact_usize_to_f64(site)
             .ok_or_else(|| anyhow::anyhow!("pattern site exceeds exact geometry range"))?;
         let origin = add(new_origin, scale(basis, site_f64));
@@ -790,13 +939,13 @@ fn rewrite_pattern_sites(
             &templates.axis_param,
             &templates.refdir_param,
         );
-        let (item, style) = if site < reused {
+        let (item, style) = if mapped_index < reused {
             rewrite_reused_pattern_item(
                 entities,
-                pattern.item_ids[site],
+                pattern.item_ids[mapped_index],
                 placement,
-                *templates.old_style_ids.get(site).ok_or_else(|| {
-                    anyhow::anyhow!("missing style for reused pattern site {site}")
+                *templates.old_style_ids.get(mapped_index).ok_or_else(|| {
+                    anyhow::anyhow!("missing style for reused mapped item {mapped_index}")
                 })?,
             )?
         } else {
@@ -810,6 +959,7 @@ fn rewrite_pattern_sites(
         };
         new_items.push(item);
         new_styles.push(style);
+        mapped_index += 1;
     }
 
     let removed_items = pattern.item_ids.iter().copied().skip(reused);
@@ -1477,6 +1627,38 @@ mod tests {
         assert!((fit.pitch[0] - 0.5).abs() < 1.0e-12);
         assert!((fit.fill_ratio - 1.0).abs() < 1.0e-12);
         Ok(())
+    }
+
+    fn sparse_identity_pattern() -> InstancePattern {
+        InstancePattern {
+            parent_representation: 1,
+            representation_map: 2,
+            item_ids: vec![10, 11, 12],
+            style_signature: Vec::new(),
+            dimension: 1,
+            origin: [-1.0, 0.0, 0.0],
+            basis: vec![[1.0, 0.0, 0.0]],
+            pitch: vec![1.0],
+            occupancy: vec![[0, 0], [2, 0], [3, 0]],
+            grid_shape: vec![4],
+            fill_ratio: 0.75,
+            implicit_identity_site: Some(1),
+            tolerance_mm: 1.0e-7,
+            max_residual_mm: 0.0,
+        }
+    }
+
+    #[test]
+    fn implicit_identity_site_counts_as_lattice_site() {
+        let pattern = sparse_identity_pattern();
+        assert_eq!(linear_pattern_sites(&pattern), Some(4));
+    }
+
+    #[test]
+    fn sparse_lattice_requires_proven_identity_site() {
+        let mut pattern = sparse_identity_pattern();
+        pattern.implicit_identity_site = None;
+        assert_eq!(linear_pattern_sites(&pattern), None);
     }
 
     #[test]

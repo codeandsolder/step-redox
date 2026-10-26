@@ -5,7 +5,7 @@ use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::patterns::InstancePattern;
+use crate::patterns::{InstancePattern, linear_pattern_sites};
 
 const GEOM_TOL_MM: f64 = 1.0e-5;
 const DIR_TOL: f64 = 1.0e-10;
@@ -260,13 +260,10 @@ pub(crate) fn detect_periodic_bodies_with_index(
 fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
     let mut out = Vec::<LatticeCandidate>::new();
     for (index, pattern) in patterns.iter().enumerate() {
-        if pattern.dimension != 1
-            || pattern.item_ids.len() < 4
-            || pattern.grid_shape.len() != 1
-            || pattern.grid_shape[0] != pattern.item_ids.len()
-            || (pattern.fill_ratio - 1.0).abs() > 1.0e-12
-            || pattern.basis.len() != 1
-        {
+        let Some(sites) = linear_pattern_sites(pattern) else {
+            continue;
+        };
+        if sites < 4 {
             continue;
         }
         let Some(axis) = normalize(pattern.basis[0]) else {
@@ -277,7 +274,6 @@ fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
         if !pitch.is_finite() || pitch <= GEOM_TOL_MM {
             continue;
         }
-        let sites = pattern.item_ids.len();
 
         if let Some(existing) = out.iter_mut().find(|existing| {
             existing.sites == sites
