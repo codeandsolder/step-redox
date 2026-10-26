@@ -741,6 +741,13 @@ pub mod monstertruck {
         let fillet_profile = match profile {
             EdgeTreatmentProfile::Round => FilletProfile::Round,
             EdgeTreatmentProfile::Chamfer => FilletProfile::Chamfer,
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm,
+                second_setback_mm,
+            } => FilletProfile::AsymmetricChamfer {
+                first_setback_mm,
+                second_setback_mm,
+            },
         };
         let options = FilletOptions {
             radius: RadiusSpec::PerEdge(radii),
@@ -991,6 +998,14 @@ pub mod monstertruck {
         #[test]
         fn evaluates_chamfer_edge_treatment() -> Result<()> {
             box_edge_treatment(EdgeTreatmentProfile::Chamfer)
+        }
+
+        #[test]
+        fn evaluates_asymmetric_chamfer_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: 0.2,
+                second_setback_mm: 0.3,
+            })
         }
 
         #[test]

@@ -88,7 +88,8 @@ impl CadModel {
             {
                 bail!("boolean node {} needs at least two children", id.0);
             }
-            if let CadNode::EdgeTreatment { edges, .. } = node {
+            if let CadNode::EdgeTreatment { profile, edges, .. } = node {
+                profile.validate()?;
                 if edges.is_empty() {
                     bail!("edge-treatment node {} needs at least one edge", id.0);
                 }
@@ -562,10 +563,31 @@ pub enum BooleanOp {
     Difference,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum EdgeTreatmentProfile {
     Round,
     Chamfer,
+    AsymmetricChamfer {
+        first_setback_mm: f64,
+        second_setback_mm: f64,
+    },
+}
+
+impl EdgeTreatmentProfile {
+    fn validate(self) -> Result<()> {
+        if let Self::AsymmetricChamfer {
+            first_setback_mm,
+            second_setback_mm,
+        } = self
+            && (!first_setback_mm.is_finite()
+                || first_setback_mm <= 0.0
+                || !second_setback_mm.is_finite()
+                || second_setback_mm <= 0.0)
+        {
+            bail!("asymmetric chamfer setbacks must be finite and positive");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1064,6 +1086,42 @@ mod tests {
         model.add_root(root)?;
         assert_eq!(model.complexity_score(root)?, 4);
         Ok(())
+    }
+
+    #[test]
+    fn model_rejects_invalid_asymmetric_chamfer_setbacks() {
+        for profile in [
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: 0.0,
+                second_setback_mm: 0.2,
+            },
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: f64::NAN,
+                second_setback_mm: 0.2,
+            },
+        ] {
+            let model = CadModel {
+                nodes: vec![
+                    CadNode::Primitive(Primitive::Box {
+                        size_mm: [1.0, 1.0, 1.0],
+                    }),
+                    CadNode::EdgeTreatment {
+                        child: NodeId(0),
+                        profile,
+                        edges: vec![EdgeTreatmentEdge {
+                            selector: EdgeSelector::Segment {
+                                start_mm: [0.0, 0.0, 0.0],
+                                end_mm: [1.0, 0.0, 0.0],
+                            },
+                            radius_mm: 0.1,
+                        }],
+                    },
+                ],
+                roots: vec![NodeId(1)],
+                provenance: BTreeMap::new(),
+            };
+            assert!(model.validate().is_err());
+        }
     }
 
     #[test]

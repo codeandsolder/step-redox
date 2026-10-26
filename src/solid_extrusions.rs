@@ -2099,6 +2099,7 @@ mod tests {
                 },
             ],
             inferred_radius_mm: None,
+            inferred_setbacks_mm: None,
             inferred_angle_rad: Some(std::f64::consts::FRAC_PI_4),
             carrier_angle_rad: std::f64::consts::FRAC_PI_2,
             virtual_edge: EdgeTreatmentVirtualEdge::Segment {

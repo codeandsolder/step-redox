@@ -57,6 +57,7 @@ pub struct EdgeTreatmentEvidence {
     pub treatment_support: String,
     pub carriers: [EdgeTreatmentCarrier; 2],
     pub inferred_radius_mm: Option<f64>,
+    pub inferred_setbacks_mm: Option<[f64; 2]>,
     pub inferred_angle_rad: Option<f64>,
     pub carrier_angle_rad: f64,
     pub virtual_edge: EdgeTreatmentVirtualEdge,
@@ -427,6 +428,13 @@ fn prove_planar_chamfer(
         .first()
         .and_then(|edge_id| edge_geometry.get(edge_id))?
         .start_mm;
+    let setbacks = planar_chamfer_setbacks(
+        *first_plane,
+        *second_plane,
+        treatment_plane,
+        virtual_direction,
+        reference_origin,
+    )?;
     let virtual_edge = plane_intersection_segment(
         *first_plane,
         *second_plane,
@@ -437,7 +445,7 @@ fn prove_planar_chamfer(
         edge_geometry,
     )?;
 
-    Some(evidence(
+    let mut result = evidence(
         solid_id,
         treatment,
         EdgeTreatmentKind::PlanarChamfer,
@@ -450,7 +458,13 @@ fn prove_planar_chamfer(
         plane_angle(first_normal, second_normal),
         virtual_edge,
         max_boundary_residual_mm,
-    ))
+    );
+    result.inferred_setbacks_mm = Some(if result.carriers[0].face_id == first.face_id {
+        setbacks
+    } else {
+        [setbacks[1], setbacks[0]]
+    });
+    Some(result)
 }
 
 #[allow(
@@ -638,11 +652,60 @@ fn evidence(
         treatment_support: support_name(&treatment.surface).to_owned(),
         carriers,
         inferred_radius_mm,
+        inferred_setbacks_mm: None,
         inferred_angle_rad,
         carrier_angle_rad,
         virtual_edge,
         max_boundary_residual_mm,
     }
+}
+
+fn planar_chamfer_setbacks(
+    first: brep::PlaneSupport,
+    second: brep::PlaneSupport,
+    treatment: brep::PlaneSupport,
+    direction: [f64; 3],
+    reference_origin: [f64; 3],
+) -> Option<[f64; 2]> {
+    let first_normal = normalize(first.normal, DIR_TOL)?;
+    let second_normal = normalize(second.normal, DIR_TOL)?;
+    let treatment_normal = normalize(treatment.normal, DIR_TOL)?;
+    let direction = normalize(direction, DIR_TOL)?;
+    let cross_section_offset = dot(direction, reference_origin);
+    let virtual_point = three_plane_intersection(
+        first_normal,
+        dot(first_normal, first.origin_mm),
+        second_normal,
+        dot(second_normal, second.origin_mm),
+        direction,
+        cross_section_offset,
+    )?;
+    let first_contact = three_plane_intersection(
+        first_normal,
+        dot(first_normal, first.origin_mm),
+        treatment_normal,
+        dot(treatment_normal, treatment.origin_mm),
+        direction,
+        cross_section_offset,
+    )?;
+    let second_contact = three_plane_intersection(
+        second_normal,
+        dot(second_normal, second.origin_mm),
+        treatment_normal,
+        dot(treatment_normal, treatment.origin_mm),
+        direction,
+        cross_section_offset,
+    )?;
+    let first_setback = norm(sub(first_contact, virtual_point));
+    let second_setback = norm(sub(second_contact, virtual_point));
+    if !first_setback.is_finite()
+        || !second_setback.is_finite()
+        || first_setback <= GEOM_TOL_MM
+        || second_setback <= GEOM_TOL_MM
+    {
+        return None;
+    }
+    Some([first_setback, second_setback])
 }
 
 fn plane_intersection_segment(
@@ -964,6 +1027,33 @@ mod tests {
             Some((2.0, 3.0))
         );
         assert!((meridian_line_angle(plane, cylinder) - std::f64::consts::FRAC_PI_2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn planar_chamfer_setbacks_preserve_asymmetry() -> anyhow::Result<()> {
+        let first = brep::PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+            max_residual_mm: 0.0,
+        };
+        let second = brep::PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            max_residual_mm: 0.0,
+        };
+        let treatment = brep::PlaneSupport {
+            origin_mm: [0.2, 0.0, 0.0],
+            normal: [5.0, 1.0 / 0.35, 0.0],
+            max_residual_mm: 0.0,
+        };
+        let Some(setbacks) =
+            planar_chamfer_setbacks(first, second, treatment, [0.0, 0.0, 1.0], [0.0, 0.0, 0.0])
+        else {
+            anyhow::bail!("orthogonal asymmetric chamfer should have exact setbacks");
+        };
+        assert!((setbacks[0] - 0.35).abs() < 1.0e-12);
+        assert!((setbacks[1] - 0.2).abs() < 1.0e-12);
+        Ok(())
     }
 
     #[test]
