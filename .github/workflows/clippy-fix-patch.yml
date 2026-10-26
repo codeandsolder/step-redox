@@ -1,0 +1,60 @@
+name: Temporary strict Clippy fixer
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fix:
+    if: github.head_ref == 'ci/rust-skills2-2.1.0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: codeandsolder/rust-skills2
+          ref: ca8e5368b41e5699095dd0458a3849ecb8db7712
+          path: .rust-skills2
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy,rustfmt
+      - name: Apply machine-applicable production fixes
+        shell: bash
+        run: |
+          set -uo pipefail
+          export CLIPPY_CONF_DIR="$PWD/.rust-skills2/.github/actions/rust-strict"
+          lint_args=(
+            -Dwarnings
+            -Dunfulfilled_lint_expectations
+            -Dunexpected_cfgs
+            -Dunsafe_op_in_unsafe_fn
+            -Dclippy::correctness
+            -Dclippy::suspicious
+            -Dclippy::perf
+            -Dclippy::style
+            -Dclippy::complexity
+            -Dclippy::pedantic
+            -Dclippy::nursery
+            -Dclippy::unwrap_used
+            -Dclippy::expect_used
+            -Dclippy::panic
+            -Dclippy::todo
+            -Dclippy::unimplemented
+            -Dclippy::dbg_macro
+            -Dclippy::undocumented_unsafe_blocks
+            -Dclippy::missing_safety_doc
+            -Dclippy::await_holding_lock
+            -Dclippy::allow_attributes_without_reason
+          )
+          cargo +nightly clippy --fix --allow-dirty --allow-staged --locked -- "${lint_args[@]}" || true
+          cargo +nightly fmt --all
+          git diff --binary -- . ':(exclude).github/workflows/clippy-fix-patch.yml' > /tmp/clippy-fix.patch
+          test -s /tmp/clippy-fix.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: step-redox-strict-clippy-fix
+          path: /tmp/clippy-fix.patch
+          if-no-files-found: error
