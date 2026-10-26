@@ -374,7 +374,7 @@ fn recover_boundary_feature_pass(
         return Ok(false);
     }
 
-    let mut tool_entities = working.clone();
+    let mut tool_entities = working.to_vec();
     let (tool_report, materialized) =
         crate::planar_features::materialize_boundary_feature_tools_for_analysis(
             &mut tool_entities,
