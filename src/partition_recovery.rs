@@ -950,6 +950,10 @@ fn direction_key(v: [f64; 3]) -> Option<[i64; 3]> {
 }
 
 #[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
+#[expect(
     clippy::cast_precision_loss,
     reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
 )]
@@ -964,10 +968,6 @@ fn quantize(v: f64, q: f64) -> Option<i64> {
     Some(x as i64)
 }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
-)]
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(v, 1.0e-15)
 }
