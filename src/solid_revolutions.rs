@@ -626,6 +626,10 @@ fn selected_faces_connected(face_count: usize, edge_faces: &HashMap<u64, Vec<usi
 /// Recover a connected axisymmetric subset of one source solid when removing the
 /// remaining feature leaves exactly one circular interface. The missing interface
 /// is capped only in constructive meridian space; source topology remains untouched.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub(crate) fn recover_axisymmetric_subbody_with_circular_cap(
     solid_id: u64,
     selected_face_ids: &[u64],
@@ -744,6 +748,10 @@ pub(crate) fn recover_axisymmetric_subbody_with_circular_cap(
     Some((recovered, interface_circle))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_one_radial_slot(
     solid_id: u64,
     entities: &[EntityInstance],
@@ -1268,6 +1276,10 @@ fn detect_full_ring_torus(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_spherical_cap(
     solid_id: u64,
     face_ids: &[u64],
@@ -1432,6 +1444,14 @@ fn detect_spherical_cap(
     })
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "the comparison is against an exact canonical or sentinel value produced by normalization"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_hemispherical_end(
     solid_id: u64,
     face_ids: &[u64],
@@ -1717,6 +1737,10 @@ fn detect_mixed_curved_revolution(
     detect_mixed_curved_revolution_with_synthetic(solid_id, face_ids, faces, context, &[])
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_mixed_curved_revolution_with_synthetic(
     solid_id: u64,
     face_ids: &[u64],
@@ -1885,6 +1909,14 @@ fn same_sphere_support(a: brep::SphereSupport, b: brep::SphereSupport) -> bool {
         && (a.radius_mm - b.radius_mm).abs() <= GEOM_TOL_MM
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn sphere_profile_arc(
     face_indices: &[usize],
     sphere: brep::SphereSupport,
@@ -2069,6 +2101,14 @@ fn same_torus_support(a: brep::TorusSupport, b: brep::TorusSupport, axis: [f64; 
         && (a.minor_radius_mm - b.minor_radius_mm).abs() <= GEOM_TOL_MM
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn torus_profile_arc(
     face_indices: &[usize],
     torus: brep::TorusSupport,
@@ -2329,6 +2369,10 @@ fn linear_profile_segment(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn cylinder_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,
@@ -2491,6 +2535,10 @@ fn cone_profile_segment_with_angular_trims(
     cone_profile_segment_with_angular_trims_inner(face_index, face, cone, segment_context, true)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn cone_profile_segment_with_angular_trims_inner(
     face_index: usize,
     face: &FaceInfo,
@@ -3042,6 +3090,10 @@ fn linear_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
     Some(linear_signed_radius_at(support, axial)?.abs())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn plane_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,

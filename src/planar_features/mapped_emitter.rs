@@ -50,6 +50,10 @@ pub fn instance_boundary_features(
     apply_mapped_feature_plan(entities, plan)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn plan_additive_mapped_features(
     entities: &[EntityInstance],
 ) -> Result<BoundaryFeatureInstancePlan> {
@@ -199,6 +203,10 @@ fn plan_additive_mapped_features(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn apply_mapped_feature_plan(
     entities: &mut Vec<EntityInstance>,
     plan: BoundaryFeatureInstancePlan,

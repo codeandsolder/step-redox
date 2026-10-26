@@ -218,6 +218,14 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
                 .then_with(|| b.pitch_ticks.cmp(&a.pitch_ticks))
         })
 }
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
 fn choose_partition(
     geoms: &HashMap<u64, FaceGeom>,
     candidate: &LatticeCandidate,
@@ -414,6 +422,10 @@ fn overlay_site_alignment(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn classify_faces(
     geoms: &HashMap<u64, FaceGeom>,
     centers: &[f64],
@@ -546,6 +558,10 @@ fn classify_faces(
     })
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
 fn partition_score(
     geoms: &HashMap<u64, FaceGeom>,
     partition: &Partition,
@@ -590,6 +606,14 @@ fn partition_score(
     ]
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn build_pattern(
     solid_id: u64,
     all_face_ids: &[u64],
@@ -758,6 +782,10 @@ fn build_pattern(
     }
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
 fn add_adjacency(
     site_adj: &mut [BTreeMap<String, usize>],
     gap_adj: &mut [BTreeMap<String, usize>],
@@ -999,10 +1027,18 @@ const fn other_axes(axis: usize) -> [usize; 2] {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_dir(value: f64) -> i64 {
     (value / 1.0e-10).round() as i64
 }

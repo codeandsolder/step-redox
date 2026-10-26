@@ -137,6 +137,14 @@ pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSh
 /// constructive recovery, whose own grammar may legitimately prove a body from
 /// a single bend pair plus independent topology/trim evidence.
 #[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub(crate) fn detect_formed_sheet_evidence_with_min_pairs(
     entities: &[EntityInstance],
     min_coaxial_pairs: usize,
@@ -826,6 +834,10 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(vector, DIR_TOL)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }

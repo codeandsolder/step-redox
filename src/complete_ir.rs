@@ -102,6 +102,10 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     session.complete_ir()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],
@@ -349,7 +353,7 @@ fn recover_boundary_feature_composites_for_section(
 }
 
 fn recover_boundary_feature_pass(
-    working: &mut Vec<EntityInstance>,
+    working: &mut [EntityInstance],
     target_shells: &HashMap<u64, u64>,
     recovered: &mut BTreeMap<u64, Vec<RecoveredBoundaryFeatureFamily>>,
     blocked: &mut BTreeSet<u64>,

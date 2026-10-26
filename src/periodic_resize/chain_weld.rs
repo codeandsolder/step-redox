@@ -59,6 +59,10 @@ fn mapped_seam_edges(mapping: &HashMap<u64, u64>, edges: &[u64], label: &str) ->
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub(super) fn plan_chain_expansion_welds(
     graph: &GraphEditor<'_>,
     chain: &PeriodicChainPattern,
@@ -343,6 +347,22 @@ fn chain_complex_record<'a>(records: &'a [Record], name: &str) -> Result<&'a Rec
     Ok(record)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the source quantity is nonnegative by the surrounding geometric/domain checks"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "the comparison is against an exact canonical or sentinel value produced by normalization"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn chain_rational_single_span_key(
     graph: &GraphEditor<'_>,
     curve: u64,

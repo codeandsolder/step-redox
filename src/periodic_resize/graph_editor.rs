@@ -46,6 +46,10 @@ impl<'a> GraphEditor<'a> {
         self.entities.len().saturating_sub(self.initial_len)
     }
 
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+    )]
     pub(super) const fn entity_delta(&self) -> isize {
         self.entities.len() as isize - self.initial_len as isize
     }
@@ -644,6 +648,10 @@ impl<'a> GraphEditor<'a> {
         Ok(out)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+    )]
     pub(super) fn rebuild_face_bounds(
         &mut self,
         face: u64,
@@ -769,6 +777,10 @@ impl<'a> GraphEditor<'a> {
         Ok(old_bounds)
     }
 
+    #[expect(
+        clippy::similar_names,
+        reason = "closely named values are distinct domain quantities in the same geometric construction"
+    )]
     pub(super) fn trace_cycles(&self, edges: &HashSet<u64>) -> Result<Vec<Vec<Traversal>>> {
         let mut incident = HashMap::<u64, Vec<u64>>::new();
         for &edge in edges {

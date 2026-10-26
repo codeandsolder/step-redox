@@ -248,6 +248,14 @@ fn detect_one_closed_round_sweep(
     None
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_one_revolved_round_tail(
     solid_id: u64,
     entities: &[EntityInstance],

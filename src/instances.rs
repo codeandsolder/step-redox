@@ -30,6 +30,10 @@ struct SolidInfo {
     face_style: Vec<u64>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn instance_z90_solids(entities: &mut Vec<EntityInstance>) -> InstanceStats {
     let mut stats = InstanceStats::default();
     if entities.is_empty() {

@@ -137,6 +137,10 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_coord(point: [f64; 3]) -> [i64; 3] {
     [
         (point[0] / COORD_TOL_MM).round() as i64,

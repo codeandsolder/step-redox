@@ -77,6 +77,14 @@ pub fn detect_open_rectangular_sweeps(
     out
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn detect_one(
     evidence: &formed_sheet::FormedSheetEvidence,
     entities: &[EntityInstance],
@@ -254,6 +262,10 @@ struct ExpectedPlane {
     offset_mm: f64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror a geometric proof/schema boundary and grouping them would hide the invariants"
+)]
 fn prove_source_supports_covered(
     face_ids: &[u64],
     legs: [&RecoveredPlanarSweepLeg; 2],
@@ -640,6 +652,10 @@ fn recover_planar_leg(
     })
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
 fn line_polygon(
     face_id: u64,
     entities: &[EntityInstance],
@@ -799,6 +815,10 @@ fn prove_skin_tangent(
     })
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the tuple is a local fixed-shape geometric candidate record and is not part of the public API"
+)]
 fn choose_bend_order(
     axis: [f64; 3],
     radials: &[[f64; 3]],

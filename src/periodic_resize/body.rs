@@ -37,6 +37,14 @@ struct BodyResizeContext<'a> {
 }
 
 impl<'a> BodyResizeContext<'a> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+    )]
     fn new(entities: &'a mut Vec<EntityInstance>, body: &PeriodicBodyPattern) -> Result<Self> {
         let old_sites = body.sites;
         if body.repeat_face_families.is_empty()
@@ -181,6 +189,14 @@ struct BodyStretchRewrite<'a> {
 }
 
 impl BodyStretchRewrite<'_> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+    )]
     fn run(&self, graph: &mut GraphEditor<'_>) -> Result<usize> {
         let mut coord_vertices = HashMap::<[i64; 3], Vec<u64>>::new();
         for &face in self.target_patch_faces {
@@ -406,6 +422,18 @@ impl BodyStretchRewrite<'_> {
 ///
 /// # Errors
 /// Returns an error if the periodic-body proof is incomplete, the requested expansion is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn expand_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,
@@ -548,6 +576,10 @@ pub fn expand_periodic_body_positive(
 ///
 /// # Errors
 /// Returns an error if the periodic-body proof is incomplete, the requested shrink is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
 pub fn shrink_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,

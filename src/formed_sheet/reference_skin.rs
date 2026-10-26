@@ -143,6 +143,10 @@ fn complementary_skin(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn build_reference_skin(
     skin: &[(SheetPatchId, usize, u64)],
     plane_pairs: &[SheetPlanePair],
@@ -323,6 +327,10 @@ const fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror a geometric proof/schema boundary and grouping them would hide the invariants"
+)]
 fn reference_curve(
     edge_id: u64,
     traversal_start: u64,
@@ -393,6 +401,10 @@ fn reference_curve(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror a geometric proof/schema boundary and grouping them would hide the invariants"
+)]
 fn reference_ellipse_seam(
     edge_id: u64,
     curve_id: u64,
@@ -580,6 +592,18 @@ fn ellipse_arc_sweep(start: f64, end: f64, sample: f64) -> Option<f64> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the source quantity is nonnegative by the surrounding geometric/domain checks"
+)]
 fn rational_single_span_samples(
     curve_id: u64,
     entities: &[EntityInstance],
@@ -646,6 +670,10 @@ fn rational_single_span_samples(
         .collect()
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "the comparison is against an exact canonical or sentinel value produced by normalization"
+)]
 pub(super) fn rational_bezier_point(
     poles: &[[f64; 3]],
     weights: &[f64],
@@ -790,6 +818,10 @@ fn edge_curve_info(
     Some((start, end, curve, same_sense))
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the tuple is a local fixed-shape geometric candidate record and is not part of the public API"
+)]
 fn circle_support(
     curve_id: u64,
     entities: &[EntityInstance],

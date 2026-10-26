@@ -235,6 +235,10 @@ pub fn recover_closed_round_sweep_fragments(
 ///
 /// # Errors
 /// Returns an error if the proof is malformed or the resulting CAD IR is invalid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn recover_revolved_round_tail_fragment(
     recovered: &RecoveredRevolvedRoundTail,
 ) -> Result<CadFragment> {
@@ -461,6 +465,10 @@ pub fn recover_revolved_round_tail_fragments(
 /// # Errors
 /// Returns an error if the recovered dimensions/frame are malformed or the
 /// resulting constructive union is not valid CAD IR.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn recover_open_rectangular_sweep_fragment(
     sweep: &RecoveredOpenRectangularSweep,
 ) -> Result<CadFragment> {

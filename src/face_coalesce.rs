@@ -73,6 +73,10 @@ fn coalesce_with_supports(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn coalesce_inner(
     entities: &mut Vec<EntityInstance>,
     allowed_supports: &[&str],

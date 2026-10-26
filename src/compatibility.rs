@@ -3,6 +3,10 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these booleans are independent feature/configuration flags rather than mutually exclusive state"
+)]
 pub struct CompatibilityAudit {
     /// Constructs intentionally avoided by the broad-compatibility profile.
     pub structural_risk_entities: BTreeMap<String, usize>,

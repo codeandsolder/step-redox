@@ -12,6 +12,10 @@ pub struct ConsolidateStats {
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
     use std::collections::{HashMap, HashSet};
 
@@ -180,6 +184,10 @@ pub struct InternStats {
 #[expect(
     clippy::iter_with_drain,
     reason = "draining preserves the dirty-worklist allocation across fixed-point rounds"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
 )]
 pub fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
     // Store redirects only. An identity map for a million-entity STEP file is

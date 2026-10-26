@@ -282,6 +282,10 @@ enum PlaneSide {
     Coplanar,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn diagnose_open_chain_patterns(entities: &[EntityInstance]) -> OpenChainDiagnostics {
     const MIN_LOOP_EDGES: usize = 16;
     const MAX_MOTIF_EDGES: usize = 32;
@@ -671,6 +675,10 @@ fn coplanar_feature_cap_holes(
     Some(out)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn materialize_boundary_feature_tools_for_analysis(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
@@ -1055,6 +1063,10 @@ fn diagnose_boundary_features_with_index(
     report
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn grouped_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -1206,6 +1218,14 @@ fn grouped_boundary_features_with_index(
     (report, grouped)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror a geometric proof/schema boundary and grouping them would hide the invariants"
+)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the tuple is a local fixed-shape geometric candidate record and is not part of the public API"
+)]
 fn boundary_feature_candidate(
     context: &ShellContext,
     component: HashSet<u64>,
@@ -1331,6 +1351,10 @@ fn component_is_two_manifold_with_hosts(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDiagnostics {
     let mut report = PlanarFeatureDiagnostics::default();
     if entities.is_empty() {

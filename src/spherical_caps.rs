@@ -162,6 +162,10 @@ fn shell_face_surface_kinds(
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn discover_cap_families(
     shell_faces: &[u64],
     entities: &[EntityInstance],
@@ -419,6 +423,10 @@ fn prepare_cap_family(
     true
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn emit_cap_source(
     canonical: &CapFeature,
     plane_surface: u64,

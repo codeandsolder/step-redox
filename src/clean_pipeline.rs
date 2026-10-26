@@ -11,6 +11,10 @@ use crate::{
 use anyhow::Result;
 use ruststep::ast::Exchange;
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
 pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let parsed = ParsedExchange::parse(input)?;
     let input_encoding = parsed.input_encoding;

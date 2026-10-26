@@ -76,6 +76,10 @@ struct Candidate {
     old_points: Vec<u64>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn recover_v_extrusion_surfaces(entities: &mut Vec<EntityInstance>) -> VExtrusionStats {
     let mut stats = VExtrusionStats::default();
     if entities.is_empty() {
@@ -604,6 +608,10 @@ fn normalized_expanded_knots(
     clippy::too_many_arguments,
     reason = "STEP B-spline entity construction mirrors the schema fields directly"
 )]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
 fn bspline_curve_with_knots(
     id: u64,
     degree: usize,
@@ -637,6 +645,10 @@ fn bspline_curve_with_knots(
 #[expect(
     clippy::too_many_arguments,
     reason = "STEP B-spline entity construction mirrors the schema fields directly"
+)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
 )]
 fn rational_bspline_curve(
     id: u64,
@@ -693,6 +705,10 @@ fn record_by_name<'a>(subsuper: &'a SubSuperRecord, name: &str) -> Option<&'a Re
     subsuper.0.iter().find(|record| record.name == name)
 }
 
+#[expect(
+    clippy::similar_names,
+    reason = "closely named values are distinct domain quantities in the same geometric construction"
+)]
 fn surface_is_face_support_only(
     surface_id: u64,
     entities: &[EntityInstance],

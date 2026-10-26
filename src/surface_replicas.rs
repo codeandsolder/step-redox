@@ -50,6 +50,10 @@ struct SurfaceInfo {
 /// Initial scope is intentionally narrow: `PLANE/CYLINDRICAL_SURFACE` only,
 /// explicit `AXIS2_PLACEMENT_3D` axis/ref-direction, identical parameterization,
 /// and face-only consumers. Anything ambiguous fails closed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn instance_translated_analytic_surfaces(
     entities: &mut Vec<EntityInstance>,
 ) -> SurfaceReplicaStats {
@@ -284,6 +288,10 @@ fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 { 0 } else { value.to_bits() }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quant_transform(value: f64) -> i64 {
     (value / TRANSFORM_TOLERANCE_MM).round() as i64
 }

@@ -55,6 +55,10 @@ pub struct GeometricInternStats {
 /// tolerant importers may still retrim an `EDGE_CURVE` differently when its
 /// underlying line is replaced by the same locus with a very remote parameter
 /// origin.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> GeometricInternStats {
     let mut stats = GeometricInternStats::default();
     if entities.is_empty() {
@@ -359,6 +363,10 @@ fn nth_number(parameter: &Parameter, idx: usize) -> Option<f64> {
     number(params.get(idx)?)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn q(v: f64, tol: f64) -> i64 {
     (v / tol).round() as i64
 }

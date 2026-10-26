@@ -542,6 +542,10 @@ fn curve_replica_support_signature(
     )
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn line_support_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -582,6 +586,10 @@ fn line_support_signature(
     ))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 pub fn circle_support_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -619,6 +627,10 @@ pub fn circle_support_signature(
     ))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 pub fn cylindrical_surface_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -662,6 +674,10 @@ pub fn cylindrical_surface_signature(
     ))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 pub fn canonical_axis_offset(
     point: [f64; 3],
     direction: [f64; 3],
@@ -697,6 +713,10 @@ pub fn canonical_axis_offset(
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn plane_support_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -817,6 +837,10 @@ fn support_record_signature(
     Some(format!("{}{params}", record.name))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn support_param_signature(
     parameter: &Parameter,
     entities: &[EntityInstance],
@@ -903,6 +927,10 @@ fn direction_components(record: &Record) -> Option<[f64; 3]> {
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn transform_point(point: [f64; 3], center: [f64; 3], quarter: u8) -> [i64; 3] {
     let x = point[0] - center[0];
     let y = point[1] - center[1];
@@ -915,6 +943,10 @@ fn transform_point(point: [f64; 3], center: [f64; 3], quarter: u8) -> [i64; 3] {
     ]
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn transform_direction(direction: [f64; 3], quarter: u8) -> [i64; 3] {
     let (x, y) = rotate_xy(direction[0], direction[1], quarter);
     [
@@ -924,6 +956,10 @@ fn transform_direction(direction: [f64; 3], quarter: u8) -> [i64; 3] {
     ]
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn parameter_literal_signature(parameter: &Parameter) -> Option<String> {
     match parameter {
         Parameter::Enumeration(value) => Some(format!(".{value}.")),
@@ -1014,6 +1050,10 @@ pub(crate) fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Ve
     (best.unwrap_or_default(), best_rotation)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
 pub fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
     // Points are normally collected by walking a HashSet closure. Summing in
     // that randomized iteration order made the final few bits of the centroid

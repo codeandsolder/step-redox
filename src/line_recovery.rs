@@ -38,6 +38,10 @@ struct DirectionGroup {
     candidate_ids: Vec<u64>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn recover_straight_bspline_lines(entities: &mut Vec<EntityInstance>) -> LineRecoveryStats {
     let mut stats = LineRecoveryStats::default();
     if entities.is_empty() {
@@ -202,6 +206,18 @@ pub fn recover_straight_bspline_lines(entities: &mut Vec<EntityInstance>) -> Lin
     stats
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn analyze_candidate(
     id: u64,
     edge_id: u64,

@@ -249,6 +249,10 @@ pub fn oriented_edge_use(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn surface_support(
     surface_id: u64,
     entities: &[EntityInstance],

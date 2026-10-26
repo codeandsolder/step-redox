@@ -58,6 +58,10 @@ pub enum OutputProfile {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these booleans are independent feature/configuration flags rather than mutually exclusive state"
+)]
 pub struct Options {
     pub intern_values: bool,
     pub consolidate_presentation: bool,
@@ -754,6 +758,10 @@ pub fn resize_periodic_chain_bytes_with_anchor(
     Ok(second)
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
 fn resize_periodic_chain_bytes_one_side(
     input: &[u8],
     chain_index: usize,
@@ -991,6 +999,10 @@ pub fn resize_count_parameter_bytes_with_anchor(
 }
 
 /// One-sided primitive used by all placement policies.
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn resize_count_parameter_bytes_one_side(
     input: &[u8],
     parameter_index: usize,

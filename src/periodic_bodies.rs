@@ -72,6 +72,18 @@ pub fn detect_periodic_bodies(
     detect_periodic_bodies_with_index(entities, &index, instance_patterns)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integer counts or indices are used only as approximate geometric scalars within practical model sizes"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub(crate) fn detect_periodic_bodies_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -285,6 +297,10 @@ fn lattice_candidates(patterns: &[InstancePattern]) -> Vec<LatticeCandidate> {
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 fn analyze_planar_line_face(
     face: u64,
     axis: [f64; 3],
@@ -530,10 +546,18 @@ fn orthogonal_basis(axis: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
     Some((v, w))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "this representation-boundary conversion is deliberate and bounded by the STEP/quantization domain"
+)]
 fn quantize_dir(v: [f64; 3]) -> Option<[i64; 3]> {
     let mut out = [0i64; 3];
     for (i, value) in v.into_iter().enumerate() {

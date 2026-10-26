@@ -20,6 +20,10 @@ pub struct RecoveredCountParameter {
     pub max_residual_mm: f64,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "geometry recovery keeps the evidence and invariant flow contiguous for auditability"
+)]
 pub fn detect_count_parameters(
     patterns: &[InstancePattern],
     bodies: &[PeriodicBodyPattern],

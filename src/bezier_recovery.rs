@@ -56,6 +56,14 @@ pub fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRec
     stats
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "this representation-boundary conversion is deliberate and model sizes are bounded by addressable memory"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "the comparison is against an exact canonical or sentinel value produced by normalization"
+)]
 fn is_single_span_bezier(record: &Record) -> bool {
     let Parameter::List(params) = &record.parameter else {
         return false;
