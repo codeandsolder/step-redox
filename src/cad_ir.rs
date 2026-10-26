@@ -589,6 +589,11 @@ pub enum EdgeSelector {
         start_mm: [f64; 3],
         end_mm: [f64; 3],
     },
+    Circle {
+        center_mm: [f64; 3],
+        normal: [f64; 3],
+        radius_mm: f64,
+    },
 }
 
 impl EdgeSelector {
@@ -609,6 +614,27 @@ impl EdgeSelector {
                     .sum::<f64>();
                 if squared_length <= 1.0e-24 {
                     bail!("edge selector segment must have nonzero length");
+                }
+            }
+            Self::Circle {
+                center_mm,
+                normal,
+                radius_mm,
+            } => {
+                if center_mm
+                    .iter()
+                    .chain(normal.iter())
+                    .any(|value| !value.is_finite())
+                    || !radius_mm.is_finite()
+                {
+                    bail!("edge selector circle parameters must be finite");
+                }
+                if *radius_mm <= 0.0 {
+                    bail!("edge selector circle radius must be positive");
+                }
+                let squared_normal = normal.iter().map(|value| value * value).sum::<f64>();
+                if squared_normal <= 1.0e-24 {
+                    bail!("edge selector circle normal must be nonzero");
                 }
             }
         }
@@ -1038,6 +1064,38 @@ mod tests {
         model.add_root(root)?;
         assert_eq!(model.complexity_score(root)?, 4);
         Ok(())
+    }
+
+    #[test]
+    fn circle_edge_selector_rejects_invalid_geometry() {
+        for selector in [
+            EdgeSelector::Circle {
+                center_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 0.0],
+                radius_mm: 1.0,
+            },
+            EdgeSelector::Circle {
+                center_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                radius_mm: 0.0,
+            },
+            EdgeSelector::Circle {
+                center_mm: [f64::NAN, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                radius_mm: 1.0,
+            },
+        ] {
+            assert!(selector.validate().is_err());
+        }
+        assert!(
+            EdgeSelector::Circle {
+                center_mm: [1.0, 2.0, 3.0],
+                normal: [0.0, 2.0, 0.0],
+                radius_mm: 4.0,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
