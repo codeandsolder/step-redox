@@ -1,3 +1,19 @@
+#![expect(
+    clippy::unreadable_literal,
+    reason = "legacy numeric fixtures preserve source-derived expected coordinates"
+)]
+#![expect(
+    clippy::suboptimal_flops,
+    reason = "fixture arithmetic mirrors the geometric construction directly"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "large fixture constructors remain linear for reviewability"
+)]
+#![expect(
+    clippy::assert_is_empty,
+    reason = "test assertions intentionally state emptiness expectations explicitly"
+)]
 use super::*;
 
 fn test_linear_profile_segment(
@@ -881,7 +897,7 @@ fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() -> anyhow::Resu
 
 #[test]
 fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
-    let profile = vec![
+    let profile = [
         RecoveredProfileCurve::Line {
             source_edge_ids: Vec::new(),
             start_mm: [0.0, 0.0],

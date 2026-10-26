@@ -11,7 +11,11 @@ use crate::{
 use anyhow::Result;
 use ruststep::ast::Exchange;
 
-pub(super) fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
+pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let parsed = ParsedExchange::parse(input)?;
     let input_encoding = parsed.input_encoding;
     let mut exchange = parsed.exchange;

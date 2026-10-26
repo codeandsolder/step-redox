@@ -42,12 +42,12 @@ impl<'a> GraphEditor<'a> {
         }
     }
 
-    pub(super) fn added_entities(&self) -> usize {
+    pub(super) const fn added_entities(&self) -> usize {
         self.entities.len().saturating_sub(self.initial_len)
     }
 
-    pub(super) fn entity_delta(&self) -> isize {
-        self.entities.len() as isize - self.initial_len as isize
+    pub(super) const fn entity_delta(&self) -> isize {
+        self.entities.len().cast_signed() - self.initial_len.cast_signed()
     }
 
     pub(super) fn entity_type(&self, id: u64) -> Option<&str> {
@@ -644,6 +644,10 @@ impl<'a> GraphEditor<'a> {
         Ok(out)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
     pub(super) fn rebuild_face_bounds(
         &mut self,
         face: u64,
@@ -788,13 +792,13 @@ impl<'a> GraphEditor<'a> {
         let mut unused = edges.clone();
         let mut cycles = Vec::new();
         while !unused.is_empty() {
-            let edge0 = *unused
+            let seed_edge = *unused
                 .iter()
                 .min()
                 .ok_or_else(|| anyhow!("target boundary edge set unexpectedly empty"))?;
-            let [start_vertex, _] = self.edge_vertices(edge0)?;
+            let [start_vertex, _] = self.edge_vertices(seed_edge)?;
             let mut current_vertex = start_vertex;
-            let mut current_edge = edge0;
+            let mut current_edge = seed_edge;
             let mut cycle = Vec::new();
 
             loop {

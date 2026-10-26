@@ -1460,6 +1460,18 @@ fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::redundant_clone,
+        reason = "test fixtures keep explicit owned copies for readability"
+    )]
+    #![expect(
+        clippy::cast_lossless,
+        reason = "small bounded fixture indices are intentionally converted to coordinates"
+    )]
+    #![expect(
+        clippy::suboptimal_flops,
+        reason = "fixture coordinates mirror their geometric construction directly"
+    )]
     use super::*;
 
     #[test]
@@ -1499,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn point_lattice_prefers_dense_staggered_grid_basis() {
+    fn point_lattice_prefers_dense_staggered_grid_basis() -> anyhow::Result<()> {
         let mut points = Vec::new();
         for row in 0..8 {
             for column in 0..35 {
@@ -1511,7 +1523,8 @@ mod tests {
             }
         }
 
-        let fit = fit_point_lattice(&points, 1.0e-7).expect("staggered grid");
+        let fit = fit_point_lattice(&points, 1.0e-7)
+            .ok_or_else(|| anyhow::anyhow!("expected staggered grid"))?;
         assert_eq!(fit.dimension, 2);
         let mut shape = fit.grid_shape.clone();
         shape.sort_unstable();
@@ -1519,9 +1532,10 @@ mod tests {
         assert_eq!(fit.occupancy.len(), 280);
         assert!((fit.fill_ratio - 1.0).abs() <= 1.0e-12);
         assert!(fit.max_residual_mm <= 1.0e-9);
+        Ok(())
     }
     #[test]
-    fn factors_alternating_stagger_into_two_point_motif() {
+    fn factors_alternating_stagger_into_two_point_motif() -> anyhow::Result<()> {
         let mut points = Vec::new();
         for row in 0..8 {
             for column in 0..35 {
@@ -1533,7 +1547,8 @@ mod tests {
             }
         }
 
-        let pattern = factor_point_motif_pattern(&points, 1.0e-7).expect("motif pattern");
+        let pattern = factor_point_motif_pattern(&points, 1.0e-7)
+            .ok_or_else(|| anyhow::anyhow!("expected motif pattern"))?;
         assert_eq!(pattern.motif_offsets.len(), 2);
         assert_eq!(pattern.repeat_count, 140);
         let mut shape = pattern.grid_shape.clone();
@@ -1544,5 +1559,6 @@ mod tests {
         assert!((pitch[0] - 1.6).abs() <= 1.0e-9);
         assert!((pitch[1] - 2.7).abs() <= 1.0e-9);
         assert!(pattern.max_residual_mm <= 1.0e-9);
+        Ok(())
     }
 }

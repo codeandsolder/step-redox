@@ -248,6 +248,14 @@ fn detect_one_closed_round_sweep(
     None
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::similar_names,
+    reason = "orthogonal profile x/y axes intentionally share a descriptive stem"
+)]
 fn detect_one_revolved_round_tail(
     solid_id: u64,
     entities: &[EntityInstance],

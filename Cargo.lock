@@ -134,12 +134,9 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "branches"
-version = "0.4.6"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7436b21fd6195415058eb41c9090e156b556bc7e0377bb57c5c026a421521525"
-dependencies = [
- "rustc_version",
-]
+checksum = "570b591f2c5947596f3e5b0fcf59a71068ece15aa710446ce7eb670c3620350c"
 
 [[package]]
 name = "bumpalo"
@@ -991,9 +988,9 @@ dependencies = [
 
 [[package]]
 name = "rclite"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6716a637a8a17bce72da6b6ddab8548619cc748658c41ab6ee5c4a3c1001385"
+checksum = "0d68c13cc71ed3fbbe3ffb988d1abf7f53906daaa81a3b742ef4c91fd5356131"
 dependencies = [
  "branches",
 ]

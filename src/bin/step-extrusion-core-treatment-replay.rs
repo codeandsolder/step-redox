@@ -4,6 +4,10 @@ use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
 #[cfg(feature = "cad-kernel-monstertruck")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "diagnostic replay binary intentionally keeps the full reconstruction trace linear"
+)]
 fn main() -> Result<()> {
     use step_redox::cad_ir::{CadNode, EdgeSelector, EdgeTreatmentEdge, EdgeTreatmentProfile};
     use step_redox::cad_kernel::{CadKernel, monstertruck::MonstertruckKernel};

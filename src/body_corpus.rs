@@ -51,7 +51,7 @@ impl Hasher for Fnv64 {
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.0 ^= u64::from(byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
         }
     }
 }
@@ -77,8 +77,8 @@ fn feed_bytes(hashers: &mut [Fnv64; 2], value: &[u8]) {
 
 fn fingerprint(value: &shape_identity::ShapeKey) -> String {
     let mut hashers = [
-        Fnv64::seeded(0xcbf29ce484222325),
-        Fnv64::seeded(0x84222325cbf29ce4),
+        Fnv64::seeded(0xcbf2_9ce4_8422_2325),
+        Fnv64::seeded(0x8422_2325_cbf2_9ce4),
     ];
     for count in [
         value.vertices,

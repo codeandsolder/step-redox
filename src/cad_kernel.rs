@@ -42,7 +42,11 @@ pub mod monstertruck {
     use anyhow::{Result, bail};
     use monstertruck_fillet::{FilletOptions, FilletProfile, RadiusSpec, fillet_edges_generic};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
-    use monstertruck_modeling::*;
+    use monstertruck_modeling::{
+        BoundedCurve, BsplineCurve, Curve, Edge, EuclideanSpace, InnerSpace, KnotVector, Matrix4,
+        NurbsCurve, ParametricCurve, Point3, Rad, Shell, Solid, Vector3, Vector4, Wire, builder,
+        primitive, profile,
+    };
 
     #[derive(Debug, Default, Clone, Copy)]
     pub struct MonstertruckKernel;
@@ -206,7 +210,7 @@ pub mod monstertruck {
                 .filter_map(|(index, edge)| {
                     let curve = edge.oriented_curve();
                     let (start, end) = curve.range_tuple();
-                    let midpoint = curve.evaluate((start + end) * 0.5);
+                    let midpoint = curve.evaluate(f64::midpoint(start, end));
                     (point_axis_distance(edge.front().point(), origin, direction) <= 1.0e-9
                         && point_axis_distance(edge.back().point(), origin, direction) <= 1.0e-9
                         && point_axis_distance(midpoint, origin, direction) <= 1.0e-9)
@@ -247,7 +251,7 @@ pub mod monstertruck {
         ))
     }
 
-    fn rigid_matrix(transform: &RigidTransform) -> Matrix4 {
+    const fn rigid_matrix(transform: &RigidTransform) -> Matrix4 {
         let m = transform.matrix;
         Matrix4::from_cols(
             Vector4::new(m[0][0], m[1][0], m[2][0], m[3][0]),
@@ -263,14 +267,14 @@ pub mod monstertruck {
         let [dx, dy, dz] = axis.direction;
         Axis3 {
             origin_mm: [
-                m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
-                m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
-                m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3],
+                m[0][2].mul_add(z, m[0][1].mul_add(y, m[0][0] * x)) + m[0][3],
+                m[1][2].mul_add(z, m[1][1].mul_add(y, m[1][0] * x)) + m[1][3],
+                m[2][2].mul_add(z, m[2][1].mul_add(y, m[2][0] * x)) + m[2][3],
             ],
             direction: [
-                m[0][0] * dx + m[0][1] * dy + m[0][2] * dz,
-                m[1][0] * dx + m[1][1] * dy + m[1][2] * dz,
-                m[2][0] * dx + m[2][1] * dy + m[2][2] * dz,
+                m[0][2].mul_add(dz, m[0][1].mul_add(dy, m[0][0] * dx)),
+                m[1][2].mul_add(dz, m[1][1].mul_add(dy, m[1][0] * dx)),
+                m[2][2].mul_add(dz, m[2][1].mul_add(dy, m[2][0] * dx)),
             ],
         }
     }
@@ -307,6 +311,14 @@ pub mod monstertruck {
         profile_wire(curves)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
+    #[expect(
+        clippy::float_cmp,
+        reason = "clamped B-spline endpoint knots require exact equality"
+    )]
     fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
         let starts = curves
             .iter()
@@ -480,7 +492,7 @@ pub mod monstertruck {
     }
 
     fn point2_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+        (a[0] - b[0]).hypot(a[1] - b[1])
     }
 
     const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-6;
@@ -676,7 +688,7 @@ pub mod monstertruck {
                         bail!("edge-treatment selector matched more than one topological edge");
                     }
                     matched_id = Some(edge.id());
-                    matched = Some(edge.clone());
+                    matched = Some(edge);
                 }
                 Ok(vec![matched.ok_or_else(|| {
                     anyhow::anyhow!("edge-treatment selector matched no edge")
@@ -701,7 +713,7 @@ pub mod monstertruck {
                     {
                         continue;
                     }
-                    matched.push(edge.clone());
+                    matched.push(edge);
                 }
                 if matched.is_empty() {
                     bail!("edge-treatment circle selector matched no edge");
@@ -832,6 +844,10 @@ pub mod monstertruck {
 
     #[cfg(test)]
     mod tests {
+        #![expect(
+            clippy::manual_let_else,
+            reason = "legacy test fixture code is allowed narrow lint exceptions; production paths remain strict"
+        )]
         use super::*;
         use crate::cad_ir::{
             Axis3, CadNode, Curve2d, LoftSection, Profile2d, ProfileLoop, RigidTransform,

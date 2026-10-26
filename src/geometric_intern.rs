@@ -55,6 +55,10 @@ pub struct GeometricInternStats {
 /// tolerant importers may still retrim an `EDGE_CURVE` differently when its
 /// underlying line is replaced by the same locus with a very remote parameter
 /// origin.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> GeometricInternStats {
     let mut stats = GeometricInternStats::default();
     if entities.is_empty() {
@@ -104,7 +108,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
         if let Some(&canonical) = seen.get(&key) {
             if canonical != id {
                 if record.name == "LINE"
-                    && !line_alias_is_safe(id, canonical, entities, &index, &inbound)
+                    && !line_alias_is_safe(id, canonical, entities, &index, inbound)
                 {
                     continue;
                 }
@@ -131,7 +135,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     let mut candidate = duplicate_roots.clone();
     let mut stack: Vec<u64> = duplicate_roots.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        for &child in references.refs(id).iter() {
+        for &child in references.refs(id) {
             if index.contains_key(&child) && candidate.insert(child) {
                 stack.push(child);
             }
@@ -359,6 +363,10 @@ fn nth_number(parameter: &Parameter, idx: usize) -> Option<f64> {
     number(params.get(idx)?)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn q(v: f64, tol: f64) -> i64 {
     (v / tol).round() as i64
 }
@@ -497,23 +505,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_line_alias_when_edge_endpoint_is_off_canonical_line() {
+    fn rejects_line_alias_when_edge_endpoint_is_off_canonical_line() -> anyhow::Result<()> {
         let mut entities = two_collinear_lines(0.2, 0.01);
         let index = build_index(&entities);
         let point_idx = index[&14];
         let EntityInstance::Simple { record, .. } = &mut entities[point_idx] else {
-            panic!("expected simple point");
+            anyhow::bail!("expected simple point");
         };
         let Parameter::List(params) = &mut record.parameter else {
-            panic!("expected point parameters");
+            anyhow::bail!("expected point parameters");
         };
         let Parameter::List(coords) = &mut params[1] else {
-            panic!("expected point coordinates");
+            anyhow::bail!("expected point coordinates");
         };
         coords[1] = Parameter::Real(2.0e-5);
 
         let stats = intern_geometric_supports(&mut entities);
         assert_eq!(stats.lines_merged, 0);
         assert!(build_index(&entities).contains_key(&8));
+        Ok(())
     }
 }

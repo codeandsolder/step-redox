@@ -181,6 +181,10 @@ where
     report
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],
@@ -430,7 +434,7 @@ fn recover_boundary_feature_composites_for_section(
 }
 
 fn recover_boundary_feature_pass(
-    working: &mut Vec<EntityInstance>,
+    working: &mut [EntityInstance],
     target_shells: &HashMap<u64, u64>,
     recovered: &mut BTreeMap<u64, Vec<RecoveredBoundaryFeatureFamily>>,
     blocked: &mut BTreeSet<u64>,
@@ -451,7 +455,7 @@ fn recover_boundary_feature_pass(
         return Ok(false);
     }
 
-    let mut tool_entities = working.clone();
+    let mut tool_entities = working.to_vec();
     let (tool_report, materialized) =
         crate::planar_features::materialize_boundary_feature_tools_for_analysis(
             &mut tool_entities,
@@ -840,7 +844,7 @@ fn scan_source_solids(
     out
 }
 
-fn source_solid_id(source: &CadFragmentSource) -> u64 {
+const fn source_solid_id(source: &CadFragmentSource) -> u64 {
     match source {
         CadFragmentSource::SolidExtrusion { solid_id, .. }
         | CadFragmentSource::SolidRevolution { solid_id, .. }
@@ -950,7 +954,7 @@ mod tests {
         } else {
             model.add_node(CadNode::Assembly { children })
         };
-        model.add_root(root).expect("test root");
+        assert!(model.add_root(root).is_ok(), "test root should be valid");
         CadFragment {
             source: CadFragmentSource::SolidExtrusion {
                 solid_id,
@@ -1031,7 +1035,7 @@ mod tests {
         let cheap = constructive_fragment(7, 1);
         let selected = select_cheapest_whole_solid_fragments(&[&expensive, &cheap])?;
         assert_eq!(selected.len(), 1);
-        assert!(std::ptr::eq(selected[&7], &cheap));
+        assert!(std::ptr::eq(selected[&7], std::ptr::from_ref(&cheap)));
         Ok(())
     }
 

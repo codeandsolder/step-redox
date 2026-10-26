@@ -704,6 +704,10 @@ fn arc_arc_has_extra_intersection(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::assert_is_empty,
+        reason = "legacy test fixture code is allowed narrow lint exceptions; production paths remain strict"
+    )]
     use super::*;
 
     #[test]

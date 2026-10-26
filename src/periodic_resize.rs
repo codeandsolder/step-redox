@@ -137,6 +137,10 @@ fn list_params(record: &Record) -> Option<&[Parameter]> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_coord(point: [f64; 3]) -> [i64; 3] {
     [
         (point[0] / COORD_TOL_MM).round() as i64,

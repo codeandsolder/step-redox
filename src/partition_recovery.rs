@@ -112,6 +112,10 @@ impl UnionFind {
     }
 }
 
+#[expect(
+    clippy::option_if_let_else,
+    reason = "explicit rollback branch makes mutation recovery visible"
+)]
 pub fn recover_partitioned_bodies(entities: &mut Vec<EntityInstance>) -> PartitionRecoveryStats {
     let original = entities.clone();
     if let Some(stats) = recover_inner(entities) {
@@ -122,6 +126,10 @@ pub fn recover_partitioned_bodies(entities: &mut Vec<EntityInstance>) -> Partiti
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn recover_inner(entities: &mut Vec<EntityInstance>) -> Option<PartitionRecoveryStats> {
     if entities.is_empty() {
         return Some(PartitionRecoveryStats::default());
@@ -947,6 +955,14 @@ fn direction_key(v: [f64; 3]) -> Option<[i64; 3]> {
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 fn quantize(v: f64, q: f64) -> Option<i64> {
     if !v.is_finite() || !q.is_finite() || q <= 0.0 {
         return None;
