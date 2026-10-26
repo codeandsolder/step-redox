@@ -344,8 +344,8 @@ pub fn peel_boundary_features_for_analysis_bytes(
 /// Detect translation-periodic open boundary paths on planar carrier faces.
 ///
 /// This is read-only evidence for edge-entering slots/notches and other
-/// features whose interface is a repeated detour on a FACE_OUTER_BOUND rather
-/// than a complete inner FACE_BOUND. It does not yet heal or mutate those
+/// features whose interface is a repeated detour on a `FACE_OUTER_BOUND` rather
+/// than a complete inner `FACE_BOUND`. It does not yet heal or mutate those
 /// chains.
 pub fn analyze_open_chain_patterns_bytes(
     input: &[u8],
@@ -432,6 +432,7 @@ pub fn analyze_boundary_features_bytes(
 }
 
 /// Diagnose repeated planar attached-feature candidates without rewriting STEP.
+///
 /// This reports parser blind spots (negative recesses, host orientation, topology
 /// rejection reasons) so constructive recovery can be extended deliberately.
 pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFeatureDiagnostics> {

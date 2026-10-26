@@ -3,7 +3,7 @@ use ruststep::ast::{EntityInstance, Exchange, Name, Parameter, Record};
 use std::fmt::Write as _;
 
 #[derive(Debug)]
-pub(crate) struct ParsedExchange {
+pub struct ParsedExchange {
     pub exchange: Exchange,
     pub input_encoding: &'static str,
 }
@@ -21,7 +21,7 @@ impl ParsedExchange {
     }
 }
 
-pub(crate) fn require_supported_sections(exchange: &Exchange) -> Result<()> {
+pub fn require_supported_sections(exchange: &Exchange) -> Result<()> {
     if !exchange.anchor.is_empty()
         || !exchange.reference.is_empty()
         || !exchange.signature.is_empty()
@@ -156,7 +156,7 @@ pub fn decode_input(input: &[u8]) -> Result<(std::borrow::Cow<'_, str>, &'static
     Ok((decoded, "gbk"))
 }
 
-pub(super) fn write_step_string(s: &str, out: &mut String) {
+pub fn write_step_string(s: &str, out: &mut String) {
     out.push('\'');
 
     let flush_non_ascii = |buf: &mut String, out: &mut String| {
@@ -186,7 +186,7 @@ pub(super) fn write_step_string(s: &str, out: &mut String) {
     out.push('\'');
 }
 
-pub(super) fn format_real(v: f64) -> String {
+pub fn format_real(v: f64) -> String {
     let mut s = v.to_string();
     if !s.contains('.') && !s.contains('e') && !s.contains('E') {
         s.push('.');

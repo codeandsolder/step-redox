@@ -42,11 +42,11 @@ impl<'a> GraphEditor<'a> {
         }
     }
 
-    pub(super) fn added_entities(&self) -> usize {
+    pub(super) const fn added_entities(&self) -> usize {
         self.entities.len().saturating_sub(self.initial_len)
     }
 
-    pub(super) fn entity_delta(&self) -> isize {
+    pub(super) const fn entity_delta(&self) -> isize {
         self.entities.len() as isize - self.initial_len as isize
     }
 

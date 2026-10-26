@@ -11,7 +11,7 @@ use crate::{
 use anyhow::Result;
 use ruststep::ast::Exchange;
 
-pub(super) fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
+pub fn clean_bytes(input: &[u8], options: &Options) -> Result<CleanOutput> {
     let parsed = ParsedExchange::parse(input)?;
     let input_encoding = parsed.input_encoding;
     let mut exchange = parsed.exchange;

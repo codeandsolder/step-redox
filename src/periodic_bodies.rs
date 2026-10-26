@@ -101,7 +101,7 @@ pub(crate) fn detect_periodic_bodies_with_index(
         }
 
         for &solid in &solids {
-            let Some(face_ids) = solid_faces(solid, entities, &index) else {
+            let Some(face_ids) = solid_faces(solid, entities, index) else {
                 continue;
             };
             if face_ids.len() < candidate.sites.saturating_mul(4) {
@@ -115,7 +115,7 @@ pub(crate) fn detect_periodic_bodies_with_index(
             for face in face_ids.iter().copied() {
                 all_face_ids.push(face);
                 let Some(info) =
-                    analyze_planar_line_face(face, candidate.axis, v, w, entities, &index)
+                    analyze_planar_line_face(face, candidate.axis, v, w, entities, index)
                 else {
                     continue;
                 };

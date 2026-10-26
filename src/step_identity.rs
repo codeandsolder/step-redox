@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug)]
-pub(crate) enum IndexBucket {
+pub enum IndexBucket {
     One(usize),
     Many(Vec<usize>),
 }
@@ -28,11 +28,11 @@ impl IndexBucket {
     }
 }
 
-pub(crate) fn hash_parameter(param: &Parameter, hasher: &mut impl Hasher) {
+pub fn hash_parameter(param: &Parameter, hasher: &mut impl Hasher) {
     hash_parameter_impl(param, None, hasher);
 }
 
-pub(crate) fn hash_parameter_with_alias(
+pub fn hash_parameter_with_alias(
     param: &Parameter,
     alias: &HashMap<u64, u64>,
     hasher: &mut impl Hasher,
@@ -95,11 +95,11 @@ fn hash_parameter_impl(
     }
 }
 
-pub(crate) fn parameters_equivalent(left: &Parameter, right: &Parameter) -> bool {
+pub fn parameters_equivalent(left: &Parameter, right: &Parameter) -> bool {
     parameters_equivalent_impl(left, right, None)
 }
 
-pub(crate) fn parameters_equivalent_with_alias(
+pub fn parameters_equivalent_with_alias(
     left: &Parameter,
     right: &Parameter,
     alias: &HashMap<u64, u64>,
@@ -158,7 +158,7 @@ fn canonical_entity_id(alias: Option<&HashMap<u64, u64>>, id: u64) -> u64 {
     alias.map_or(id, |alias| resolve_alias(alias, id))
 }
 
-pub(crate) fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
+pub fn resolve_alias(alias: &HashMap<u64, u64>, mut id: u64) -> u64 {
     for _ in 0..64 {
         let Some(&next) = alias.get(&id) else {
             return id;

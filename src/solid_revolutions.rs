@@ -45,9 +45,9 @@ pub struct RecoveredSolidRevolution {
     /// analytic/profile geometry.
     pub max_residual_mm: f64,
     /// Maximum source-evidence residual admitted for this recovery. Exact/legacy
-    /// paths use GEOM_TOL_MM; a straight analytic path may inherit a larger,
+    /// paths use `GEOM_TOL_MM`; a straight analytic path may inherit a larger,
     /// explicitly declared representation-context uncertainty, capped by
-    /// MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM.
+    /// `MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM`.
     pub source_tolerance_mm: f64,
 }
 
@@ -143,6 +143,7 @@ pub struct SolidLoopSignature {
 }
 
 impl RecoveredSolidRevolution {
+    #[must_use]
     pub fn polygon_points(&self) -> Option<Vec<[f64; 2]>> {
         if self.profile_curves.len() < 3 {
             return None;
@@ -318,6 +319,7 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
     }
 }
 
+#[must_use]
 pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<SolidSurfaceSignature> {
     let index = build_index(entities);
     detect_solid_surface_signatures_with_index(entities, &index)
@@ -404,6 +406,7 @@ pub(crate) fn detect_solid_surface_signatures_with_index(
     out
 }
 
+#[must_use]
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
     let index = build_index(entities);
     detect_solid_revolutions_with_index(entities, &index)
@@ -435,6 +438,7 @@ pub(crate) fn detect_solid_revolutions_with_index(
     out
 }
 
+#[must_use]
 pub fn detect_radial_slot_revolutions(
     entities: &[EntityInstance],
 ) -> Vec<RecoveredRadialSlotRevolution> {
@@ -1108,7 +1112,7 @@ fn detect_one_radial_slot(
     })
 }
 
-fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
+const fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
     match surface {
         SurfaceSupport::Plane(plane) => SolidSurfaceGeometrySignature::Plane {
             origin_mm: plane.origin_mm,
@@ -1152,7 +1156,7 @@ fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
     }
 }
 
-fn curve_kind(curve: &CurveSupport) -> &'static str {
+const fn curve_kind(curve: &CurveSupport) -> &'static str {
     match curve {
         CurveSupport::Line(_) => "line",
         CurveSupport::Circle(_) => "circle",
@@ -1161,7 +1165,7 @@ fn curve_kind(curve: &CurveSupport) -> &'static str {
     }
 }
 
-fn surface_kind(surface: &SurfaceSupport) -> &'static str {
+const fn surface_kind(surface: &SurfaceSupport) -> &'static str {
     match surface {
         SurfaceSupport::Plane(_) => "plane",
         SurfaceSupport::Cylinder(_) => "cylinder",
@@ -1225,7 +1229,7 @@ fn detect_full_ring_torus(
 
             let circle_y = normalize(cross(circle.normal, circle.x_direction))?;
             for sample in 0..16 {
-                let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+                let angle = std::f64::consts::TAU * f64::from(sample) / 16.0;
                 let point = add(
                     circle.center_mm,
                     add(
@@ -1280,7 +1284,7 @@ fn detect_spherical_cap(
         match face.surface {
             SurfaceSupport::Sphere(sphere) => sphere_faces.push((face, sphere)),
             SurfaceSupport::Plane(plane) if plane_face.is_none() => {
-                plane_face = Some((face, plane))
+                plane_face = Some((face, plane));
             }
             _ => return None,
         }
@@ -2248,7 +2252,7 @@ fn torus_meridian_circle_residual(
     }
     let y_direction = normalize(cross(normal, x_direction))?;
     for sample in 0..16 {
-        let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+        let angle = std::f64::consts::TAU * f64::from(sample) / 16.0;
         let point = add(
             circle.center_mm,
             add(

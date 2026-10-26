@@ -36,7 +36,7 @@ pub struct FormedSheetEvidence {
     pub paired_planar_faces: usize,
     pub coaxial_radius_pairs: usize,
     /// Raw count of parallel plane-support pairs at the dominant thickness.
-    /// This can exceed paired_planar_patches because spatially disjoint
+    /// This can exceed `paired_planar_patches` because spatially disjoint
     /// faces can happen to lie one material thickness apart.
     pub parallel_plane_pairs: usize,
     pub paired_planar_patches: usize,
@@ -86,14 +86,14 @@ pub enum SheetPatchId {
     Cylinder(usize),
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SheetPatchAdjacency {
     pub patch_a: SheetPatchId,
     pub patch_b: SheetPatchId,
     /// True when the two source-skin face pairings cross relative to each patch's
     /// local ordering (negative/positive for planes, inner/outer for cylinders).
     pub crossed_source_sides: bool,
-    /// Source EDGE_CURVEs proving the adjacency, normally one on each skin.
+    /// Source `EDGE_CURVEs` proving the adjacency, normally one on each skin.
     pub source_edge_ids: Vec<u64>,
 }
 
@@ -171,15 +171,14 @@ pub(crate) fn detect_formed_sheet_evidence_with_min_pairs(
                     if let (Some((origin, normal)), Some(vertices)) = (
                         surface_axis(surface_id, entities, &index),
                         face_vertices(face_id, entities, &index),
-                    ) {
-                        if vertices.len() >= 3 {
-                            planes.push(PlaneFace {
-                                face_id,
-                                origin,
-                                normal,
-                                vertices,
-                            });
-                        }
+                    ) && vertices.len() >= 3
+                    {
+                        planes.push(PlaneFace {
+                            face_id,
+                            origin,
+                            normal,
+                            vertices,
+                        });
                     }
                 }
                 "CYLINDRICAL_SURFACE" => {
@@ -648,7 +647,7 @@ fn graph_connected(
     seen.into_iter().all(|value| value)
 }
 
-fn patch_linear_index(patch: SheetPatchId, plane_count: usize) -> usize {
+const fn patch_linear_index(patch: SheetPatchId, plane_count: usize) -> usize {
     match patch {
         SheetPatchId::Plane(index) => index,
         SheetPatchId::Cylinder(index) => plane_count + index,

@@ -168,8 +168,8 @@ fn build_reference_skin(
             SheetPatchId::Plane(patch_index) => {
                 let pair = plane_pairs.get(patch_index)?;
                 let offsets = [
-                    pair.mid_offset_mm - pair.separation_mm * 0.5,
-                    pair.mid_offset_mm + pair.separation_mm * 0.5,
+                    f64::mul_add(pair.separation_mm, -0.5, pair.mid_offset_mm),
+                    f64::mul_add(pair.separation_mm, 0.5, pair.mid_offset_mm),
                 ];
                 let faces = [pair.negative_face_id, pair.positive_face_id];
                 (
@@ -239,7 +239,7 @@ fn build_reference_skin(
         return None;
     }
 
-    let mut unused = boundary_edges.clone();
+    let mut unused = boundary_edges;
     let mut boundary_loops = Vec::new();
     while let Some(&first_edge) = unused.iter().next() {
         let (first_start, first_end, _, _) = edge_curve_info(first_edge, entities, index)?;
@@ -315,7 +315,7 @@ fn build_reference_skin(
     })
 }
 
-fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
+const fn reference_curve_source_edge(curve: &SheetReferenceCurve) -> u64 {
     match curve {
         SheetReferenceCurve::Line { source_edge_id, .. }
         | SheetReferenceCurve::CircleArc { source_edge_id, .. }
@@ -482,7 +482,7 @@ fn reference_ellipse_seam(
         }
         let u = dot(sub(*sample, center_mm), first_axis);
         let v = dot(sub(*sample, center_mm), second_axis);
-        if (u - branch_sign * v).abs() > GEOM_TOL_MM * 5.0 {
+        if f64::mul_add(branch_sign, -v, u).abs() > GEOM_TOL_MM * 5.0 {
             return None;
         }
     }
@@ -670,7 +670,7 @@ pub(super) fn rational_bezier_point(
         return poles.last().copied();
     }
 
-    let weight_scale = weights.iter().copied().max_by(|a, b| a.total_cmp(b))?;
+    let weight_scale = weights.iter().copied().max_by(f64::total_cmp)?;
     let mut homogeneous = poles
         .iter()
         .zip(weights)

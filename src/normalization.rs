@@ -7,12 +7,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
-pub(super) struct ConsolidateStats {
+pub struct ConsolidateStats {
     pub(super) total: usize,
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(super) fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
+pub fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
     use std::collections::{HashMap, HashSet};
 
     let mut refcounts: HashMap<u64, usize> = HashMap::new();
@@ -172,12 +172,12 @@ fn presentation_keys_equal(
 }
 
 #[derive(Default)]
-pub(super) struct InternStats {
+pub struct InternStats {
     pub(super) total: usize,
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
-pub(super) fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
+pub fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
     // Store redirects only. An identity map for a million-entity STEP file is
     // a surprisingly expensive way of spelling "most things survive".
     let mut alias: HashMap<u64, u64> = HashMap::new();
@@ -373,7 +373,7 @@ fn records_equivalent(left: &Record, right: &Record, alias: &HashMap<u64, u64>) 
         && parameters_equivalent_with_alias(&left.parameter, &right.parameter, alias)
 }
 
-pub(super) fn dense_renumber(entities: &mut [EntityInstance]) {
+pub fn dense_renumber(entities: &mut [EntityInstance]) {
     let id_map: HashMap<u64, u64> = entities
         .iter()
         .enumerate()
@@ -535,7 +535,7 @@ const PLACEHOLDER_NAME_TYPES: &[&str] = &[
     "VERTEX_POINT",
 ];
 
-pub(super) fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
+pub fn minify_placeholder_names(entities: &mut [EntityInstance]) -> usize {
     let mut changed = 0usize;
     for entity in entities {
         match entity {

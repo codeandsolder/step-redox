@@ -104,7 +104,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
         if let Some(&canonical) = seen.get(&key) {
             if canonical != id {
                 if record.name == "LINE"
-                    && !line_alias_is_safe(id, canonical, entities, &index, &inbound)
+                    && !line_alias_is_safe(id, canonical, entities, &index, inbound)
                 {
                     continue;
                 }
@@ -131,7 +131,7 @@ pub fn intern_geometric_supports(entities: &mut Vec<EntityInstance>) -> Geometri
     let mut candidate = duplicate_roots.clone();
     let mut stack: Vec<u64> = duplicate_roots.iter().copied().collect();
     while let Some(id) = stack.pop() {
-        for &child in references.refs(id).iter() {
+        for &child in references.refs(id) {
             if index.contains_key(&child) && candidate.insert(child) {
                 stack.push(child);
             }

@@ -45,10 +45,10 @@ struct SurfaceInfo {
 
 /// Factor translated analytic supports while leaving the fused B-rep topology
 /// untouched. The first occurrence remains explicit; later occurrences become
-/// SURFACE_REPLICA entities under translation-only operators.
+/// `SURFACE_REPLICA` entities under translation-only operators.
 ///
-/// Initial scope is intentionally narrow: PLANE/CYLINDRICAL_SURFACE only,
-/// explicit AXIS2_PLACEMENT_3D axis/ref-direction, identical parameterization,
+/// Initial scope is intentionally narrow: `PLANE/CYLINDRICAL_SURFACE` only,
+/// explicit `AXIS2_PLACEMENT_3D` axis/ref-direction, identical parameterization,
 /// and face-only consumers. Anything ambiguous fails closed.
 pub fn instance_translated_analytic_surfaces(
     entities: &mut Vec<EntityInstance>,
@@ -64,7 +64,7 @@ pub fn instance_translated_analytic_surfaces(
     let mut groups = HashMap::<SurfaceKey, Vec<SurfaceInfo>>::new();
 
     for entity in entities.iter() {
-        let Some(info) = parse_surface(entity, entities, &index, &inbound) else {
+        let Some(info) = parse_surface(entity, entities, &index, inbound) else {
             continue;
         };
         groups.entry(info.key.clone()).or_default().push(info);

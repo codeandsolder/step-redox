@@ -17,7 +17,7 @@ pub struct ShapeKey {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SolidIdentity {
+pub struct SolidIdentity {
     pub(crate) root: u64,
     pub(crate) closure: HashSet<u64>,
     pub(crate) center: [f64; 3],
@@ -29,7 +29,7 @@ pub(crate) struct SolidIdentity {
 
 /// Build the canonical geometry/topology identity once, independently of any
 /// rewrite policy such as presentation-style preservation.
-pub(crate) fn solid_identity(
+pub fn solid_identity(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -186,7 +186,7 @@ pub fn manifold_solid_face_ids(
     (!faces.is_empty()).then_some(faces)
 }
 
-pub(crate) fn solid_topology_signature(
+pub fn solid_topology_signature(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -341,7 +341,7 @@ pub fn resolve_edge_curve_use(
     None
 }
 
-pub(crate) fn oriented_edge_signature(
+pub fn oriented_edge_signature(
     oriented_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -408,7 +408,7 @@ fn vertex_signature(
     Some(format!("P({},{},{})", q[0], q[1], q[2]))
 }
 
-pub(crate) fn support_entity_signature(
+pub fn support_entity_signature(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -582,7 +582,7 @@ fn line_support_signature(
     ))
 }
 
-pub(crate) fn circle_support_signature(
+pub fn circle_support_signature(
     record: &Record,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -619,7 +619,7 @@ pub(crate) fn circle_support_signature(
     ))
 }
 
-pub(crate) fn cylindrical_surface_signature(
+pub fn cylindrical_surface_signature(
     record: &Record,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -662,7 +662,7 @@ pub(crate) fn cylindrical_surface_signature(
     ))
 }
 
-pub(crate) fn canonical_axis_offset(
+pub fn canonical_axis_offset(
     point: [f64; 3],
     direction: [f64; 3],
     center: [f64; 3],
@@ -953,7 +953,7 @@ fn canonical_cycle(items: &[String]) -> Vec<String> {
     best
 }
 
-pub(crate) fn resolved_geometry_signatures(
+pub fn resolved_geometry_signatures(
     ids: &[u64],
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -969,7 +969,7 @@ pub(crate) fn resolved_geometry_signatures(
     Some(out)
 }
 
-pub(crate) fn canonical_z90_solid_signature(
+pub fn canonical_z90_solid_signature(
     root: u64,
     points: &[[f64; 3]],
     entities: &[EntityInstance],
@@ -991,11 +991,7 @@ pub(crate) fn canonical_z90_solid_signature(
     best
 }
 
-pub(crate) fn normalized_points(
-    points: &[[f64; 3]],
-    center: [f64; 3],
-    quarter: u8,
-) -> Vec<[i64; 3]> {
+pub fn normalized_points(points: &[[f64; 3]], center: [f64; 3], quarter: u8) -> Vec<[i64; 3]> {
     let mut candidate: Vec<[i64; 3]> = points
         .iter()
         .map(|point| transform_point(*point, center, quarter))
@@ -1018,7 +1014,7 @@ pub(crate) fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Ve
     (best.unwrap_or_default(), best_rotation)
 }
 
-pub(crate) fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
+pub fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
     // Points are normally collected by walking a HashSet closure. Summing in
     // that randomized iteration order made the final few bits of the centroid
     // process-dependent and could flip coordinates across the 1e-9 canonical

@@ -759,7 +759,7 @@ fn scan_source_solids(
     out
 }
 
-fn source_solid_id(source: &CadFragmentSource) -> u64 {
+const fn source_solid_id(source: &CadFragmentSource) -> u64 {
     match source {
         CadFragmentSource::SolidExtrusion { solid_id, .. }
         | CadFragmentSource::SolidRevolution { solid_id, .. }

@@ -1,24 +1,24 @@
-pub(crate) fn sub(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
+pub fn sub(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
     [left[0] - right[0], left[1] - right[1]]
 }
 
-pub(crate) fn dot(left: [f64; 2], right: [f64; 2]) -> f64 {
+pub fn dot(left: [f64; 2], right: [f64; 2]) -> f64 {
     left[1].mul_add(right[1], left[0] * right[0])
 }
 
-pub(crate) fn cross(left: [f64; 2], right: [f64; 2]) -> f64 {
+pub fn cross(left: [f64; 2], right: [f64; 2]) -> f64 {
     left[1].mul_add(-right[0], left[0] * right[1])
 }
 
-pub(crate) fn norm(vector: [f64; 2]) -> f64 {
+pub fn norm(vector: [f64; 2]) -> f64 {
     vector[0].hypot(vector[1])
 }
 
-pub(crate) fn distance(left: [f64; 2], right: [f64; 2]) -> f64 {
+pub fn distance(left: [f64; 2], right: [f64; 2]) -> f64 {
     norm(sub(left, right))
 }
 
-pub(crate) fn normalize(vector: [f64; 2], min_norm: f64) -> Option<[f64; 2]> {
+pub fn normalize(vector: [f64; 2], min_norm: f64) -> Option<[f64; 2]> {
     let length = norm(vector);
     if !length.is_finite() || length <= min_norm {
         return None;
@@ -26,7 +26,7 @@ pub(crate) fn normalize(vector: [f64; 2], min_norm: f64) -> Option<[f64; 2]> {
     Some([vector[0] / length, vector[1] / length])
 }
 
-pub(crate) fn rotate_quarter_xy(x: f64, y: f64, quarter: u8) -> (f64, f64) {
+pub fn rotate_quarter_xy(x: f64, y: f64, quarter: u8) -> (f64, f64) {
     match quarter % 4 {
         0 => (x, y),
         1 => (-y, x),

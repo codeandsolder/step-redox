@@ -5,7 +5,7 @@ use crate::shape_identity::{
 use crate::step_entities::{
     entity_ref, patch_presentation_lists, push_point, push_simple, representation_items_and_context,
 };
-pub(crate) use crate::step_graph::visit_entity_refs;
+pub use crate::step_graph::visit_entity_refs;
 use crate::step_graph::{
     ReferenceGraph, build_index, entity_id, entity_ref_value, simple_record, simple_record_mut,
 };
