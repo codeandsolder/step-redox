@@ -35,10 +35,12 @@ pub trait CadKernel {
 pub mod monstertruck {
     use super::{CadKernel, KernelSummary};
     use crate::cad_ir::{
-        Axis3, BooleanOp, CadModel, CadNode, Curve2d, LoftSection, NodeId, Primitive, Profile2d,
-        RigidTransform, SweepPath3d, SweepSegment3d,
+        Axis3, BooleanOp, CadModel, CadNode, Curve2d, EdgeSelector, EdgeTreatmentEdge,
+        EdgeTreatmentProfile, LoftSection, NodeId, Primitive, Profile2d, RigidTransform,
+        SweepPath3d, SweepSegment3d,
     };
     use anyhow::{Result, bail};
+    use monstertruck_fillet::{FilletOptions, FilletProfile, RadiusSpec, fillet_edges_generic};
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_modeling::*;
 
@@ -562,6 +564,200 @@ pub mod monstertruck {
         }
     }
 
+    const EDGE_SELECTOR_TOLERANCE_MM: f64 = 1.0e-7;
+
+    const fn segment_point(point_mm: [f64; 3]) -> Point3 {
+        Point3::new(point_mm[0], point_mm[1], point_mm[2])
+    }
+
+    fn points_match(left: Point3, right: Point3) -> bool {
+        (left - right).magnitude() <= EDGE_SELECTOR_TOLERANCE_MM
+    }
+
+    const CIRCLE_SELECTOR_SAMPLES: usize = 16;
+
+    fn circle_point_matches(
+        point: Point3,
+        center: Point3,
+        normal: Vector3,
+        radius_mm: f64,
+    ) -> bool {
+        let offset = point - center;
+        offset.dot(normal).abs() <= EDGE_SELECTOR_TOLERANCE_MM
+            && (offset.magnitude() - radius_mm).abs() <= EDGE_SELECTOR_TOLERANCE_MM
+    }
+
+    fn edge_matches_circle(edge: &Edge, center: Point3, normal: Vector3, radius_mm: f64) -> bool {
+        let curve = edge.oriented_curve();
+        let (start, end) = curve.range_tuple();
+        if !start.is_finite()
+            || !end.is_finite()
+            || (start - end).abs() <= f64::EPSILON * start.abs().max(end.abs()).max(1.0)
+        {
+            return false;
+        }
+        (0..=CIRCLE_SELECTOR_SAMPLES).all(|index| {
+            let Ok(index) = u32::try_from(index) else {
+                return false;
+            };
+            let fraction = f64::from(index) / 16.0;
+            let parameter = f64::mul_add(end - start, fraction, start);
+            circle_point_matches(curve.subs(parameter), center, normal, radius_mm)
+        })
+    }
+
+    fn endpoint_cluster(points: &mut Vec<Point3>, point: Point3) -> usize {
+        points
+            .iter()
+            .position(|candidate| points_match(*candidate, point))
+            .unwrap_or_else(|| {
+                points.push(point);
+                points.len() - 1
+            })
+    }
+
+    fn circle_edges_form_one_cycle(edges: &[Edge]) -> bool {
+        if edges.is_empty() {
+            return false;
+        }
+        let mut points = Vec::<Point3>::new();
+        let endpoints = edges
+            .iter()
+            .map(|edge| {
+                let front = endpoint_cluster(&mut points, edge.absolute_front().point());
+                let back = endpoint_cluster(&mut points, edge.absolute_back().point());
+                (front, back)
+            })
+            .collect::<Vec<_>>();
+        let mut degrees = vec![0_usize; points.len()];
+        let mut adjacency = vec![Vec::<usize>::new(); points.len()];
+        for &(front, back) in &endpoints {
+            if front == back {
+                degrees[front] += 2;
+                adjacency[front].push(front);
+            } else {
+                degrees[front] += 1;
+                degrees[back] += 1;
+                adjacency[front].push(back);
+                adjacency[back].push(front);
+            }
+        }
+        if degrees.iter().any(|degree| *degree != 2) {
+            return false;
+        }
+        let mut visited = vec![false; points.len()];
+        let mut stack = vec![0_usize];
+        while let Some(index) = stack.pop() {
+            if visited[index] {
+                continue;
+            }
+            visited[index] = true;
+            stack.extend(adjacency[index].iter().copied());
+        }
+        visited.into_iter().all(std::convert::identity)
+    }
+
+    fn select_edges(shell: &Shell, selector: &EdgeSelector) -> Result<Vec<Edge>> {
+        match selector {
+            EdgeSelector::Segment { start_mm, end_mm } => {
+                let start = segment_point(*start_mm);
+                let end = segment_point(*end_mm);
+                let mut matched = None;
+                let mut matched_id = None;
+                for edge in shell.edge_iter() {
+                    let front = edge.absolute_front().point();
+                    let back = edge.absolute_back().point();
+                    let endpoints_match = (points_match(front, start) && points_match(back, end))
+                        || (points_match(front, end) && points_match(back, start));
+                    if !endpoints_match || matched_id == Some(edge.id()) {
+                        continue;
+                    }
+                    if matched_id.is_some() {
+                        bail!("edge-treatment selector matched more than one topological edge");
+                    }
+                    matched_id = Some(edge.id());
+                    matched = Some(edge.clone());
+                }
+                Ok(vec![matched.ok_or_else(|| {
+                    anyhow::anyhow!("edge-treatment selector matched no edge")
+                })?])
+            }
+            EdgeSelector::Circle {
+                center_mm,
+                normal,
+                radius_mm,
+            } => {
+                let center = segment_point(*center_mm);
+                let normal = Vector3::new(normal[0], normal[1], normal[2]);
+                let normal_magnitude = normal.magnitude();
+                if !normal_magnitude.is_finite() || normal_magnitude <= 1.0e-12 {
+                    bail!("edge-treatment circle selector has invalid normal");
+                }
+                let normal = normal / normal_magnitude;
+                let mut matched = Vec::<Edge>::new();
+                for edge in shell.edge_iter() {
+                    if matched.iter().any(|candidate| candidate.id() == edge.id())
+                        || !edge_matches_circle(&edge, center, normal, *radius_mm)
+                    {
+                        continue;
+                    }
+                    matched.push(edge.clone());
+                }
+                if matched.is_empty() {
+                    bail!("edge-treatment circle selector matched no edge");
+                }
+                if !circle_edges_form_one_cycle(&matched) {
+                    bail!(
+                        "edge-treatment circle selector did not resolve to one closed edge cycle"
+                    );
+                }
+                Ok(matched)
+            }
+        }
+    }
+
+    fn evaluate_edge_treatment(
+        model: &CadModel,
+        child: NodeId,
+        profile: EdgeTreatmentProfile,
+        edges: &[EdgeTreatmentEdge],
+    ) -> Result<Solid> {
+        let child = evaluate_node(model, child)?;
+        let mut boundaries = child.into_boundaries();
+        let [shell] = boundaries.as_mut_slice() else {
+            bail!("edge treatment currently requires exactly one boundary shell");
+        };
+        let mut selected = Vec::<Edge>::new();
+        let mut radii = Vec::new();
+        for treatment in edges {
+            for edge in select_edges(shell, &treatment.selector)? {
+                if selected.iter().any(|existing| existing.id() == edge.id()) {
+                    bail!("edge-treatment selectors overlap on one topological edge");
+                }
+                selected.push(edge);
+                radii.push(treatment.radius_mm);
+            }
+        }
+        let fillet_profile = match profile {
+            EdgeTreatmentProfile::Round => FilletProfile::Round,
+            EdgeTreatmentProfile::Chamfer => FilletProfile::Chamfer,
+            EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm,
+                second_setback_mm,
+            } => FilletProfile::AsymmetricChamfer {
+                first_setback_mm,
+                second_setback_mm,
+            },
+        };
+        let options = FilletOptions {
+            radius: RadiusSpec::PerEdge(radii),
+            profile: fillet_profile,
+            ..FilletOptions::default()
+        };
+        fillet_edges_generic(shell, &selected, Some(&options))?;
+        Ok(Solid::try_new(boundaries)?)
+    }
+
     fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
         match model.node(root)? {
             CadNode::Primitive(primitive) => primitive_solid(primitive),
@@ -579,6 +775,11 @@ pub mod monstertruck {
             CadNode::Sweep { profile, path } => sweep_profile(profile, path),
             CadNode::Loft { sections } => loft_sections(sections),
             CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
+            CadNode::EdgeTreatment {
+                child,
+                profile,
+                edges,
+            } => evaluate_edge_treatment(model, *child, *profile, edges),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
                     profile,
@@ -759,6 +960,81 @@ pub mod monstertruck {
 
             let step = kernel.to_step(&evaluated)?;
             ruststep::parser::parse(&step)?;
+            Ok(())
+        }
+
+        fn box_edge_treatment(profile: EdgeTreatmentProfile) -> Result<()> {
+            let mut model = CadModel::new();
+            let box_node = model.add_node(CadNode::Primitive(Primitive::Box {
+                size_mm: [4.0, 3.0, 2.0],
+            }));
+            let root = model.add_node(CadNode::EdgeTreatment {
+                child: box_node,
+                profile,
+                edges: vec![EdgeTreatmentEdge {
+                    selector: EdgeSelector::Segment {
+                        start_mm: [0.0, 0.0, 0.0],
+                        end_mm: [4.0, 0.0, 0.0],
+                    },
+                    radius_mm: 0.25,
+                }],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert!(summary.faces > 6);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+            Ok(())
+        }
+
+        #[test]
+        fn evaluates_round_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::Round)
+        }
+
+        #[test]
+        fn evaluates_chamfer_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::Chamfer)
+        }
+
+        #[test]
+        fn evaluates_asymmetric_chamfer_edge_treatment() -> Result<()> {
+            box_edge_treatment(EdgeTreatmentProfile::AsymmetricChamfer {
+                first_setback_mm: 0.2,
+                second_setback_mm: 0.3,
+            })
+        }
+
+        #[test]
+        fn evaluates_round_circle_edge_treatment() -> Result<()> {
+            let mut model = CadModel::new();
+            let cylinder = model.add_node(CadNode::Primitive(Primitive::Cylinder {
+                radius_mm: 1.0,
+                height_mm: 2.0,
+            }));
+            let root = model.add_node(CadNode::EdgeTreatment {
+                child: cylinder,
+                profile: EdgeTreatmentProfile::Round,
+                edges: vec![EdgeTreatmentEdge {
+                    selector: EdgeSelector::Circle {
+                        center_mm: [0.0, 2.0, 0.0],
+                        normal: [0.0, 1.0, 0.0],
+                        radius_mm: 1.0,
+                    },
+                    radius_mm: 0.1,
+                }],
+            });
+            model.add_root(root)?;
+            let kernel = MonstertruckKernel;
+            let evaluated = kernel.evaluate(&model, root)?;
+            let summary = kernel.summarize(&evaluated);
+            assert!(summary.geometrically_consistent);
+            assert_eq!(summary.shells, 1);
+            assert!(summary.faces > 3);
+            ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
             Ok(())
         }
 

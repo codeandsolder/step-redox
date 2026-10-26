@@ -2,6 +2,7 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
+use crate::edge_treatments::{EdgeTreatmentEvidence, EdgeTreatmentKind, EdgeTreatmentVirtualEdge};
 use crate::math2::{
     cross as cross2, distance as distance2, dot as dot2, normalize as normalize2, sub as sub2,
 };
@@ -62,6 +63,7 @@ impl RecoveredSolidExtrusion {
 struct FaceInfo {
     id: u64,
     surface: SurfaceSupport,
+    surface_forward: bool,
     loops: Vec<brep::FaceLoop>,
     /// Flattened boundary edges retained for the existing manifold/side proof.
     loop_edges: Vec<OrientedEdgeUse>,
@@ -80,6 +82,348 @@ struct CanonicalProfile {
 pub fn detect_solid_extrusions(entities: &[EntityInstance]) -> Vec<RecoveredSolidExtrusion> {
     let index = build_index(entities);
     detect_solid_extrusions_with_index(entities, &index)
+}
+
+/// Detect sharp extrusion cores implied by translated planar cap pairs.
+///
+/// These candidates deliberately prove only the cap-to-cap translation and
+/// canonical profile. They do not claim the source side faces are ruled
+/// extrusion walls, so callers must separately explain every residual source
+/// face before treating a candidate as whole-solid recovery.
+#[must_use]
+pub fn detect_extrusion_core_candidates(
+    entities: &[EntityInstance],
+) -> Vec<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    detect_extrusion_core_candidates_with_index(entities, &index)
+}
+
+pub(crate) fn detect_extrusion_core_candidates_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let mut out = Vec::new();
+    for entity in entities {
+        let Some(record) = simple_record(entity) else {
+            continue;
+        };
+        if record.name != "MANIFOLD_SOLID_BREP" {
+            continue;
+        }
+        let solid_id = entity_id(entity);
+        out.extend(extrusion_core_candidates_for_solid(
+            solid_id, entities, index,
+        ));
+    }
+    out.sort_by(|first, second| {
+        first
+            .solid_id
+            .cmp(&second.solid_id)
+            .then_with(|| candidate_order(first, second))
+    });
+    out
+}
+
+/// Recover the sharp extrusion core implied by one explicit planar cap pair.
+///
+/// Unlike [`detect_solid_extrusions`], this proves the two cap loops are exact
+/// translations directly from their analytic boundary curves and deliberately
+/// does not claim that the source side faces are extrusion walls. It is only a
+/// core for a higher-level reconstruction that separately proves and replays
+/// every source-side treatment.
+#[must_use]
+pub fn recover_extrusion_core_from_cap_faces(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+) -> Option<RecoveredSolidExtrusion> {
+    let index = build_index(entities);
+    recover_extrusion_core_from_cap_faces_with_index(solid_id, cap_face_ids, entities, &index)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TreatmentHealedExtrusionCoreCandidate {
+    pub core: RecoveredSolidExtrusion,
+    pub healed_treatment_face_ids: Vec<u64>,
+}
+
+/// Recover an extrusion core after analytically undoing unique planar chamfers
+/// that trim the two requested source caps.
+///
+/// This is still only a host candidate: treatment replay and whole-solid
+/// source/rebuild boundary equivalence are required before semantic admission.
+#[must_use]
+pub fn recover_treatment_healed_extrusion_core_from_cap_faces(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+) -> Option<TreatmentHealedExtrusionCoreCandidate> {
+    let index = build_index(entities);
+    let face_ids = brep::solid_face_ids(solid_id, entities, &index)?;
+    let mut faces = vec![
+        face_info(cap_face_ids[0], entities, &index)?,
+        face_info(cap_face_ids[1], entities, &index)?,
+    ];
+    let mut unreadable_planes = Vec::<PlaneSupport>::new();
+    for face_id in face_ids
+        .iter()
+        .copied()
+        .filter(|face_id| !cap_face_ids.contains(face_id))
+    {
+        if let Some(face) = face_info(face_id, entities, &index) {
+            faces.push(face);
+            continue;
+        }
+        let surface_id = brep::face_surface(face_id, entities, &index)?;
+        if let SurfaceSupport::Plane(plane) = brep::surface_support(surface_id, entities, &index) {
+            unreadable_planes.push(plane);
+        }
+    }
+    let first_index = 0;
+    let second_index = 1;
+
+    let evidence = crate::edge_treatments::detect_edge_treatment_evidence(entities);
+    let mut healed_treatment_face_ids = Vec::new();
+    let mut max_treatment_residual_mm = 0.0_f64;
+    for &cap_index in &[first_index, second_index] {
+        let cap_id = faces[cap_index].id;
+        let cap_evidence = evidence
+            .iter()
+            .filter(|item| {
+                item.solid_id == solid_id
+                    && item.kind == EdgeTreatmentKind::PlanarChamfer
+                    && item.carrier_pair_unique
+                    && item
+                        .carriers
+                        .iter()
+                        .any(|carrier| carrier.face_id == cap_id)
+            })
+            .collect::<Vec<_>>();
+        for item in cap_evidence {
+            heal_cap_planar_chamfer(&mut faces[cap_index], item)?;
+            healed_treatment_face_ids.push(item.treatment_face_id);
+            max_treatment_residual_mm =
+                max_treatment_residual_mm.max(item.max_boundary_residual_mm);
+        }
+    }
+    if healed_treatment_face_ids.is_empty() {
+        return None;
+    }
+    healed_treatment_face_ids.sort_unstable();
+    healed_treatment_face_ids.dedup();
+
+    let pair = ordered_cap_pair(first_index, second_index, &faces)?;
+    let translated_residual = prove_translated_caps(&pair)?;
+    if has_intervening_translated_boundary(&pair, &faces)
+        || unreadable_planes
+            .iter()
+            .copied()
+            .any(|plane| unreadable_parallel_plane_may_intervene(&pair, plane))
+    {
+        return None;
+    }
+    let profile = canonical_profile(pair.bottom, pair.z_axis, &pair.bottom_loop_roles)?;
+    Some(TreatmentHealedExtrusionCoreCandidate {
+        core: RecoveredSolidExtrusion {
+            solid_id,
+            cap_face_ids: [pair.bottom.id, pair.top.id],
+            side_face_ids: Vec::new(),
+            profile_curves: profile.curves,
+            inner_profile_loops: profile.inner_loops,
+            origin_mm: profile.origin_mm,
+            x_axis: profile.x_axis,
+            y_axis: profile.y_axis,
+            z_axis: pair.z_axis,
+            height_mm: pair.height_mm,
+            max_residual_mm: translated_residual.max(max_treatment_residual_mm),
+        },
+        healed_treatment_face_ids,
+    })
+}
+
+fn unreadable_parallel_plane_may_intervene(pair: &CapPairProof<'_>, plane: PlaneSupport) -> bool {
+    let SurfaceSupport::Plane(bottom_plane) = pair.bottom.surface else {
+        return true;
+    };
+    if !parallel(plane.normal, bottom_plane.normal) {
+        return false;
+    }
+    let offset = dot(pair.z_axis, sub(plane.origin_mm, bottom_plane.origin_mm));
+    offset > GEOM_TOL_MM && offset < pair.height_mm - GEOM_TOL_MM
+}
+
+fn heal_cap_planar_chamfer(face: &mut FaceInfo, evidence: &EdgeTreatmentEvidence) -> Option<()> {
+    let carrier = evidence
+        .carriers
+        .iter()
+        .find(|carrier| carrier.face_id == face.id)?;
+    let [shared_edge_id] = carrier.shared_edge_ids.as_slice() else {
+        return None;
+    };
+    let EdgeTreatmentVirtualEdge::Segment { start_mm, end_mm } = evidence.virtual_edge else {
+        return None;
+    };
+
+    let matches = face
+        .loops
+        .iter()
+        .enumerate()
+        .flat_map(|(loop_index, loop_)| {
+            loop_
+                .edges
+                .iter()
+                .enumerate()
+                .filter_map(move |(edge_index, edge)| {
+                    (edge.edge_id == *shared_edge_id).then_some((loop_index, edge_index))
+                })
+        })
+        .collect::<Vec<_>>();
+    let [(loop_index, edge_index)] = matches.as_slice() else {
+        return None;
+    };
+    let loop_ = &mut face.loops[*loop_index];
+    if loop_.edges.len() < 3 {
+        return None;
+    }
+    let previous_index = (edge_index + loop_.edges.len() - 1) % loop_.edges.len();
+    let next_index = (edge_index + 1) % loop_.edges.len();
+    let current = &loop_.edges[*edge_index];
+    if distance(loop_.edges[previous_index].end_mm, current.start_mm) > GEOM_TOL_MM
+        || distance(current.end_mm, loop_.edges[next_index].start_mm) > GEOM_TOL_MM
+    {
+        return None;
+    }
+    let CurveSupport::Line(previous_line) = loop_.edges[previous_index].support else {
+        return None;
+    };
+    let CurveSupport::Line(next_line) = loop_.edges[next_index].support else {
+        return None;
+    };
+    let previous_direction = normalize3(previous_line.direction, DIR_TOL)?;
+    let next_direction = normalize3(next_line.direction, DIR_TOL)?;
+    let assignment = [(start_mm, end_mm), (end_mm, start_mm)].into_iter().find(
+        |(previous_point, next_point)| {
+            point_to_unit_line_distance(
+                *previous_point,
+                previous_line.origin_mm,
+                previous_direction,
+            ) <= GEOM_TOL_MM
+                && point_to_unit_line_distance(*next_point, next_line.origin_mm, next_direction)
+                    <= GEOM_TOL_MM
+        },
+    )?;
+    let (healed_start, healed_end) = assignment;
+    let healed_direction = normalize3(sub(healed_end, healed_start), DIR_TOL)?;
+
+    loop_.edges[previous_index].end_mm = healed_start;
+    loop_.edges[*edge_index].start_mm = healed_start;
+    loop_.edges[*edge_index].end_mm = healed_end;
+    loop_.edges[*edge_index].support = CurveSupport::Line(brep::LineSupport {
+        origin_mm: healed_start,
+        direction: healed_direction,
+    });
+    loop_.edges[next_index].start_mm = healed_end;
+    if loop_.edges.iter().enumerate().any(|(index, edge)| {
+        let next = &loop_.edges[(index + 1) % loop_.edges.len()];
+        distance(edge.end_mm, next.start_mm) > GEOM_TOL_MM
+    }) {
+        return None;
+    }
+    face.loop_edges = face
+        .loops
+        .iter()
+        .flat_map(|loop_| loop_.edges.iter().cloned())
+        .collect();
+    Some(())
+}
+
+pub(crate) fn recover_extrusion_core_from_cap_faces_with_index(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredSolidExtrusion> {
+    extrusion_core_candidates_for_solid(solid_id, entities, index)
+        .into_iter()
+        .find(|candidate| {
+            candidate.cap_face_ids == cap_face_ids
+                || candidate.cap_face_ids == [cap_face_ids[1], cap_face_ids[0]]
+        })
+}
+
+fn extrusion_core_candidates_for_solid(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Vec<RecoveredSolidExtrusion> {
+    let Some(face_ids) = brep::solid_face_ids(solid_id, entities, index) else {
+        return Vec::new();
+    };
+    let Some(faces) = face_ids
+        .iter()
+        .copied()
+        .map(|face_id| face_info(face_id, entities, index))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    // A face already carrying one unambiguous edge-treatment interpretation
+    // is not a sound cap for a *sharp* core. This is deliberately fail-closed:
+    // continuation candidates are not promoted to semantic treatment recovery;
+    // they are only grounds for declining this competing core interpretation.
+    let treatment_face_ids = crate::edge_treatments::unique_treatment_face_ids_for_solid(
+        solid_id, &face_ids, entities, index,
+    )
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let mut out = Vec::new();
+    for first_index in 0..faces.len() {
+        for second_index in first_index + 1..faces.len() {
+            if let Some(candidate) = extrusion_core_candidate(
+                solid_id,
+                first_index,
+                second_index,
+                &faces,
+                &treatment_face_ids,
+            ) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+fn extrusion_core_candidate(
+    solid_id: u64,
+    first_index: usize,
+    second_index: usize,
+    faces: &[FaceInfo],
+    treatment_face_ids: &HashSet<u64>,
+) -> Option<RecoveredSolidExtrusion> {
+    if treatment_face_ids.contains(&faces[first_index].id)
+        || treatment_face_ids.contains(&faces[second_index].id)
+    {
+        return None;
+    }
+    let pair = ordered_cap_pair(first_index, second_index, faces)?;
+    let max_residual_mm = prove_translated_caps(&pair)?;
+    if has_intervening_translated_boundary(&pair, faces) {
+        return None;
+    }
+    let profile = canonical_profile(pair.bottom, pair.z_axis, &pair.bottom_loop_roles)?;
+    Some(RecoveredSolidExtrusion {
+        solid_id,
+        cap_face_ids: [pair.bottom.id, pair.top.id],
+        side_face_ids: Vec::new(),
+        profile_curves: profile.curves,
+        inner_profile_loops: profile.inner_loops,
+        origin_mm: profile.origin_mm,
+        x_axis: profile.x_axis,
+        y_axis: profile.y_axis,
+        z_axis: pair.z_axis,
+        height_mm: pair.height_mm,
+        max_residual_mm,
+    })
 }
 
 pub(crate) fn detect_solid_extrusions_with_index(
@@ -260,6 +604,22 @@ fn ordered_cap_pair(
         return None;
     }
 
+    // A cap-derived core can only occupy source material when the two source
+    // faces bound the interval from the outside: the lower cap must face
+    // opposite the extrusion direction and the upper cap must face along it.
+    // This is necessary, not sufficient, for containment (an hourglass-shaped
+    // side wall can still cut into the prism), but it rejects translated planar
+    // pairs that geometrically match while bounding empty/outside space.
+    if !cap_faces_bound_material_interval(
+        *bottom_plane,
+        bottom.surface_forward,
+        *top_plane,
+        top.surface_forward,
+        z_axis,
+    ) {
+        return None;
+    }
+
     Some(CapPairProof {
         bottom_index,
         top_index,
@@ -274,6 +634,109 @@ fn ordered_cap_pair(
     })
 }
 
+fn cap_faces_bound_material_interval(
+    bottom: PlaneSupport,
+    bottom_forward: bool,
+    top: PlaneSupport,
+    top_forward: bool,
+    z_axis: [f64; 3],
+) -> bool {
+    let bottom_outward = if bottom_forward {
+        bottom.normal
+    } else {
+        mul(bottom.normal, -1.0)
+    };
+    let top_outward = if top_forward {
+        top.normal
+    } else {
+        mul(top.normal, -1.0)
+    };
+    dot(bottom_outward, z_axis) <= -1.0 + DIR_TOL && dot(top_outward, z_axis) >= 1.0 - DIR_TOL
+}
+
+fn prove_translated_caps(pair: &CapPairProof<'_>) -> Option<f64> {
+    let mut translated_edges = HashMap::<u64, u64>::new();
+    let mut used_top_edges = HashSet::<u64>::new();
+    let mut max_residual_mm = pair.max_residual_mm;
+
+    for bottom_edge in &pair.bottom.loop_edges {
+        let matches = pair
+            .top
+            .loop_edges
+            .iter()
+            .filter(|top_edge| !used_top_edges.contains(&top_edge.edge_id))
+            .filter_map(|top_edge| {
+                let residual =
+                    translated_profile_edge_residual(bottom_edge, top_edge, pair.extrusion)?;
+                (residual <= GEOM_TOL_MM).then_some((top_edge.edge_id, residual))
+            })
+            .collect::<Vec<_>>();
+        let [(top_edge_id, residual)] = matches.as_slice() else {
+            return None;
+        };
+        used_top_edges.insert(*top_edge_id);
+        translated_edges.insert(bottom_edge.edge_id, *top_edge_id);
+        max_residual_mm = max_residual_mm.max(*residual);
+    }
+    if used_top_edges.len() != pair.top.loop_edges.len()
+        || !translated_cap_loops_match(
+            pair.bottom,
+            pair.top,
+            &translated_edges,
+            &pair.bottom_loop_roles,
+            &pair.top_loop_roles,
+        )
+    {
+        return None;
+    }
+    Some(max_residual_mm)
+}
+
+fn has_intervening_translated_boundary(pair: &CapPairProof<'_>, faces: &[FaceInfo]) -> bool {
+    let SurfaceSupport::Plane(bottom_plane) = pair.bottom.surface else {
+        return true;
+    };
+
+    faces.iter().enumerate().any(|(face_index, face)| {
+        if face_index == pair.bottom_index || face_index == pair.top_index {
+            return false;
+        }
+        let SurfaceSupport::Plane(plane) = face.surface else {
+            return false;
+        };
+        if !parallel(plane.normal, bottom_plane.normal) || !face_lies_on_plane(face, plane) {
+            return false;
+        }
+
+        let offset = dot(pair.z_axis, sub(plane.origin_mm, bottom_plane.origin_mm));
+        if offset <= GEOM_TOL_MM || offset >= pair.height_mm - GEOM_TOL_MM {
+            return false;
+        }
+        if face.loops.len() != pair.bottom.loops.len()
+            || face.loop_edges.len() != pair.bottom.loop_edges.len()
+        {
+            return false;
+        }
+        let Some(top_loop_roles) = cap_loop_roles(face, pair.z_axis) else {
+            return false;
+        };
+        let intermediate = CapPairProof {
+            bottom_index: pair.bottom_index,
+            top_index: face_index,
+            bottom: pair.bottom,
+            top: face,
+            z_axis: pair.z_axis,
+            height_mm: offset,
+            extrusion: mul(pair.z_axis, offset),
+            bottom_loop_roles: pair.bottom_loop_roles.clone(),
+            top_loop_roles,
+            max_residual_mm: pair.max_residual_mm.max(plane.max_residual_mm),
+        };
+        prove_translated_caps(&intermediate).is_some()
+    })
+}
+
+/// Prove all source side faces themselves are the exact ruled walls of an extrusion.
 fn prove_extrusion_sides(
     pair: &CapPairProof<'_>,
     faces: &[FaceInfo],
@@ -754,9 +1217,16 @@ fn face_info(
         .flat_map(|loop_| loop_.edges.iter().cloned())
         .collect::<Vec<_>>();
 
+    let surface_forward = match brep::face_sense(face_id, entities, index)?.as_str() {
+        "T" => true,
+        "F" => false,
+        _ => return None,
+    };
+
     Some(FaceInfo {
         id: face_id,
         surface,
+        surface_forward,
         loops,
         loop_edges,
     })
@@ -1563,10 +2033,139 @@ mod tests {
         }
     }
 
+    fn square_face_info(id: u64, edge_base: u64, z: f64, surface_forward: bool) -> FaceInfo {
+        let points = [[0.0, 0.0, z], [1.0, 0.0, z], [1.0, 1.0, z], [0.0, 1.0, z]];
+        let edges = (0..4)
+            .map(|index| {
+                line_edge(
+                    edge_base + index as u64,
+                    edge_base + 100 + index as u64,
+                    edge_base + 100 + ((index + 1) % 4) as u64,
+                    points[index],
+                    points[(index + 1) % 4],
+                )
+            })
+            .collect::<Vec<_>>();
+        let loop_ = brep::FaceLoop {
+            bound_id: id + 1_000,
+            loop_id: id + 2_000,
+            outer: true,
+            orientation: true,
+            edges: edges.clone(),
+        };
+        FaceInfo {
+            id,
+            surface: SurfaceSupport::Plane(PlaneSupport {
+                origin_mm: [0.0, 0.0, z],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            surface_forward,
+            loops: vec![loop_],
+            loop_edges: edges,
+        }
+    }
+
+    #[test]
+    fn planar_chamfer_heals_trimmed_cap_edge_to_virtual_edge() -> anyhow::Result<()> {
+        let mut face = square_face_info(1, 10, 0.0, false);
+        face.loops[0].edges[0].start_mm = [0.0, 0.25, 0.0];
+        face.loops[0].edges[0].end_mm = [1.0, 0.25, 0.0];
+        face.loops[0].edges[0].support = CurveSupport::Line(brep::LineSupport {
+            origin_mm: [0.0, 0.25, 0.0],
+            direction: [1.0, 0.0, 0.0],
+        });
+        face.loops[0].edges[3].end_mm = [0.0, 0.25, 0.0];
+        face.loops[0].edges[1].start_mm = [1.0, 0.25, 0.0];
+        face.loop_edges = face.loops[0].edges.clone();
+
+        let evidence = EdgeTreatmentEvidence {
+            solid_id: 100,
+            treatment_face_id: 99,
+            kind: EdgeTreatmentKind::PlanarChamfer,
+            strength: crate::edge_treatments::EdgeTreatmentEvidenceStrength::ContinuationCandidate,
+            carrier_pair_unique: true,
+            treatment_support: "plane".to_owned(),
+            carriers: [
+                crate::edge_treatments::EdgeTreatmentCarrier {
+                    face_id: 1,
+                    support: "plane".to_owned(),
+                    shared_edge_ids: vec![10],
+                },
+                crate::edge_treatments::EdgeTreatmentCarrier {
+                    face_id: 2,
+                    support: "plane".to_owned(),
+                    shared_edge_ids: vec![20],
+                },
+            ],
+            inferred_radius_mm: None,
+            inferred_setbacks_mm: None,
+            inferred_angle_rad: Some(std::f64::consts::FRAC_PI_4),
+            carrier_angle_rad: std::f64::consts::FRAC_PI_2,
+            virtual_edge: EdgeTreatmentVirtualEdge::Segment {
+                start_mm: [0.0, 0.0, 0.0],
+                end_mm: [1.0, 0.0, 0.0],
+            },
+            max_boundary_residual_mm: 0.0,
+        };
+
+        heal_cap_planar_chamfer(&mut face, &evidence)
+            .ok_or_else(|| anyhow::anyhow!("single-line cap chamfer should heal analytically"))?;
+        let healed = &face.loops[0].edges;
+        assert_eq!(healed[0].start_mm, [0.0, 0.0, 0.0]);
+        assert_eq!(healed[0].end_mm, [1.0, 0.0, 0.0]);
+        assert_eq!(healed[3].end_mm, [0.0, 0.0, 0.0]);
+        assert_eq!(healed[1].start_mm, [1.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn intervening_translated_boundary_rejects_spanning_core() -> anyhow::Result<()> {
+        let bottom = square_face_info(1, 10, 0.0, false);
+        let middle = square_face_info(2, 20, 0.5, true);
+        let top = square_face_info(3, 30, 1.0, true);
+        let faces = vec![bottom.clone(), middle, top.clone()];
+        let pair = ordered_cap_pair(0, 2, &faces)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must form a candidate"))?;
+        assert!(prove_translated_caps(&pair).is_some());
+        assert!(has_intervening_translated_boundary(&pair, &faces));
+
+        let faces_without_middle = vec![bottom, top];
+        let pair = ordered_cap_pair(0, 1, &faces_without_middle)
+            .ok_or_else(|| anyhow::anyhow!("outer caps must still match"))?;
+        assert!(!has_intervening_translated_boundary(
+            &pair,
+            &faces_without_middle
+        ));
+        Ok(())
+    }
+
     #[test]
     fn canonical_axis_has_deterministic_sign() {
         assert_eq!(canonical_direction([-1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
         assert_eq!(canonical_direction([0.0, -1.0, 0.0]), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cap_pair_requires_opposite_outward_normals() {
+        let down = PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let up = PlaneSupport {
+            origin_mm: [0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        };
+        let z = [0.0, 0.0, 1.0];
+
+        assert!(cap_faces_bound_material_interval(down, false, up, true, z));
+        assert!(!cap_faces_bound_material_interval(down, true, up, false, z));
+        assert!(!cap_faces_bound_material_interval(
+            down, false, up, false, z
+        ));
+        assert!(!cap_faces_bound_material_interval(down, true, up, true, z));
     }
 
     #[test]

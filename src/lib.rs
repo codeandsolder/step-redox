@@ -8,6 +8,7 @@ pub use analysis::AnalysisSession;
 mod bezier_recovery;
 #[doc(hidden)]
 pub mod body_corpus;
+pub mod boundary_proof;
 mod brep;
 pub mod cad_ir;
 pub mod cad_kernel;
@@ -17,6 +18,7 @@ pub mod compatibility;
 pub mod complete_ir;
 mod curve_replicas;
 pub mod dominant_extrusions;
+pub mod edge_treatments;
 mod face_coalesce;
 pub mod formed_sheet;
 mod geometric_intern;
@@ -478,6 +480,38 @@ pub fn detect_formed_sheet_evidence_bytes(
         .collect())
 }
 
+/// Compare two closed analytic solid boundaries after collapsing representational partitions.
+///
+/// This is fail-closed proof evidence, not Complete IR admission by itself. The
+/// comparator accepts only plane/cylinder carriers, requires every physical
+/// boundary edge to be proven on the exact intersection locus of its two
+/// carriers, collapses same-support face partitions and degree-two edge splits,
+/// then compares the resulting oriented support-adjacency chains. Rational
+/// quadratic spline-extrusion cylinders are accepted only after a whole-span
+/// homogeneous polynomial circle certificate.
+///
+/// # Errors
+/// Returns an error if either STEP exchange cannot be parsed or does not contain
+/// exactly one DATA section.
+pub fn compare_analytic_solid_boundaries_bytes(
+    first: &[u8],
+    first_solid_id: u64,
+    second: &[u8],
+    second_solid_id: u64,
+) -> Result<boundary_proof::AnalyticBoundaryComparison> {
+    let first = ParsedExchange::parse(first)?.exchange;
+    let second = ParsedExchange::parse(second)?.exchange;
+    if first.data.len() != 1 || second.data.len() != 1 {
+        bail!("analytic boundary comparison currently requires one DATA section per exchange");
+    }
+    Ok(boundary_proof::compare_analytic_boundaries(
+        first_solid_id,
+        &first.data[0].entities,
+        second_solid_id,
+        &second.data[0].entities,
+    ))
+}
+
 /// Report per-solid analytic surface and loop-topology signatures.
 ///
 /// This is diagnostic evidence for recovery work: it does not claim that a
@@ -572,6 +606,89 @@ pub fn detect_dominant_extrusion_candidates_bytes(
     Ok(dominant_extrusions::detect_dominant_extrusion_candidates(
         &signatures,
     ))
+}
+
+/// Detect every sharp extrusion core implied by translated planar cap pairs.
+///
+/// Candidates are diagnostic until every residual source face is explained by
+/// separately proven constructive operations.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn detect_extrusion_core_candidates_bytes(
+    input: &[u8],
+) -> Result<Vec<solid_extrusions::RecoveredSolidExtrusion>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| solid_extrusions::detect_extrusion_core_candidates(&section.entities))
+        .collect())
+}
+
+/// Recover the sharp extrusion core implied by one source solid and explicit cap pair.
+///
+/// This proves cap-loop translation directly and deliberately makes no claim about
+/// the source side faces. Callers must separately reconstruct every side treatment
+/// before treating the source body as recovered.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn recover_extrusion_core_from_cap_faces_bytes(
+    input: &[u8],
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+) -> Result<Option<solid_extrusions::RecoveredSolidExtrusion>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+    Ok(exchange.data.iter().find_map(|section| {
+        solid_extrusions::recover_extrusion_core_from_cap_faces(
+            solid_id,
+            cap_face_ids,
+            &section.entities,
+        )
+    }))
+}
+
+/// Recover a sharp extrusion host after analytically undoing unique planar
+/// chamfers that trim an explicit source cap pair.
+///
+/// The result remains diagnostic until every treatment is replayed and the
+/// rebuilt whole-solid boundary is proven equivalent to the source.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn recover_treatment_healed_extrusion_core_from_cap_faces_bytes(
+    input: &[u8],
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+) -> Result<Option<solid_extrusions::TreatmentHealedExtrusionCoreCandidate>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+    Ok(exchange.data.iter().find_map(|section| {
+        solid_extrusions::recover_treatment_healed_extrusion_core_from_cap_faces(
+            solid_id,
+            cap_face_ids,
+            &section.entities,
+        )
+    }))
+}
+
+/// Detect analytically proven edge-treatment evidence without granting recovery.
+///
+/// The diagnostic currently proves plane/plane cylindrical fillets and planar
+/// chamfers, plus axisymmetric toroidal fillets and conical chamfers whose
+/// pre-treatment carrier intersection is analytically determined.
+///
+/// # Errors
+/// Returns an error if the STEP bytes cannot be decoded or parsed, or if unsupported exchange sections are present.
+pub fn detect_edge_treatment_evidence_bytes(
+    input: &[u8],
+) -> Result<Vec<edge_treatments::EdgeTreatmentEvidence>> {
+    let exchange = ParsedExchange::parse(input)?.exchange;
+    Ok(exchange
+        .data
+        .iter()
+        .flat_map(|section| edge_treatments::detect_edge_treatment_evidence(&section.entities))
+        .collect())
 }
 
 /// Detect closed round-profile composite sweeps such as bent wire frames.
