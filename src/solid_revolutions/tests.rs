@@ -881,7 +881,7 @@ fn orders_mixed_line_arc_profile_and_rejects_line_arc_crossing() -> anyhow::Resu
 
 #[test]
 fn orders_two_arc_profile_and_rejects_arc_crossings() -> anyhow::Result<()> {
-    let profile = vec![
+    let profile = [
         RecoveredProfileCurve::Line {
             source_edge_ids: Vec::new(),
             start_mm: [0.0, 0.0],
