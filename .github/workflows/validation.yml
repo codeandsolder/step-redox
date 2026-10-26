@@ -65,10 +65,10 @@ jobs:
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
     with:
       command: |
-        cargo +1.99.0 test --lib --release --locked
-        cargo +1.99.0 test --lib --release --locked --features cad-kernel-monstertruck
-        cargo +1.99.0 build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize --bin step-revolution-scan --bin step-support-scan
-      rust-toolchain: "1.99.0"
+        cargo +1.99.1 test --lib --release --locked
+        cargo +1.99.1 test --lib --release --locked --features cad-kernel-monstertruck
+        cargo +1.99.1 build --release --locked --bin step-redox --bin step-count-resize --bin step-chain-resize --bin step-revolution-scan --bin step-support-scan
+      rust-toolchain: "1.99.1"
       rustflags: "-C target-cpu=x86-64-v2"
 
   validate:
@@ -87,7 +87,7 @@ jobs:
           cache: pip
           cache-dependency-path: validation/requirements.txt
 
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy,rustfmt
 
@@ -103,18 +103,14 @@ jobs:
         run: cargo test --lib --release --locked
 
       - name: Validate Monstertruck CAD backend
-        run: |
-          cargo test --lib --release --locked --features cad-kernel-monstertruck
-          cargo clippy --lib --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
-          cargo clippy --bin step-revolution-scan --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
-          cargo clippy --bin step-support-scan --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+        run: cargo test --lib --release --locked --features cad-kernel-monstertruck
 
       - name: Validate Monstertruck tooling
         run: |
           cargo clippy --manifest-path tools/step-viewer/Cargo.toml -- -D warnings
           (
             cd experiments/kcl-monstertruck-spike
-            cargo run --quiet
+            cargo run --quiet --features kcl-conformance
             shell_id="$(sed -nE 's/^#([0-9]+)[[:space:]]*=[[:space:]]*CLOSED_SHELL.*/\1/p' box.step | head -n1)"
             test -n "$shell_id"
             cargo run --quiet --manifest-path ../../tools/step-viewer/Cargo.toml -- \
@@ -149,6 +145,12 @@ jobs:
             --cache .cache/step-redox-validation \
             --out validation/out/semantic-probes \
             --step-redox target/release/step-redox
+
+      - name: Validate Monstertruck Clippy
+        run: |
+          cargo clippy --lib --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+          cargo clippy --bin step-revolution-scan --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+          cargo clippy --bin step-support-scan --locked --features cad-kernel-monstertruck -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
 
       - name: Publish summary
         if: always()
