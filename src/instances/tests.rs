@@ -33,7 +33,7 @@ fn auxiliary_shape_representations_are_retargeted_conservatively() {
         },
     ];
     let replacements = HashMap::from([(10, 30)]);
-    retarget_shape_representation_items(&mut entities, &replacements);
+    retarget_shape_representation_items(&mut entities, &replacements, &HashSet::new());
 
     assert_eq!(
         representation_items_and_context(&entities[0]),
@@ -42,6 +42,27 @@ fn auxiliary_shape_representations_are_retargeted_conservatively() {
     assert_eq!(
         representation_items_and_context(&entities[1]),
         Some((vec![10], 20))
+    );
+}
+
+#[test]
+fn representation_map_source_is_not_retargeted_into_itself() {
+    let mut entities = vec![EntityInstance::Simple {
+        id: 1,
+        record: Record {
+            name: "ADVANCED_BREP_SHAPE_REPRESENTATION".to_string(),
+            parameter: Parameter::List(vec![
+                Parameter::String("step-redox instance source".to_string()),
+                Parameter::List(vec![entity_ref(10), entity_ref(20)]),
+                entity_ref(30),
+            ]),
+        },
+    }];
+    let replacements = HashMap::from([(10, 40)]);
+    retarget_shape_representation_items(&mut entities, &replacements, &HashSet::from([1]));
+    assert_eq!(
+        representation_items_and_context(&entities[0]),
+        Some((vec![10, 20], 30))
     );
 }
 

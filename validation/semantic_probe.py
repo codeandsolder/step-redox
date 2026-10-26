@@ -62,10 +62,20 @@ def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) 
             )
         if len(pattern["basis"]) != 1 or len(pattern["pitch"]) != 1:
             raise AssertionError(f"{name}: pattern {index} has inconsistent 1-D lattice metadata")
-        step = [pattern["basis"][0][axis] * pattern["pitch"][0] for axis in range(3)]
+        # `basis[0]` is the physical lattice step vector; `pitch[0]` is its
+        # scalar norm. Multiplying them would square the step length. Validate
+        # both representations independently so this probe also catches stale
+        # or internally inconsistent metadata.
+        step = pattern["basis"][0]
         if any(not close(a, b, 1e-12) for a, b in zip(step, expected_step)):
             raise AssertionError(
                 f"{name}: pattern {index} step {step} != canonical {expected_step}"
+            )
+        pitch = pattern["pitch"][0]
+        step_norm = math.sqrt(sum(component * component for component in step))
+        if not close(pitch, step_norm, 1e-12):
+            raise AssertionError(
+                f"{name}: pattern {index} pitch {pitch} != basis norm {step_norm}"
             )
         residual = pattern["max_residual_mm"]
         if not math.isfinite(residual) or residual > max_residual:
@@ -85,7 +95,9 @@ def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) 
     }
 
 
-def validate_periodic_cad_fragment(name: str, fragments: list[dict], expected: dict) -> dict:
+def validate_periodic_cad_fragment(
+    name: str, fragments: list[dict], expected: dict, detected_chain: dict
+) -> dict:
     candidates = [
         fragment for fragment in fragments
         if fragment.get("source", {}).get("kind") == "periodic_chain"
@@ -113,11 +125,11 @@ def validate_periodic_cad_fragment(name: str, fragments: list[dict], expected: d
             node["interior_site_face_count"] == expected["interior_site_face_count"],
         "interior_gap_face_count":
             node["interior_gap_face_count"] == expected["interior_gap_face_count"],
-        "stretch_face_count": node["stretch_face_count"] == expected["stretch_faces"],
+        "stretch_face_count": node["stretch_face_count"] == detected_chain["stretch_faces"],
         "fixed_negative_face_count":
-            node["fixed_negative_face_count"] == expected["fixed_negative_faces"],
+            node["fixed_negative_face_count"] == detected_chain["fixed_negative_faces"],
         "fixed_positive_face_count":
-            node["fixed_positive_face_count"] == expected["fixed_positive_faces"],
+            node["fixed_positive_face_count"] == detected_chain["fixed_positive_faces"],
     }
     failed = [key for key, ok in checks.items() if not ok]
     if failed:
@@ -204,8 +216,6 @@ def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
         "interior_site_face_count": chain["interior_site_face_count"] == expected["interior_site_face_count"],
         "interior_gap_face_count": chain["interior_gap_face_count"] == expected["interior_gap_face_count"],
         "stretch_faces": len(chain["stretch_face_ids"]) == expected["stretch_faces"],
-        "fixed_negative_faces": len(chain["fixed_negative_face_ids"]) == expected["fixed_negative_faces"],
-        "fixed_positive_faces": len(chain["fixed_positive_face_ids"]) == expected["fixed_positive_faces"],
     }
     failed = [key for key, ok in checks.items() if not ok]
     if failed:
@@ -265,7 +275,7 @@ def main():
             result = validate_chain(name, chains, chain_expected)
             fragments = json.loads(prefix.with_suffix(".cad-fragments.json").read_text())
             result["cad_ir"] = validate_periodic_cad_fragment(
-                name, fragments, chain_expected
+                name, fragments, chain_expected, result
             )
             chain_results.append(result)
             print(
@@ -307,13 +317,21 @@ def main():
             json.dumps(chain_results, indent=2) + "\n"
         )
 
-        # Family-level cross-check: the independently published siblings should all
-        # recover the same pitch and per-added-site topology law.
+        # Family-level cross-check: independently published count variants should
+        # recover the same pitch, per-added-site topology law, and count-independent
+        # terminal grammar. Absolute fixed-face counts are deliberately not frozen:
+        # equivalent detector partitions may move end-local faces between site and
+        # fixed sets without changing the editable periodic grammar.
         pitches = {round(r["pitch_mm"], 9) for r in chain_results}
         slopes = {r["faces_per_added_site"] for r in chain_results}
-        if len(pitches) != 1 or len(slopes) != 1:
+        terminals = {
+            (r["fixed_negative_faces"], r["fixed_positive_faces"], r["stretch_faces"])
+            for r in chain_results
+        }
+        if len(pitches) != 1 or len(slopes) != 1 or len(terminals) != 1:
             raise AssertionError(
-                f"periodic family is inconsistent across fixtures: pitches={pitches}, slopes={slopes}"
+                "periodic family is inconsistent across fixtures: "
+                f"pitches={pitches}, slopes={slopes}, terminals={terminals}"
             )
 
     if cad_results:

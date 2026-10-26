@@ -278,6 +278,12 @@ fn choose_partition(
     let mut best: Option<Partition> = None;
     for (observation_score, centers) in windows {
         let mut partition = classify_faces(geoms, &centers, axis, pitch, candidate)?;
+        // Exact overlay rows are part of the proven periodic partition, so they
+        // must participate in window scoring. Ranking the sparse base partition
+        // first can select a different lattice phase and only then promote the
+        // winner, making an equivalent edited chain rediscover with a different
+        // site/gap grammar.
+        promote_periodic_overlays(geoms, candidate, &mut partition);
         partition.score = partition_score(geoms, &partition, axis, observation_score);
         if best
             .as_ref()
@@ -285,9 +291,6 @@ fn choose_partition(
         {
             best = Some(partition);
         }
-    }
-    if let Some(partition) = best.as_mut() {
-        promote_periodic_overlays(geoms, candidate, partition);
     }
     best
 }
@@ -343,23 +346,37 @@ fn promote_periodic_overlays(
         row.sort_unstable_by_key(|entry| entry.0);
         row.dedup_by_key(|entry| entry.0);
 
-        let mut start = 0usize;
-        while start < row.len() {
-            let mut end = start + 1;
-            while end < row.len() && row[end].0 - row[end - 1].0 == candidate.pitch_ticks {
-                end += 1;
-            }
-            let run = &row[start..end];
-            if run.len() >= min_run
-                && run.len() <= sites
-                && let Some(site_start) =
-                    overlay_site_alignment(run, &center_ticks, sites, candidate.pitch_ticks)
-            {
-                for (index, &(_, face)) in run.iter().enumerate() {
-                    promote.push((face, site_start + index));
+        // Identical translated faces can occupy several distinct offsets inside
+        // each lattice cell. Sorting the combined row interleaves those phases,
+        // so adjacent entries are not one pitch apart even though each phase is
+        // an exact pitch-spaced run. Prove each phase independently.
+        let mut phases = BTreeMap::<i64, Vec<(i64, u64)>>::new();
+        for &entry in row.iter() {
+            phases
+                .entry(entry.0.rem_euclid(candidate.pitch_ticks))
+                .or_default()
+                .push(entry);
+        }
+        for phase in phases.values() {
+            let mut start = 0usize;
+            while start < phase.len() {
+                let mut end = start + 1;
+                while end < phase.len() && phase[end].0 - phase[end - 1].0 == candidate.pitch_ticks
+                {
+                    end += 1;
                 }
+                let run = &phase[start..end];
+                if run.len() >= min_run
+                    && run.len() <= sites
+                    && let Some(site_start) =
+                        overlay_site_alignment(run, &center_ticks, sites, candidate.pitch_ticks)
+                {
+                    for (index, &(_, face)) in run.iter().enumerate() {
+                        promote.push((face, site_start + index));
+                    }
+                }
+                start = end;
             }
-            start = end;
         }
     }
 
@@ -1130,6 +1147,48 @@ mod tests {
         assert_eq!(
             partition.sites.iter().map(Vec::len).collect::<Vec<_>>(),
             [1, 1, 1, 1, 0, 0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn promotes_interleaved_exact_overlay_phases() -> anyhow::Result<()> {
+        let pitch = 2.54;
+        let centers = (0_i32..6).map(|i| f64::from(i) * pitch).collect::<Vec<_>>();
+        let mut geoms = HashMap::new();
+        let mut fixed = HashSet::new();
+        let mut id = 1_u64;
+        for &offset in &[0.4, 1.0] {
+            for &center in centers.iter().take(4) {
+                geoms.insert(id, test_face(id, [center + offset, 3.81, 8.5]));
+                fixed.insert(id);
+                id += 1;
+            }
+        }
+        let candidate = LatticeCandidate {
+            axis_index: 0,
+            pitch_ticks: quantize_mm(pitch),
+            sites: centers.len(),
+            votes: MIN_LATTICE_FAMILY_VOTES,
+            site_family_rows: Vec::new(),
+        };
+        let mut partition = Partition {
+            centers,
+            site_of: HashMap::new(),
+            sites: vec![Vec::new(); 6],
+            gap_of: HashMap::new(),
+            gaps: vec![Vec::new(); 5],
+            stretch: HashSet::new(),
+            fixed,
+            score: [0; 8],
+        };
+
+        promote_periodic_overlays(&geoms, &candidate, &mut partition);
+
+        assert!(partition.fixed.is_empty());
+        assert_eq!(
+            partition.sites.iter().map(Vec::len).collect::<Vec<_>>(),
+            [2, 2, 2, 2, 0, 0]
         );
         Ok(())
     }
