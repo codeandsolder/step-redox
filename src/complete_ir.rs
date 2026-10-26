@@ -572,7 +572,7 @@ fn relative_quarter_translation(
 }
 
 fn recover_boundary_feature_pass(
-    working: &mut Vec<EntityInstance>,
+    working: &mut [EntityInstance],
     target_shells: &HashMap<u64, u64>,
     recovered: &mut BTreeMap<u64, Vec<RecoveredBoundaryFeatureFamily>>,
     pass_index: usize,
@@ -589,7 +589,7 @@ fn recover_boundary_feature_pass(
         return Ok(false);
     }
 
-    let mut tool_entities = working.clone();
+    let mut tool_entities = working.to_vec();
     let (tool_report, materialized) =
         crate::planar_features::materialize_boundary_feature_tools_for_analysis_for_shells(
             &mut tool_entities,

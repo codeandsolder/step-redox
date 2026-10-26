@@ -175,10 +175,10 @@ pub(crate) fn recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
     index: &HashMap<u64, usize>,
     allowed_treatment_face_ids: Option<&HashSet<u64>>,
 ) -> Option<TreatmentHealedExtrusionCoreCandidate> {
-    let face_ids = brep::solid_face_ids(solid_id, entities, &index)?;
+    let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
     let mut faces = vec![
-        face_info(cap_face_ids[0], entities, &index)?,
-        face_info(cap_face_ids[1], entities, &index)?,
+        face_info(cap_face_ids[0], entities, index)?,
+        face_info(cap_face_ids[1], entities, index)?,
     ];
     let mut unreadable_planes = Vec::<PlaneSupport>::new();
     for face_id in face_ids
@@ -186,12 +186,12 @@ pub(crate) fn recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
         .copied()
         .filter(|face_id| !cap_face_ids.contains(face_id))
     {
-        if let Some(face) = face_info(face_id, entities, &index) {
+        if let Some(face) = face_info(face_id, entities, index) {
             faces.push(face);
             continue;
         }
-        let surface_id = brep::face_surface(face_id, entities, &index)?;
-        if let SurfaceSupport::Plane(plane) = brep::surface_support(surface_id, entities, &index) {
+        let surface_id = brep::face_surface(face_id, entities, index)?;
+        if let SurfaceSupport::Plane(plane) = brep::surface_support(surface_id, entities, index) {
             unreadable_planes.push(plane);
         }
     }

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Find the first random-corpus body that lacks the canonical body identity."""
 
 from __future__ import annotations
@@ -7,8 +8,10 @@ import argparse
 import concurrent.futures
 import csv
 import json
+import operator
 import subprocess
 from pathlib import Path
+from typing import Any
 
 
 def args() -> argparse.Namespace:
@@ -21,7 +24,9 @@ def args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def scan(tool: Path, item: tuple[int, dict[str, str]]) -> tuple[int, dict | None]:
+def scan(
+    tool: Path, item: tuple[int, dict[str, str]]
+) -> tuple[int, dict[str, Any] | None]:
     index, row = item
     proc = subprocess.run(
         [str(tool), "scan", row["path"]],
@@ -73,7 +78,7 @@ def main() -> int:
             results = list(pool.map(lambda item: scan(cfg.body_tool, item), batch))
         failures = [failure for _, failure in results if failure is not None]
         if failures:
-            print(json.dumps(min(failures, key=lambda failure: failure["index"]), indent=2))
+            print(json.dumps(min(failures, key=operator.itemgetter("index")), indent=2))
             return 1
         print(f"canonical through model {start + len(batch) - 1}", flush=True)
 

@@ -117,7 +117,7 @@ pub(crate) fn solid_identity(
     })
 }
 
-pub(crate) fn relative_z90_quarter(
+pub fn relative_z90_quarter(
     source: &SolidIdentity,
     target: &SolidIdentity,
     entities: &[EntityInstance],

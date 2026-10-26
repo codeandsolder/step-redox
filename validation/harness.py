@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
+# ruff: file-ignore[missing-type-function-argument, missing-return-type-undocumented-public-function]
+# Dynamic CAD/prototype boundary: ty still checks soundness; exhaustive annotations would be mostly opaque external types.
 from __future__ import annotations
 
 import argparse
 import gzip
 import hashlib
 import json
-import math
+import operator
 import os
-from pathlib import Path
 import shutil
 import struct
 import subprocess
 import zipfile
+from pathlib import Path
+from typing import Any, Never
 from urllib.request import Request, urlopen
 
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw
-
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.BRepGProp import BRepGProp
-from OCP.GProp import GProp_GProps
-from OCP.Bnd import Bnd_Box
-from OCP.BRepBndLib import BRepBndLib
-from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX, TopAbs_SOLID, TopAbs_SHELL
-from OCP.TopExp import TopExp_Explorer
-from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRep import BRep_Tool
-from OCP.TopLoc import TopLoc_Location
+from OCP.Bnd import Bnd_Box  # ty: ignore[unresolved-import]
+from OCP.BRep import BRep_Tool  # ty: ignore[unresolved-import]
+from OCP.BRepBndLib import BRepBndLib  # ty: ignore[unresolved-import]
+from OCP.BRepCheck import BRepCheck_Analyzer  # ty: ignore[unresolved-import]
+from OCP.BRepGProp import BRepGProp  # ty: ignore[unresolved-import]
+from OCP.BRepMesh import BRepMesh_IncrementalMesh  # ty: ignore[unresolved-import]
+from OCP.GProp import GProp_GProps  # ty: ignore[unresolved-import]
+from OCP.IFSelect import IFSelect_RetDone  # ty: ignore[unresolved-import]
+from OCP.STEPControl import STEPControl_Reader  # ty: ignore[unresolved-import]
+from OCP.TopAbs import (
+    TopAbs_EDGE,  # ty: ignore[unresolved-import]
+    TopAbs_FACE,  # ty: ignore[unresolved-import]
+    TopAbs_SHELL,  # ty: ignore[unresolved-import]
+    TopAbs_SOLID,  # ty: ignore[unresolved-import]
+    TopAbs_VERTEX,  # ty: ignore[unresolved-import]
+)
+from OCP.TopExp import TopExp_Explorer  # ty: ignore[unresolved-import]
+from OCP.TopLoc import TopLoc_Location  # ty: ignore[unresolved-import]
 from OCP.TopoDS import TopoDS
+from PIL import Image, ImageChops, ImageDraw
 
 VIEWS = {
     "px": (1, 0, 0),
@@ -54,6 +62,21 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _download_verified_once(url: str, tmp: Path, expected: str, label: str) -> None:
+    req = Request(
+        url,
+        headers={"User-Agent": "step-redox-validation/0.1"},
+    )
+    with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
+        shutil.copyfileobj(response, out, length=1024 * 1024)
+    if expected:
+        got = sha256_file(tmp)
+        if got != expected:
+            raise RuntimeError(
+                f"{label} SHA-256 mismatch from {url}: expected {expected}, got {got}"
+            )
+
+
 def download_verified(
     name: str,
     urls: list[str],
@@ -65,30 +88,17 @@ def download_verified(
     for url in urls:
         tmp.unlink(missing_ok=True)
         try:
-            req = Request(
-                url,
-                headers={"User-Agent": "step-redox-validation/0.1"},
-            )
-            with urlopen(req, timeout=120) as response, tmp.open("wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 1024)
-            if expected:
-                got = sha256_file(tmp)
-                if got != expected:
-                    raise RuntimeError(
-                        f"{label} SHA-256 mismatch from {url}: "
-                        f"expected {expected}, got {got}"
-                    )
+            _download_verified_once(url, tmp, expected, label)
             return
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
     tmp.unlink(missing_ok=True)
     raise RuntimeError(
-        f"fixture {name}: all {label} download URLs failed: "
-        + " | ".join(errors)
+        f"fixture {name}: all {label} download URLs failed: " + " | ".join(errors)
     )
 
 
-def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
+def fetch_fixture(name: str, spec: dict[str, Any], cache: Path) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     filename = spec.get("filename") or f"{name}.step"
     path = cache / filename
@@ -154,9 +164,12 @@ def fetch_fixture(name: str, spec: dict, cache: Path) -> Path:
         member = spec["member"]
         tmp = path.with_suffix(path.suffix + ".part")
         tmp.unlink(missing_ok=True)
-        with zipfile.ZipFile(archive_path) as zf:
-            with zf.open(member) as src, tmp.open("wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
+        with (
+            zipfile.ZipFile(archive_path) as zf,
+            zf.open(member) as src,
+            tmp.open("wb") as dst,
+        ):
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
         got = sha256_file(tmp)
         if got != expected:
             tmp.unlink(missing_ok=True)
@@ -213,8 +226,12 @@ def bbox_values(box: Bnd_Box):
         lo = box.CornerMin()
         hi = box.CornerMax()
         return [
-            float(lo.X()), float(lo.Y()), float(lo.Z()),
-            float(hi.X()), float(hi.Y()), float(hi.Z()),
+            float(lo.X()),
+            float(lo.Y()),
+            float(lo.Z()),
+            float(hi.X()),
+            float(hi.Y()),
+            float(hi.Z()),
         ]
     if hasattr(box, "Get"):
         values = box.Get()
@@ -222,11 +239,12 @@ def bbox_values(box: Bnd_Box):
             return [float(value) for value in values[:6]]
     raise RuntimeError("unsupported OCP Bnd_Box binding")
 
+
 def solid_inventory(shape):
     solids = []
     ex = TopExp_Explorer(shape, TopAbs_SOLID)
     while ex.More():
-        solid = TopoDS.Solid(ex.Current())
+        solid = TopoDS.Solid(ex.Current())  # ty: ignore[unresolved-attribute]
         volume = GProp_GProps()
         BRepGProp.VolumeProperties_s(solid, volume)
         surface = GProp_GProps()
@@ -234,15 +252,17 @@ def solid_inventory(shape):
         box = Bnd_Box()
         BRepBndLib.Add_s(solid, box, True)
         bbox = bbox_values(box)
-        solids.append({
-            "volume": float(volume.Mass()),
-            "area": float(surface.Mass()),
-            "bbox_center": [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)],
-            "bbox_extent": [bbox[i + 3] - bbox[i] for i in range(3)],
-            "faces": count(solid, TopAbs_FACE),
-            "edges": count(solid, TopAbs_EDGE),
-            "vertices": count(solid, TopAbs_VERTEX),
-        })
+        solids.append(
+            {
+                "volume": float(volume.Mass()),
+                "area": float(surface.Mass()),
+                "bbox_center": [(bbox[i] + bbox[i + 3]) * 0.5 for i in range(3)],
+                "bbox_extent": [bbox[i + 3] - bbox[i] for i in range(3)],
+                "faces": count(solid, TopAbs_FACE),
+                "edges": count(solid, TopAbs_EDGE),
+                "vertices": count(solid, TopAbs_VERTEX),
+            }
+        )
         ex.Next()
     return solids
 
@@ -292,7 +312,7 @@ def tessellate(shape, linear=0.03, angular=0.3) -> np.ndarray:
     faces = TopExp_Explorer(shape, TopAbs_FACE)
     tris = []
     while faces.More():
-        face = TopoDS.Face(faces.Current())
+        face = TopoDS.Face(faces.Current())  # ty: ignore[unresolved-attribute]
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is not None:
@@ -313,7 +333,7 @@ def strict_mesh_hash(tris: np.ndarray, quantum_mm=1e-9) -> str:
     scale = 1.0 / quantum_mm
     packed = []
     for tri in tris:
-        pts = sorted(tuple(int(round(float(x) * scale)) for x in p) for p in tri)
+        pts = sorted(tuple(round(float(x) * scale) for x in p) for p in tri)
         packed.append(tuple(pts))
     packed.sort()
     h = hashlib.sha256()
@@ -351,8 +371,10 @@ def projection_frame(ref_tris: np.ndarray, direction, margin=0.06):
     width = max(xmax - xmin, 1e-9)
     height = max(ymax - ymin, 1e-9)
     return (u, v, d), (
-        xmin - width * margin, xmax + width * margin,
-        ymin - height * margin, ymax + height * margin,
+        xmin - width * margin,
+        xmax + width * margin,
+        ymin - height * margin,
+        ymax + height * margin,
     )
 
 
@@ -376,19 +398,19 @@ def render_triangles(tris: np.ndarray, frame, size=320, supersample=2):
     for i in order:
         coords = [
             (
-                int(round((float(px[i, j]) - xmin) * sx)),
-                int(round((ymax - float(py[i, j])) * sy)),
+                round((float(px[i, j]) - xmin) * sx),
+                round((ymax - float(py[i, j])) * sy),
             )
             for j in range(3)
         ]
-        value = int(round(235 - 190 * float(shade[i])))
+        value = round(235 - 190 * float(shade[i]))
         draw.polygon(coords, fill=value)
     if supersample != 1:
         image = image.resize((size, size), Image.Resampling.LANCZOS)
     return image
 
 
-def align_translation(ref: dict, cand: dict, mode: str):
+def align_translation(ref: dict[str, Any], cand: dict[str, Any], mode: str):
     if mode == "identity":
         return np.zeros(3, dtype=np.float64)
     if mode == "bbox_center":
@@ -417,14 +439,16 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         return checks
 
     if len(ref_solids) != len(cand_solids):
-        checks.append({
-            "name": "solid_inventory_count",
-            "value": len(cand_solids) - len(ref_solids),
-            "reference": len(ref_solids),
-            "candidate": len(cand_solids),
-            "limit": 0,
-            "pass": False,
-        })
+        checks.append(
+            {
+                "name": "solid_inventory_count",
+                "value": len(cand_solids) - len(ref_solids),
+                "reference": len(ref_solids),
+                "candidate": len(cand_solids),
+                "limit": 0,
+                "pass": False,
+            }
+        )
         return checks
 
     unmatched = set(range(len(cand_solids)))
@@ -459,9 +483,13 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
             ref_center = np.asarray(ref["bbox_center"])
             cand_center = np.asarray(cand["bbox_center"]) + shift
             center_delta = float(np.linalg.norm(ref_center - cand_center))
-            extent_delta = float(np.max(np.abs(
-                np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
-            )))
+            extent_delta = float(
+                np.max(
+                    np.abs(
+                        np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
+                    )
+                )
+            )
             volume_delta = rel_error(ref["volume"], cand["volume"])
             area_delta = rel_error(ref["area"], cand["area"])
             # Prefer topology identity overwhelmingly, then local position and
@@ -473,21 +501,29 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
                 + volume_delta * 1.0e4
                 + area_delta * 1.0e4
             )
-            candidates.append((
-                score,
-                cand_index,
-                topology_same,
-                center_delta,
-                extent_delta,
-                volume_delta,
-                area_delta,
-            ))
+            candidates.append(
+                (
+                    score,
+                    cand_index,
+                    topology_same,
+                    center_delta,
+                    extent_delta,
+                    volume_delta,
+                    area_delta,
+                )
+            )
 
         if not candidates:
             raise RuntimeError("solid inventory matcher exhausted candidates")
-        _, cand_index, topology_same, center_delta, extent_delta, volume_delta, area_delta = min(
-            candidates, key=lambda row: (row[0], row[1])
-        )
+        (
+            _,
+            cand_index,
+            topology_same,
+            center_delta,
+            extent_delta,
+            volume_delta,
+            area_delta,
+        ) = min(candidates, key=operator.itemgetter(0, 1))
         unmatched.remove(cand_index)
         topology_mismatches += 0 if topology_same else 1
         worst_center = max(worst_center, center_delta)
@@ -496,12 +532,14 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         worst_area = max(worst_area, area_delta)
 
     if thresholds.get("solid_topology_exact", False):
-        checks.append({
-            "name": "solid_topology_mismatches",
-            "value": topology_mismatches,
-            "limit": 0,
-            "pass": topology_mismatches == 0,
-        })
+        checks.append(
+            {
+                "name": "solid_topology_mismatches",
+                "value": topology_mismatches,
+                "limit": 0,
+                "pass": topology_mismatches == 0,
+            }
+        )
 
     for name, value, unit in [
         ("solid_center_abs_mm", worst_center, "mm"),
@@ -510,38 +548,52 @@ def compare_solid_inventory(ref_solids, cand_solids, shift, thresholds):
         ("solid_area_rel", worst_area, ""),
     ]:
         if name in thresholds:
-            checks.append({
-                "name": name,
-                "value": value,
-                "limit": thresholds[name],
-                "unit": unit,
-                "pass": value <= thresholds[name],
-            })
+            checks.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "limit": thresholds[name],
+                    "unit": unit,
+                    "pass": value <= thresholds[name],
+                }
+            )
     return checks
 
 
-def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
+def compare_reports(
+    ref: dict[str, Any],
+    cand: dict[str, Any],
+    alignment: str,
+    thresholds: dict[str, Any],
+):
     shift = align_translation(ref, cand, alignment)
     checks = []
 
-    def add(name, value, limit, unit=""):
-        checks.append({
-            "name": name, "value": value, "limit": limit, "unit": unit,
-            "pass": value <= limit,
-        })
+    def add(name, value, limit, unit="") -> None:
+        checks.append(
+            {
+                "name": name,
+                "value": value,
+                "limit": limit,
+                "unit": unit,
+                "pass": value <= limit,
+            }
+        )
 
     add("brep_valid", 0 if cand["brep_valid"] else 1, 0)
 
-    if thresholds.get("topology_exact", False):
-        for key in ["solids", "shells", "faces", "edges", "vertices"]:
-            checks.append({
+    if thresholds.get("topology_exact"):
+        checks.extend(
+            {
                 "name": f"{key}_exact",
                 "value": cand[key] - ref[key],
                 "reference": ref[key],
                 "candidate": cand[key],
                 "limit": 0,
                 "pass": cand[key] == ref[key],
-            })
+            }
+            for key in ["solids", "shells", "faces", "edges", "vertices"]
+        )
 
     for metric, config_key in [
         ("volume", "volume_rel"),
@@ -551,12 +603,14 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         ("solid_area_sum", "solid_area_sum_rel"),
     ]:
         if config_key in thresholds:
-            add(config_key, rel_error(ref[metric], cand[metric]), thresholds[config_key])
+            add(
+                config_key, rel_error(ref[metric], cand[metric]), thresholds[config_key]
+            )
 
     if "bbox_extent_abs_mm" in thresholds:
-        delta = np.max(np.abs(
-            np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"])
-        ))
+        delta = np.max(
+            np.abs(np.asarray(ref["bbox_extent"]) - np.asarray(cand["bbox_extent"]))
+        )
         add("bbox_extent_abs_mm", float(delta), thresholds["bbox_extent_abs_mm"], "mm")
 
     if "center_abs_mm" in thresholds:
@@ -573,19 +627,27 @@ def compare_reports(ref: dict, cand: dict, alignment: str, thresholds: dict):
         a = np.asarray(ref["inertia"])
         b = np.asarray(cand["inertia"])
         denom = max(float(np.linalg.norm(a)), float(np.linalg.norm(b)), 1e-30)
-        add("inertia_rel", float(np.linalg.norm(a - b) / denom), thresholds["inertia_rel"])
+        add(
+            "inertia_rel",
+            float(np.linalg.norm(a - b) / denom),
+            thresholds["inertia_rel"],
+        )
 
-    checks.extend(compare_solid_inventory(
-        ref.get("solid_inventory", []),
-        cand.get("solid_inventory", []),
-        shift,
-        thresholds,
-    ))
+    checks.extend(
+        compare_solid_inventory(
+            ref.get("solid_inventory", []),
+            cand.get("solid_inventory", []),
+            shift,
+            thresholds,
+        )
+    )
 
     return shift, checks
 
 
-def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: dict, views):
+def render_compare(
+    ref_shape, cand_shape, shift, render_dir: Path, thresholds: dict[str, Any], views
+):
     render_dir.mkdir(parents=True, exist_ok=True)
     ref_tris = tessellate(ref_shape)
     cand_tris = tessellate(cand_shape) + np.asarray(shift)[None, None, :]
@@ -628,13 +690,15 @@ def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: d
     if contact_images:
         thumb = 220
         label_h = 24
-        sheet = Image.new("L", (thumb * 3, (thumb + label_h) * len(contact_images)), 255)
+        sheet = Image.new(
+            "L", (thumb * 3, (thumb + label_h) * len(contact_images)), 255
+        )
         draw = ImageDraw.Draw(sheet)
         for row, (view_name, ref_img, cand_img, diff_img) in enumerate(contact_images):
             y = row * (thumb + label_h)
             draw.text((6, y + 5), view_name, fill=0)
-            for col, image in enumerate((ref_img, cand_img, diff_img)):
-                image = image.copy()
+            for col, source_image in enumerate((ref_img, cand_img, diff_img)):
+                image = source_image.copy()
                 image.thumbnail((thumb, thumb), Image.Resampling.LANCZOS)
                 x = col * thumb + (thumb - image.width) // 2
                 yy = y + label_h + (thumb - image.height) // 2
@@ -643,30 +707,33 @@ def render_compare(ref_shape, cand_shape, shift, render_dir: Path, thresholds: d
     return results
 
 
-def write_summary(results, path: Path):
+def write_summary(results, path: Path) -> None:
     lines = ["# STEP validation", ""]
-    lines.append(f"**{sum(r['pass'] for r in results)}/{len(results)} cases passed.**")
-    lines.append("")
+    lines.extend(
+        (f"**{sum(r['pass'] for r in results)}/{len(results)} cases passed.**", "")
+    )
     for result in results:
-        lines.extend([
-            f"## {'PASS' if result['pass'] else 'FAIL'}: {result['name']}",
-            "",
-            "|" + " Check | Value | Limit | Result |",
-            "|---|---:|---:|:---:|",
-        ])
-        for check in result.get("checks", []):
-            lines.append(
-                f"| {check['name']} | {check.get('value','')} | "
-                f"{check.get('limit','')} | {'PASS' if check['pass'] else 'FAIL'} |"
-            )
-        for view in result.get("renders", []):
-            lines.append(
-                f"| render:{view['view']}:mean | {view['mean_abs']:.6g} | "
-                f"{result['thresholds'].get('render_mean_abs','')} | "
-                f"{'PASS' if view['pass'] else 'FAIL'} |"
-            )
+        lines.extend(
+            [
+                f"## {'PASS' if result['pass'] else 'FAIL'}: {result['name']}",
+                "",
+                "|" + " Check | Value | Limit | Result |",
+                "|---|---:|---:|:---:|",
+            ]
+        )
+        lines.extend(
+            f"| {check['name']} | {check.get('value', '')} | "
+            f"{check.get('limit', '')} | {'PASS' if check['pass'] else 'FAIL'} |"
+            for check in result.get("checks", [])
+        )
+        lines.extend(
+            f"| render:{view['view']}:mean | {view['mean_abs']:.6g} | "
+            f"{result['thresholds'].get('render_mean_abs', '')} | "
+            f"{'PASS' if view['pass'] else 'FAIL'} |"
+            for view in result.get("renders", [])
+        )
         lines.append("")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def run_manifest(
@@ -676,10 +743,11 @@ def run_manifest(
     step_redox: Path,
     step_count_resize: Path | None = None,
     step_chain_resize: Path | None = None,
-):
-    manifest = json.loads(manifest_path.read_text())
+) -> int:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     cases = [
-        case for case in manifest.get("cases", [])
+        case
+        for case in manifest.get("cases", [])
         if case.get("enabled", True) is not False
     ]
     needed_fixtures = {
@@ -711,16 +779,22 @@ def run_manifest(
             "reference": str(reference_path),
             "output": str(output_path),
         }
-        if any("{step_count_resize}" in part for part in case["command"]) and not step_count_resize:
+        if (
+            any(f"{step_count_resize}" in part for part in case["command"])
+            and not step_count_resize
+        ):
             raise RuntimeError(
                 f"case {name}: command requires --step-count-resize but none was supplied"
             )
-        if any("{step_chain_resize}" in part for part in case["command"]) and not step_chain_resize:
+        if (
+            any(f"{step_chain_resize}" in part for part in case["command"])
+            and not step_chain_resize
+        ):
             raise RuntimeError(
                 f"case {name}: command requires --step-chain-resize but none was supplied"
             )
         command = [part.format(**values) for part in case["command"]]
-        proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.run(command, check=False, text=True, capture_output=True)
         result = {
             "name": name,
             "command": command,
@@ -738,32 +812,44 @@ def run_manifest(
         ref_report, ref_shape = analyze(reference_path)
         cand_report, cand_shape = analyze(output_path)
         shift, checks = compare_reports(
-            ref_report, cand_report, case.get("alignment", "identity"),
+            ref_report,
+            cand_report,
+            case.get("alignment", "identity"),
             case.get("thresholds", {}),
         )
         renders = render_compare(
-            ref_shape, cand_shape, shift, case_dir / "renders",
-            case.get("thresholds", {}), case.get("views", list(VIEWS)),
+            ref_shape,
+            cand_shape,
+            shift,
+            case_dir / "renders",
+            case.get("thresholds", {}),
+            case.get("views", list(VIEWS)),
         )
         if case.get("thresholds", {}).get("strict_mesh_hash", False):
             ref_hash = strict_mesh_hash(tessellate(ref_shape, 0.002, 0.2))
             cand_hash = strict_mesh_hash(tessellate(cand_shape, 0.002, 0.2))
-            checks.append({
-                "name": "strict_mesh_hash",
-                "value": cand_hash,
-                "reference": ref_hash,
-                "limit": ref_hash,
-                "pass": cand_hash == ref_hash,
-            })
-        result.update({
-            "reference": ref_report,
-            "candidate": cand_report,
-            "alignment": case.get("alignment", "identity"),
-            "alignment_translation_mm": shift.tolist(),
-            "checks": checks,
-            "renders": renders,
-        })
-        result["pass"] = all(c["pass"] for c in checks) and all(r["pass"] for r in renders)
+            checks.append(
+                {
+                    "name": "strict_mesh_hash",
+                    "value": cand_hash,
+                    "reference": ref_hash,
+                    "limit": ref_hash,
+                    "pass": cand_hash == ref_hash,
+                }
+            )
+        result.update(
+            {
+                "reference": ref_report,
+                "candidate": cand_report,
+                "alignment": case.get("alignment", "identity"),
+                "alignment_translation_mm": shift.tolist(),
+                "checks": checks,
+                "renders": renders,
+            }
+        )
+        result["pass"] = all(c["pass"] for c in checks) and all(
+            r["pass"] for r in renders
+        )
         (case_dir / "report.json").write_text(json.dumps(result, indent=2))
         results.append(result)
 
@@ -772,7 +858,7 @@ def run_manifest(
     return 0 if all(result["pass"] for result in results) else 1
 
 
-def main():
+def main() -> Never:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")

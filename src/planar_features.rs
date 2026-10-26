@@ -678,7 +678,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
     materialize_boundary_feature_tools_for_analysis_filtered(entities, min_instances, None)
 }
 
-pub(crate) fn materialize_boundary_feature_tools_for_analysis_for_shells(
+pub fn materialize_boundary_feature_tools_for_analysis_for_shells(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
     target_shells: &HashSet<u64>,
@@ -941,7 +941,7 @@ pub fn peel_boundary_features_for_analysis(
     Ok((report, stats))
 }
 
-pub(crate) fn peel_boundary_feature_family_indices(
+pub fn peel_boundary_feature_family_indices(
     entities: &mut [EntityInstance],
     report: &BoundaryFeatureDiagnostics,
     selected_indices: &[usize],
@@ -1036,7 +1036,7 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
     diagnose_boundary_features_with_index_filtered(entities, &index, None)
 }
 
-pub(crate) fn diagnose_boundary_features_for_shells(
+pub fn diagnose_boundary_features_for_shells(
     entities: &[EntityInstance],
     target_shells: &HashSet<u64>,
 ) -> BoundaryFeatureDiagnostics {

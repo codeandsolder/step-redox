@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ruff: file-ignore[missing-type-function-argument, missing-return-type-undocumented-public-function, missing-return-type-private-function]
+# Dynamic CAD/prototype boundary: ty still checks soundness; exhaustive annotations would be mostly opaque external types.
 """
 Prototype pure STEP graph expansion for a proven PeriodicBodyPattern.
 
@@ -11,6 +13,7 @@ patch is cloned by translation; the positive fixed/end-cap face graph is cloned
 and translated; the eight-ish spanning faces are retained and receive freshly
 traced boundary loops over the new shared EDGE_CURVE graph.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,7 +72,7 @@ def qcoord(p, tol=TOL):
 
 
 class Graph:
-    def __init__(self, path: pathlib.Path):
+    def __init__(self, path: pathlib.Path) -> None:
         (
             self.lines,
             self.raw,
@@ -87,7 +90,7 @@ class Graph:
         self.maxid += 1
         return self.maxid
 
-    def register(self, i: int, body: str, added=True):
+    def register(self, i: int, body: str, added=True) -> None:
         self.raw[i] = body
         self.typ[i] = "COMPLEX" if body.startswith("(") else body.split("(", 1)[0]
         rs = list(map(int, RR.findall(body)))
@@ -106,7 +109,7 @@ class Graph:
         self.register(i, body, True)
         return i
 
-    def override(self, i: int, body: str):
+    def override(self, i: int, body: str) -> None:
         self.overrides[i] = body
         # Keep query maps coherent for operations after this rewrite.
         self.raw[i] = body
@@ -114,7 +117,9 @@ class Graph:
         self.refs[i] = list(map(int, RR.findall(body)))
 
     def replace_refs(self, body: str, mapping: dict[int, int]):
-        return RR.sub(lambda m: f"#{mapping.get(int(m.group(1)), int(m.group(1)))}", body)
+        return RR.sub(
+            lambda m: f"#{mapping.get(int(m.group(1)), int(m.group(1)))}", body
+        )
 
     def clone_descendants(self, seeds, delta):
         ids = sorted(db.descendants(set(seeds), self.refs))
@@ -127,6 +132,7 @@ class Graph:
                     raise RuntimeError(f"cannot parse cloned point #{old}: {body}")
                 xyz = tuple(map(float, m.group(2).split(",")))
                 xyz = addv(xyz, delta)
+
                 def step_real(value):
                     text = format(value, ".17g")
                     if "e" in text:
@@ -134,6 +140,7 @@ class Graph:
                     if "E" not in text and "." not in text:
                         text += "."
                     return text
+
                 body = (
                     f"CARTESIAN_POINT('{m.group(1)}',"
                     f"({step_real(xyz[0])},{step_real(xyz[1])},{step_real(xyz[2])}))"
@@ -169,7 +176,7 @@ class Graph:
         sense = ".T." if self.raw[prototype].rstrip().endswith(".T.)") else ".F."
         return self.push(f"EDGE_CURVE('',#{va},#{vb},#{curve},{sense})")
 
-    def write(self, path: pathlib.Path):
+    def write(self, path: pathlib.Path) -> None:
         out = []
         in_data = False
         inserted = False
@@ -189,7 +196,7 @@ class Graph:
             out.append(line)
         if not inserted:
             raise RuntimeError("DATA section not found")
-        path.write_text("\n".join(out) + "\n")
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def face_edges_ordered(g: Graph, face):
@@ -266,7 +273,7 @@ def area_vector(g: Graph, traversal):
     if len(pts) < 3:
         return (0.0, 0.0, 0.0)
     acc = (0.0, 0.0, 0.0)
-    for a, b in zip(pts, pts[1:] + pts[:1]):
+    for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
         acc = addv(acc, cross(a, b))
     return scale(acc, 0.5)
 
@@ -286,7 +293,7 @@ def trace_cycles(g: Graph, edges):
     cycles = []
     while unused:
         e0 = next(iter(unused))
-        a0, b0 = g.edge_vertices(e0)
+        a0, _b0 = g.edge_vertices(e0)
         cur_v = a0
         cur_e = e0
         cycle = []
@@ -317,9 +324,11 @@ def reverse_cycle(cycle):
     return [(e, b, a) for e, a, b in reversed(cycle)]
 
 
-def rewrite_face_bounds(g: Graph, face, target_edges):
+def rewrite_face_bounds(g: Graph, face, target_edges) -> None:
     source_loops = oriented_loop_edges(g, face)
-    source_outer = next((seq for kind, seq in source_loops if kind == "FACE_OUTER_BOUND"), None)
+    source_outer = next(
+        (seq for kind, seq in source_loops if kind == "FACE_OUTER_BOUND"), None
+    )
     if source_outer is None:
         raise RuntimeError(f"stretch face #{face} lacks outer bound")
     ref_area = area_vector(g, source_outer)
@@ -327,7 +336,9 @@ def rewrite_face_bounds(g: Graph, face, target_edges):
         raise RuntimeError(f"stretch face #{face} has degenerate outer area")
 
     hole_sign = -1.0
-    source_hole = next((seq for kind, seq in source_loops if kind == "FACE_BOUND"), None)
+    source_hole = next(
+        (seq for kind, seq in source_loops if kind == "FACE_BOUND"), None
+    )
     if source_hole:
         hole_sign = 1.0 if dot(area_vector(g, source_hole), ref_area) > 0 else -1.0
 
@@ -336,7 +347,8 @@ def rewrite_face_bounds(g: Graph, face, target_edges):
     outer_index = max(range(len(scored)), key=lambda i: scored[i][0])
 
     new_bounds = []
-    for i, (_, cycle) in enumerate(scored):
+    for i, (_, traced_cycle) in enumerate(scored):
+        cycle = traced_cycle
         desired = 1.0 if i == outer_index else hole_sign
         actual = dot(area_vector(g, cycle), ref_area)
         if actual == 0:
@@ -399,11 +411,16 @@ def clone_styles_for_faces(g: Graph, face_mapping):
         if not matches:
             continue
         last = matches[-1]
-        new_body = body[: last.start()] + f"#{face_mapping[old_face]}" + body[last.end() :]
+        new_body = (
+            body[: last.start()] + f"#{face_mapping[old_face]}" + body[last.end() :]
+        )
         ns = g.push(new_body)
         new_styles.append(ns)
         for owner in g.inb.get(sid, ()):
-            if g.typ.get(owner) == "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION":
+            if (
+                g.typ.get(owner)
+                == "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
+            ):
                 style_owner_add[owner].append(ns)
 
     for owner, ids in style_owner_add.items():
@@ -421,13 +438,15 @@ def clone_styles_for_faces(g: Graph, face_mapping):
                 if depth == 0:
                     end = i
                     break
+        if end is None:
+            continue
         old_ids = list(map(int, RR.findall(body[start : end + 1])))
         agg = "(" + ",".join(f"#{x}" for x in old_ids + ids) + ")"
         g.override(owner, body[:start] + agg + body[end + 1 :])
     return len(new_styles)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("src", type=pathlib.Path)
     ap.add_argument("body_json", type=pathlib.Path)
@@ -474,7 +493,7 @@ def main():
 
     # Project approximate site location from the first family's face center;
     # only differences matter for translation.
-    canonical_projection = dot(face_center(g, canonical_faces[0]), axis)
+    dot(face_center(g, canonical_faces[0]), axis)
 
     # Fixed-face end classification. The periodic cells occupy an ordered band;
     # everything fixed beyond its positive end is the movable positive cap.
@@ -548,7 +567,7 @@ def main():
                 stretch_edges[s].add(edge)
 
     # New repeat->stretch edges.
-    for site, mapping in site_maps.items():
+    for mapping in site_maps.values():
         for source_edge, stretch in canonical_boundary:
             stretch_edges[stretch].add(mapping[source_edge])
 
@@ -559,10 +578,7 @@ def main():
         stretches = [f for f in fs if f in stretch_faces]
         if not fixed or not stretches:
             continue
-        if fixed[0] in right_fixed:
-            target_edge = cap_map[edge]
-        else:
-            target_edge = edge
+        target_edge = cap_map[edge] if fixed[0] in right_fixed else edge
         for s in stretches:
             stretch_edges[s].add(target_edge)
 
@@ -572,8 +588,8 @@ def main():
     for edge, fs in edge_faces.items():
         ss = sorted(f for f in fs if f in stretch_faces)
         if len(ss) == 2 and len(fs) == 2:
-            center, span = edge_center_span(g, edge, axis)
-            ss_by_pair[tuple(ss)].append((center, span, edge))
+            edge_center, edge_span = edge_center_span(g, edge, axis)
+            ss_by_pair[tuple(ss)].append((edge_center, edge_span, edge))
 
     new_ss_edges = []
     for pair, rows in ss_by_pair.items():
@@ -581,7 +597,7 @@ def main():
         full = [r for r in rows if r[1] > (source_sites - 1) * pitch]
         short = [r for r in rows if r not in full]
 
-        for center, span, edge in full:
+        for _center, _span, edge in full:
             va, vb = g.edge_vertices(edge)
             pa, pb = g.vertex_coord(va), g.vertex_coord(vb)
             if dot(pa, axis) > dot(pb, axis):
@@ -605,7 +621,7 @@ def main():
         gaps = short[1:-1]
 
         # Keep left end and all original inter-site gaps.
-        for row in [left_end] + gaps:
+        for row in [left_end, *gaps]:
             for s in pair:
                 stretch_edges[s].add(row[2])
 
@@ -655,7 +671,7 @@ def main():
 
     # Clone presentation styles for new cells and the translated cap.
     face_map = {old: cap_map[old] for old in right_fixed}
-    for site, mapping in site_maps.items():
+    for mapping in site_maps.values():
         for old in canonical_faces:
             face_map[old] = mapping[old]
     style_clones = clone_styles_for_faces(g, face_map)

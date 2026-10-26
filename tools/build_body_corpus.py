@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Build a deduplicated single-body STEP corpus from a model manifest.
 
 The expensive whole-model corpus remains the source of truth for array/assembly
@@ -11,14 +12,17 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import csv
 import hashlib
 import json
+import operator
 import re
 import shutil
 import subprocess
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,8 +41,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_manifest(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
+    with path.open(encoding="utf-8", newline="") as handle:
+        raw_rows = list(csv.DictReader(handle, delimiter="\t"))
+    rows: list[dict[str, str]] = []
+    for raw in raw_rows:
+        if any(
+            key is None or value is None or isinstance(value, list)
+            for key, value in raw.items()
+        ):
+            raise SystemExit(f"{path}: malformed TSV row")
+        rows.append({str(key): str(value) for key, value in raw.items()})
     if not rows or not {"uuid", "path"}.issubset(rows[0]):
         raise SystemExit(f"{path}: expected TSV columns uuid and path")
     return rows
@@ -88,8 +100,8 @@ def scan_one(
     tool_sha256: str,
     cache_dir: Path,
     row: dict[str, str],
-) -> dict:
-    cache_path = cache_dir / f'{row["uuid"]}.json'
+) -> dict[str, Any]:
+    cache_path = cache_dir / f"{row['uuid']}.json"
     try:
         cached = json.loads(cache_path.read_text())
         if (
@@ -98,13 +110,12 @@ def scan_one(
             and isinstance(cached.get("report"), dict)
         ):
             return cached["report"]
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError, json.JSONDecodeError, OSError:
         pass
 
     proc = subprocess.run(
         [str(tool), "scan", row["path"]],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -144,14 +155,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def corpus_fingerprint(uuid: str, solid: dict) -> str:
+def corpus_fingerprint(uuid: str, solid: dict[str, Any]) -> str:
     geometry = solid.get("geometry_fingerprint")
     if geometry is None:
         # Canonical geometry analysis did not understand this body. Preserve it
         # in the corpus, but never deduplicate it with another occurrence.
-        payload = (
-            f'body-v2:fallback:{uuid}:{solid["data_section"]}:{solid["solid_id"]}'
-        )
+        payload = f"body-v2:fallback:{uuid}:{solid['data_section']}:{solid['solid_id']}"
         return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
     scale = solid.get("unit_scale_mm")
@@ -164,20 +173,21 @@ def corpus_fingerprint(uuid: str, solid: dict) -> str:
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
-def extract_group(tool: Path, out: Path, source: str, bodies: list[dict]) -> dict:
+def extract_group(
+    tool: Path, out: Path, source: str, bodies: list[dict[str, Any]]
+) -> dict[str, Any]:
     command = [str(tool), "extract", source, str(out / "objects")]
     for body in bodies:
         rep = body["representative"]
         command.extend(
             [
                 "--solid",
-                f'{rep["data_section"]}:{rep["solid_id"]}:{body["fingerprint"]}',
+                f"{rep['data_section']}:{rep['solid_id']}:{body['fingerprint']}",
             ]
         )
     proc = subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -199,10 +209,8 @@ def main() -> int:
     generator_sha256 = sha256_file(Path(__file__))
 
     previous_summary = None
-    try:
+    with contextlib.suppress(FileNotFoundError, json.JSONDecodeError, OSError):
         previous_summary = json.loads((args.out / "summary.json").read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
     same_build = bool(
         previous_summary
         and previous_summary.get("body_tool_sha256") == body_tool_sha256
@@ -224,10 +232,8 @@ def main() -> int:
         "COMPLETE",
         "FAILED",
     ):
-        try:
+        with contextlib.suppress(FileNotFoundError):
             (args.out / name).unlink()
-        except FileNotFoundError:
-            pass
 
     (args.out / "BUILDING").write_text(
         json.dumps(
@@ -263,7 +269,7 @@ def main() -> int:
             handle.write(json.dumps(report, separators=(",", ":")) + "\n")
 
     failures = [report for report in reports if "error" in report]
-    groups: dict[str, list[dict]] = defaultdict(list)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     total_manifold = total_analyzed = total_skipped = total_without_rep = 0
     total_fallback_identity = 0
     total_unknown_units = 0
@@ -290,7 +296,7 @@ def main() -> int:
                 groups[fingerprint].append(row)
                 occurrences.write(json.dumps(row, separators=(",", ":")) + "\n")
 
-    body_rows: list[dict] = []
+    body_rows: list[dict[str, Any]] = []
     unextractable = 0
     for fingerprint, members in sorted(groups.items()):
         dimensions = {
@@ -309,11 +315,8 @@ def main() -> int:
         extractable = [m for m in members if m["has_shape_representation"]]
         representative = min(
             extractable or members,
-            key=lambda m: (
-                m["closure_entities"],
-                m["uuid"],
-                m["data_section"],
-                m["solid_id"],
+            key=operator.itemgetter(
+                "closure_entities", "uuid", "data_section", "solid_id"
             ),
         )
         if not extractable:
@@ -342,9 +345,7 @@ def main() -> int:
                     "solid_id": representative["solid_id"],
                     "unit_scale_mm": representative.get("unit_scale_mm"),
                     "center_source_units": representative["center_source_units"],
-                    "canonical_quarter_turn": representative[
-                        "canonical_quarter_turn"
-                    ],
+                    "canonical_quarter_turn": representative["canonical_quarter_turn"],
                     "closure_entities": representative["closure_entities"],
                 },
             }
@@ -357,7 +358,7 @@ def main() -> int:
 
     extraction_failures = []
     if not args.no_extract:
-        by_source: dict[str, list[dict]] = defaultdict(list)
+        by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for body in body_rows:
             if body["extractable"]:
                 by_source[body["representative"]["source_path"]].append(body)
@@ -417,10 +418,8 @@ def main() -> int:
         args.require_canonical and (total_fallback_identity or total_skipped)
     )
     failed = bool(failures or extraction_failures or canonicality_failure)
-    try:
+    with contextlib.suppress(FileNotFoundError):
         (args.out / "BUILDING").unlink()
-    except FileNotFoundError:
-        pass
     marker = args.out / ("FAILED" if failed else "COMPLETE")
     marker.write_text(json.dumps(summary, indent=2))
 

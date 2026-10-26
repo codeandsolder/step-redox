@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Validate a generated step-redox single-body corpus."""
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 import subprocess
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,12 +22,10 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def corpus_fingerprint(uuid: str, solid: dict) -> str:
+def corpus_fingerprint(uuid: str, solid: dict[str, Any]) -> str:
     geometry = solid.get("geometry_fingerprint")
     if geometry is None:
-        payload = (
-            f'body-v2:fallback:{uuid}:{solid["data_section"]}:{solid["solid_id"]}'
-        )
+        payload = f"body-v2:fallback:{uuid}:{solid['data_section']}:{solid['solid_id']}"
         return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
     scale = solid.get("unit_scale_mm")
@@ -36,7 +36,9 @@ def corpus_fingerprint(uuid: str, solid: dict) -> str:
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
-def validate_one(corpus: Path, tool: Path, body: dict) -> dict | None:
+def validate_one(
+    corpus: Path, tool: Path, body: dict[str, Any]
+) -> dict[str, Any] | None:
     rel = body.get("body_path")
     if not body.get("extractable"):
         return None
@@ -49,8 +51,7 @@ def validate_one(corpus: Path, tool: Path, body: dict) -> dict | None:
 
     proc = subprocess.run(
         [str(tool), "scan", str(path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -119,7 +120,7 @@ def main() -> int:
     ]
     summary = json.loads(summary_path.read_text())
 
-    errors: list[dict] = []
+    errors: list[dict[str, Any]] = []
     fingerprints = [body["fingerprint"] for body in bodies]
     if len(fingerprints) != len(set(fingerprints)):
         errors.append({"error": "duplicate fingerprint in bodies manifest"})
@@ -194,11 +195,13 @@ def main() -> int:
 
     if objects_materialized:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            for error in pool.map(
-                lambda body: validate_one(args.corpus, args.body_tool, body), bodies
-            ):
-                if error is not None:
-                    errors.append(error)
+            errors.extend(
+                error
+                for error in pool.map(
+                    lambda body: validate_one(args.corpus, args.body_tool, body), bodies
+                )
+                if error is not None
+            )
 
     result = {
         "bodies": len(bodies),
