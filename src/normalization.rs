@@ -15,16 +15,16 @@ pub struct ConsolidateStats {
 pub fn consolidate_presentation(entities: &mut Vec<EntityInstance>) -> ConsolidateStats {
     use std::collections::{HashMap, HashSet};
 
-    let mut refcounts: HashMap<u64, usize> = HashMap::new();
-    for entity in entities.iter() {
-        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
-    }
-
     struct Merge {
         into: usize,
         from: usize,
         item_param_index: usize,
         ty: &'static str,
+    }
+
+    let mut refcounts: HashMap<u64, usize> = HashMap::new();
+    for entity in entities.iter() {
+        visit_entity_refs(entity, &mut |id| *refcounts.entry(id).or_insert(0) += 1);
     }
 
     let mut groups: HashMap<u64, IndexBucket> = HashMap::new();
@@ -177,6 +177,10 @@ pub struct InternStats {
     pub(super) by_type: BTreeMap<String, usize>,
 }
 
+#[expect(
+    clippy::iter_with_drain,
+    reason = "draining preserves the dirty-worklist allocation across fixed-point rounds"
+)]
 pub fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
     // Store redirects only. An identity map for a million-entity STEP file is
     // a surprisingly expensive way of spelling "most things survive".
@@ -232,7 +236,11 @@ pub fn intern_section(entities: &mut Vec<EntityInstance>) -> InternStats {
             if alias.contains_key(&id) {
                 continue;
             }
-            let hash = hashes[index].expect("internable entity must have a cached structural hash");
+            let hash = hashes[index].unwrap_or_else(|| {
+                let hash = entity_structural_hash(entity, &alias);
+                hashes[index] = Some(hash);
+                hash
+            });
             match seen.entry(hash) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(IndexBucket::one(index));

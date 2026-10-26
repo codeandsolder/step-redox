@@ -389,7 +389,7 @@ fn reference_curve(
             entities,
             index,
         ),
-        _ => None,
+        EntityInstance::Simple { .. } => None,
     }
 }
 

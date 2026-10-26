@@ -40,6 +40,10 @@ pub struct PlanarFeatureStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "STEP entity IDs keep an _id suffix to distinguish them from derived geometry objects"
+)]
 struct ShellContext {
     representation_id: u64,
     context_id: u64,
@@ -898,7 +902,7 @@ pub fn leaf_feature_family_indices(families: &[BoundaryFeatureFamilyEvidence]) -
 }
 
 pub fn peel_boundary_features_for_analysis(
-    entities: &mut Vec<EntityInstance>,
+    entities: &mut [EntityInstance],
 ) -> Result<(BoundaryFeatureDiagnostics, BoundaryFeaturePeelStats)> {
     let index = build_index(entities);
     let report = diagnose_boundary_features_with_index(entities, &index);

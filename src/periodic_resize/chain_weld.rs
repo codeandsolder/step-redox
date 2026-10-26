@@ -468,12 +468,9 @@ pub(super) fn chain_curve_key(graph: &GraphEditor<'_>, edge: u64) -> Result<Chai
         EntityInstance::Complex { subsuper, .. } => {
             chain_rational_single_span_key(graph, curve, &subsuper.0)
         }
-        entity => bail!(
+        EntityInstance::Simple { record, .. } => bail!(
             "periodic-chain seam edge #{edge} uses unsupported {} curve support",
-            match entity {
-                EntityInstance::Simple { record, .. } => record.name.as_str(),
-                EntityInstance::Complex { .. } => "COMPLEX",
-            }
+            record.name
         ),
     }
 }

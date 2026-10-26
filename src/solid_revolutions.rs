@@ -1183,9 +1183,8 @@ fn detect_full_ring_torus(
     face_ids: &[u64],
     faces: &[FaceInfo],
 ) -> Option<RecoveredSolidRevolution> {
-    let first = match faces.first()?.surface {
-        SurfaceSupport::Torus(torus) => torus,
-        _ => return None,
+    let SurfaceSupport::Torus(first) = faces.first()?.surface else {
+        return None;
     };
     if !first.major_radius_mm.is_finite()
         || !first.minor_radius_mm.is_finite()
@@ -1974,12 +1973,11 @@ fn sphere_profile_arc(
 
     let angle_tol = (GEOM_TOL_MM / sphere.radius_mm).max(1.0e-12);
     let mut candidates = Vec::<(f64, f64)>::new();
+    let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
     if boundary_points.len() == 1 {
-        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         candidates.push((start, std::f64::consts::FRAC_PI_2));
         candidates.push((start, -std::f64::consts::FRAC_PI_2));
     } else {
-        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         let end = meridian::angle(boundary_points[1], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         let ccw_delta = meridian::positive_angle_delta(start, end);
         let cw_delta = std::f64::consts::TAU - ccw_delta;

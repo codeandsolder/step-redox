@@ -742,7 +742,7 @@ fn prove_skin_tangent(
         }
         match entry.surface {
             SheetReferenceSurface::Plane { offset_mm, .. } => Some(offset_mm),
-            _ => None,
+            SheetReferenceSurface::Cylinder { .. } => None,
         }
     })?;
     let normal = normalize(pair.normal, 0.0)?;
@@ -757,7 +757,7 @@ fn prove_skin_tangent(
 
     let boundary = &skin.boundary_loops[0].curves;
     let mut inward_vectors = Vec::with_capacity(2);
-    for seam_point in [seam.0, seam.1] {
+    for seam_point in <[[f64; 3]; 2]>::from(seam) {
         let matches = boundary
             .iter()
             .filter_map(|curve| match curve {

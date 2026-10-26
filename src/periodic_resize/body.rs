@@ -294,7 +294,7 @@ impl BodyStretchRewrite<'_> {
             pair.sort_unstable();
             let (center, span) = graph.edge_center_span(edge, self.axis)?;
             ss_pairs
-                .entry((pair[0], pair[1]))
+                .entry(pair.into())
                 .or_default()
                 .push(SsRow { center, span, edge });
         }
@@ -636,9 +636,7 @@ pub fn shrink_periodic_body_positive(
                     .copied()
                     .ok_or_else(|| anyhow!("cap clone missing shell face #{face}"))?,
             );
-        } else if removed_repeat_faces.contains(&face) {
-            continue;
-        } else {
+        } else if !removed_repeat_faces.contains(&face) {
             target_shell_faces.push(face);
         }
     }

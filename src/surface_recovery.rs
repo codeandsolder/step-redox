@@ -234,7 +234,7 @@ fn parse_surface(
             parse_simple_bspline_surface(record)
         }
         EntityInstance::Complex { subsuper, .. } => parse_complex_rational_surface(subsuper),
-        _ => None,
+        EntityInstance::Simple { .. } => None,
     }
 }
 

@@ -114,11 +114,12 @@ impl UnionFind {
 
 pub fn recover_partitioned_bodies(entities: &mut Vec<EntityInstance>) -> PartitionRecoveryStats {
     let original = entities.clone();
-    if let Some(stats) = recover_inner(entities) {
-        stats
-    } else {
-        *entities = original;
-        PartitionRecoveryStats::default()
+    match recover_inner(entities) {
+        Some(stats) => stats,
+        None => {
+            *entities = original;
+            PartitionRecoveryStats::default()
+        }
     }
 }
 
