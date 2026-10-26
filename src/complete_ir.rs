@@ -1,13 +1,14 @@
 use crate::cad_ir::{
-    BooleanOp, CadModel, CadNode, NodeId, ProofStatus, Provenance, RigidTransform,
+    BooleanOp, CadModel, CadNode, EdgeSelector, EdgeTreatmentEdge, EdgeTreatmentProfile, NodeId,
+    ProofStatus, Provenance, RigidTransform,
 };
 use crate::cad_kernel::CadKernel;
 use crate::cad_recovery::{
     CadFragment, CadFragmentSource, recover_auto_proven_extrusion_core_union_fragment,
     recover_closed_round_sweep_fragments, recover_open_rectangular_sweep_fragments,
     recover_periodic_chain_fragments, recover_radial_slot_revolution_fragments,
-    recover_revolved_round_tail_fragments, recover_solid_extrusion_fragments,
-    recover_solid_revolution_fragments,
+    recover_revolved_round_tail_fragments, recover_solid_extrusion_fragment,
+    recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
 };
 use crate::patterns::InstancePattern;
 use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
@@ -16,7 +17,7 @@ use crate::{Options, OutputProfile, Stats};
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Exchange};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v8";
 pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
@@ -296,9 +297,44 @@ pub(crate) fn recover_complete_ir_exchange(
         }
     }
 
-    let whole_solid_candidates = base_candidates
-        .into_iter()
+    let pre_treatment_candidates = base_candidates
+        .iter()
+        .copied()
         .chain(boundary_feature_composites.iter())
+        .collect::<Vec<_>>();
+    let pre_treatment_selected = select_cheapest_whole_solid_fragments(&pre_treatment_candidates)?;
+    let treatment_targets = body_scan
+        .iter()
+        .filter_map(|solid| {
+            pre_treatment_selected
+                .get(&solid.solid_id)
+                .is_none_or(|fragment| !is_constructive_source(&fragment.source))
+                .then_some(solid.solid_id)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut treated_extrusions = Vec::new();
+    if !treatment_targets.is_empty() {
+        let dominant_extrusions =
+            crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
+        for section in &exchange.data {
+            let index = crate::step_graph::build_index(&section.entities);
+            let section_candidates = dominant_extrusions
+                .iter()
+                .filter(|candidate| index.contains_key(&candidate.solid_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            treated_extrusions.extend(recover_edge_treated_extrusion_fragments_from_candidates(
+                &section.entities,
+                &index,
+                &section_candidates,
+                Some(&treatment_targets),
+            )?);
+        }
+    }
+
+    let whole_solid_candidates = pre_treatment_candidates
+        .into_iter()
+        .chain(treated_extrusions.iter())
         .collect::<Vec<_>>();
     let selected = select_cheapest_whole_solid_fragments(&whole_solid_candidates)?;
     let recovered_ids = selected.keys().copied().collect::<BTreeSet<_>>();
@@ -370,7 +406,31 @@ fn recover_boundary_feature_composites_for_section(
     target_solid_ids: &BTreeSet<u64>,
 ) -> Result<Vec<CadFragment>> {
     let initial_index = crate::step_graph::build_index(entities);
-    let target_shells = target_solid_ids
+    let mut keyed_targets = BTreeMap::<crate::shape_identity::ShapeKey, Vec<_>>::new();
+    let mut representative_targets = BTreeSet::new();
+    let mut recovery_groups = HashMap::new();
+    for &solid_id in target_solid_ids {
+        if let Some(identity) =
+            crate::shape_identity::solid_identity(solid_id, entities, &initial_index)
+        {
+            keyed_targets
+                .entry(identity.key.clone())
+                .or_default()
+                .push(identity);
+        } else {
+            representative_targets.insert(solid_id);
+        }
+    }
+    for (_, mut group) in keyed_targets {
+        group.sort_by_key(|identity| identity.root);
+        let Some(representative) = group.first().map(|identity| identity.root) else {
+            continue;
+        };
+        representative_targets.insert(representative);
+        recovery_groups.insert(representative, group);
+    }
+
+    let target_shells = representative_targets
         .iter()
         .filter_map(|&solid_id| {
             crate::brep::manifold_shell(solid_id, entities, &initial_index)
@@ -383,37 +443,26 @@ fn recover_boundary_feature_composites_for_section(
 
     let mut working = entities.to_vec();
     let mut recovered = BTreeMap::<u64, Vec<RecoveredBoundaryFeatureFamily>>::new();
-    let mut blocked = BTreeSet::<u64>::new();
-    let mut exhausted = false;
-
     for pass_index in 0..MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES {
-        if !recover_boundary_feature_pass(
-            &mut working,
-            &target_shells,
-            &mut recovered,
-            &mut blocked,
-            pass_index,
-        )? {
-            exhausted = true;
+        if !recover_boundary_feature_pass(&mut working, &target_shells, &mut recovered, pass_index)?
+        {
             break;
         }
     }
 
-    if !exhausted {
-        let report = crate::planar_features::diagnose_boundary_features(&working);
-        for family in &report.families {
-            if let Some(&solid_id) = target_shells.get(&family.shell_id) {
-                blocked.insert(solid_id);
-            }
-        }
-    }
-
-    let host_candidates = recover_constructive_fragments_from_entities(&working)?;
+    let mut host_candidates = recover_constructive_fragments_from_entities(&working)?;
+    let working_index = crate::step_graph::build_index(&working);
+    let host_target_ids = target_shells.values().copied().collect::<BTreeSet<_>>();
+    host_candidates.extend(recover_edge_treated_extrusion_fragments(
+        &working,
+        &working_index,
+        Some(&host_target_ids),
+    )?);
     let host_refs = host_candidates.iter().collect::<Vec<_>>();
     let selected_hosts = select_cheapest_whole_solid_fragments(&host_refs)?;
     let mut out = Vec::new();
     for (solid_id, families) in recovered {
-        if blocked.contains(&solid_id) || families.is_empty() {
+        if families.is_empty() {
             continue;
         }
         let Some(host) = selected_hosts.get(&solid_id) else {
@@ -426,36 +475,126 @@ fn recover_boundary_feature_composites_for_section(
             solid_id, host, &families,
         )?);
     }
-    Ok(out)
+
+    let mut expanded = Vec::new();
+    for fragment in out {
+        let representative = source_solid_id(&fragment.source);
+        if let Some(group) = recovery_groups.get(&representative)
+            && let Some(source_identity) = group.first()
+        {
+            for target_identity in group.iter().skip(1) {
+                if let Some(instance) = instantiate_boundary_feature_fragment(
+                    &fragment,
+                    source_identity,
+                    target_identity,
+                    entities,
+                    &initial_index,
+                )? {
+                    expanded.push(instance);
+                }
+            }
+        }
+        expanded.push(fragment);
+    }
+    Ok(expanded)
+}
+
+fn instantiate_boundary_feature_fragment(
+    fragment: &CadFragment,
+    source_identity: &crate::shape_identity::SolidIdentity,
+    target_identity: &crate::shape_identity::SolidIdentity,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<Option<CadFragment>> {
+    let CadFragmentSource::BoundaryFeatureComposite {
+        passes,
+        feature_families,
+        feature_instances,
+        ..
+    } = fragment.source
+    else {
+        return Ok(None);
+    };
+    let Some(quarter) = crate::shape_identity::relative_z90_quarter(
+        source_identity,
+        target_identity,
+        entities,
+        index,
+    ) else {
+        return Ok(None);
+    };
+    let translation =
+        relative_quarter_translation(source_identity.center, target_identity.center, quarter);
+    let mut model = fragment.model.clone();
+    model.roots.clear();
+    let root = model.add_node(CadNode::Transform {
+        transform: quarter_turn_transform(quarter, translation),
+        child: fragment.root,
+    });
+    model.set_provenance(
+        root,
+        Provenance {
+            source_entity_ids: vec![target_identity.root],
+            proof: ProofStatus::StructurallyProven,
+            max_residual_mm: None,
+        },
+    )?;
+    model.add_root(root)?;
+    model.validate()?;
+    Ok(Some(CadFragment {
+        source: CadFragmentSource::BoundaryFeatureComposite {
+            solid_id: target_identity.root,
+            passes,
+            feature_families,
+            feature_instances,
+        },
+        model,
+        root,
+    }))
+}
+
+fn relative_quarter_translation(
+    source_center: [f64; 3],
+    target_center: [f64; 3],
+    quarter: u8,
+) -> [f64; 3] {
+    let (x, y) = match quarter % 4 {
+        0 => (source_center[0], source_center[1]),
+        1 => (-source_center[1], source_center[0]),
+        2 => (-source_center[0], -source_center[1]),
+        _ => (source_center[1], -source_center[0]),
+    };
+    [
+        target_center[0] - x,
+        target_center[1] - y,
+        target_center[2] - source_center[2],
+    ]
 }
 
 fn recover_boundary_feature_pass(
     working: &mut Vec<EntityInstance>,
     target_shells: &HashMap<u64, u64>,
     recovered: &mut BTreeMap<u64, Vec<RecoveredBoundaryFeatureFamily>>,
-    blocked: &mut BTreeSet<u64>,
     pass_index: usize,
 ) -> Result<bool> {
-    let report = crate::planar_features::diagnose_boundary_features(working);
+    let target_shell_ids = target_shells.keys().copied().collect::<HashSet<_>>();
+    let report =
+        crate::planar_features::diagnose_boundary_features_for_shells(working, &target_shell_ids);
     let target_family_indices =
         crate::planar_features::leaf_feature_family_indices(&report.families)
             .into_iter()
             .filter(|&index| target_shells.contains_key(&report.families[index].shell_id))
             .collect::<Vec<_>>();
     if target_family_indices.is_empty() {
-        for family in &report.families {
-            if let Some(&solid_id) = target_shells.get(&family.shell_id) {
-                blocked.insert(solid_id);
-            }
-        }
         return Ok(false);
     }
 
     let mut tool_entities = working.clone();
     let (tool_report, materialized) =
-        crate::planar_features::materialize_boundary_feature_tools_for_analysis(
+        crate::planar_features::materialize_boundary_feature_tools_for_analysis_for_shells(
             &mut tool_entities,
             1,
+            &target_shell_ids,
         )?;
     if tool_report.families.len() != report.families.len() {
         bail!("boundary-feature tool materialization changed family indexing");
@@ -464,6 +603,7 @@ fn recover_boundary_feature_pass(
     let tool_refs = tool_candidates.iter().collect::<Vec<_>>();
     let selected_tools = select_cheapest_whole_solid_fragments(&tool_refs)?;
     let working_index = crate::step_graph::build_index(working);
+    let mut peelable_family_indices = Vec::new();
 
     for family_index in target_family_indices {
         let family = &report.families[family_index];
@@ -471,35 +611,32 @@ fn recover_boundary_feature_pass(
             continue;
         };
         let Some(source_member) = family.members.first().cloned() else {
-            blocked.insert(source_solid_id);
             continue;
         };
         let Some(materialization) = materialized
             .iter()
             .find(|tool| tool.family_index == family_index)
         else {
-            blocked.insert(source_solid_id);
             continue;
         };
         let Some(tool) = selected_tools.get(&materialization.solid_id) else {
-            blocked.insert(source_solid_id);
             continue;
         };
         if !is_constructive_source(&tool.source) {
-            blocked.insert(source_solid_id);
             continue;
         }
-        let Some(host_outwards) =
-            feature_host_outward_directions(&family.host_face_ids, working, &working_index)
-        else {
-            blocked.insert(source_solid_id);
-            continue;
-        };
         let mut tool = (*tool).clone();
-        if regularize_boundary_tool_for_boolean(&mut tool, family.polarity, &host_outwards).is_err()
-        {
-            blocked.insert(source_solid_id);
-            continue;
+        if matches!(tool.source, CadFragmentSource::SolidExtrusion { .. }) {
+            let Some(host_outwards) =
+                feature_host_outward_directions(&family.host_face_ids, working, &working_index)
+            else {
+                continue;
+            };
+            if regularize_boundary_tool_for_boolean(&mut tool, family.polarity, &host_outwards)
+                .is_err()
+            {
+                continue;
+            }
         }
         recovered
             .entry(source_solid_id)
@@ -511,9 +648,17 @@ fn recover_boundary_feature_pass(
                 source_member,
                 members: family.members.clone(),
             });
+        peelable_family_indices.push(family_index);
     }
 
-    let (_, stats) = crate::planar_features::peel_boundary_features_for_analysis(working)?;
+    if peelable_family_indices.is_empty() {
+        return Ok(false);
+    }
+    let stats = crate::planar_features::peel_boundary_feature_family_indices(
+        working,
+        &report,
+        &peelable_family_indices,
+    )?;
     Ok(stats.families != 0)
 }
 
@@ -539,6 +684,173 @@ fn recover_constructive_fragments_from_entities(
     )?);
     out.extend(recover_open_rectangular_sweep_fragments(&open_sweeps)?);
     Ok(out)
+}
+
+fn recover_edge_treated_extrusion_fragments(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    target_solid_ids: Option<&BTreeSet<u64>>,
+) -> Result<Vec<CadFragment>> {
+    let signatures =
+        crate::solid_revolutions::detect_solid_surface_signatures_with_index(entities, index);
+    let dominant = crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
+    recover_edge_treated_extrusion_fragments_from_candidates(
+        entities,
+        index,
+        &dominant,
+        target_solid_ids,
+    )
+}
+
+fn recover_edge_treated_extrusion_fragments_from_candidates(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    dominant: &[crate::dominant_extrusions::DominantExtrusionCandidate],
+    target_solid_ids: Option<&BTreeSet<u64>>,
+) -> Result<Vec<CadFragment>> {
+    let candidate_solid_ids = dominant
+        .iter()
+        .filter(|candidate| {
+            !candidate.residual_faces.is_empty()
+                && target_solid_ids.is_none_or(|targets| targets.contains(&candidate.solid_id))
+        })
+        .map(|candidate| candidate.solid_id)
+        .collect::<HashSet<_>>();
+    if candidate_solid_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let treatments = crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
+        entities,
+        index,
+        &candidate_solid_ids,
+    );
+    let mut out = Vec::new();
+
+    for candidate in dominant {
+        if candidate.residual_faces.is_empty()
+            || target_solid_ids.is_some_and(|targets| !targets.contains(&candidate.solid_id))
+        {
+            continue;
+        }
+
+        let mut selected = Vec::with_capacity(candidate.residual_faces.len());
+        let mut usable = true;
+        for residual in &candidate.residual_faces {
+            let mut matches = treatments.iter().filter_map(|item| {
+                let same_solid = item.solid_id == candidate.solid_id;
+                let same_face = item.treatment_face_id == residual.face_id;
+                (same_solid && same_face)
+                    .then(|| replayable_edge_treatment(item))
+                    .flatten()
+                    .map(|(profile, edge)| (item, profile, edge))
+            });
+            let Some(replay) = matches.next() else {
+                usable = false;
+                break;
+            };
+            if matches.next().is_some() {
+                usable = false;
+                break;
+            }
+            selected.push(replay);
+        }
+        if !usable || selected.len() != candidate.residual_faces.len() {
+            continue;
+        }
+
+        let residual_face_ids = candidate
+            .residual_faces
+            .iter()
+            .map(|face| face.face_id)
+            .collect::<HashSet<_>>();
+        let core = crate::solid_extrusions::recover_extrusion_core_from_cap_faces_with_index(
+            candidate.solid_id,
+            candidate.cap_face_ids,
+            entities,
+            index,
+        )
+        .or_else(|| {
+            crate::solid_extrusions::recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
+                candidate.solid_id,
+                candidate.cap_face_ids,
+                entities,
+                index,
+                Some(&residual_face_ids),
+            )
+            .map(|healed| healed.core)
+        });
+        let Some(core) = core else {
+            continue;
+        };
+
+        selected.sort_by_key(|(item, _, _)| item.treatment_face_id);
+        let mut fragment = recover_solid_extrusion_fragment(&core)?;
+        fragment.model.roots.clear();
+        let mut root = fragment.root;
+        for (item, profile, edge) in selected {
+            root = fragment.model.add_node(CadNode::EdgeTreatment {
+                child: root,
+                profile,
+                edges: vec![edge],
+            });
+            fragment.model.set_provenance(
+                root,
+                Provenance {
+                    source_entity_ids: vec![candidate.solid_id, item.treatment_face_id],
+                    proof: ProofStatus::WithinTolerance,
+                    max_residual_mm: Some(item.max_boundary_residual_mm),
+                },
+            )?;
+        }
+        fragment.model.add_root(root)?;
+        fragment.root = root;
+        fragment.model.validate()?;
+        out.push(fragment);
+    }
+
+    Ok(out)
+}
+
+fn replayable_edge_treatment(
+    item: &crate::edge_treatments::EdgeTreatmentEvidence,
+) -> Option<(EdgeTreatmentProfile, EdgeTreatmentEdge)> {
+    if !item.carrier_pair_unique {
+        return None;
+    }
+    let selector = match &item.virtual_edge {
+        crate::edge_treatments::EdgeTreatmentVirtualEdge::Segment { start_mm, end_mm } => {
+            EdgeSelector::Segment {
+                start_mm: *start_mm,
+                end_mm: *end_mm,
+            }
+        }
+        crate::edge_treatments::EdgeTreatmentVirtualEdge::Circle { .. } => return None,
+    };
+    let (profile, radius_mm) = match item.kind {
+        crate::edge_treatments::EdgeTreatmentKind::PlanarChamfer => {
+            let [first, second] = item.inferred_setbacks_mm?;
+            let tolerance = 1.0e-7_f64.max(first.abs().max(second.abs()) * 1.0e-8);
+            if (first - second).abs() > tolerance {
+                return None;
+            }
+            (EdgeTreatmentProfile::Chamfer, first.midpoint(second))
+        }
+        crate::edge_treatments::EdgeTreatmentKind::CylindricalFillet => {
+            let radius = item.inferred_radius_mm?;
+            if !radius.is_finite() || radius <= 0.0 {
+                return None;
+            }
+            (EdgeTreatmentProfile::Round, radius)
+        }
+        _ => return None,
+    };
+    Some((
+        profile,
+        EdgeTreatmentEdge {
+            selector,
+            radius_mm,
+        },
+    ))
 }
 
 fn feature_host_outward_directions(

@@ -159,6 +159,22 @@ pub fn recover_treatment_healed_extrusion_core_from_cap_faces(
     entities: &[EntityInstance],
 ) -> Option<TreatmentHealedExtrusionCoreCandidate> {
     let index = build_index(entities);
+    recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
+        solid_id,
+        cap_face_ids,
+        entities,
+        &index,
+        None,
+    )
+}
+
+pub(crate) fn recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
+    solid_id: u64,
+    cap_face_ids: [u64; 2],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    allowed_treatment_face_ids: Option<&HashSet<u64>>,
+) -> Option<TreatmentHealedExtrusionCoreCandidate> {
     let face_ids = brep::solid_face_ids(solid_id, entities, &index)?;
     let mut faces = vec![
         face_info(cap_face_ids[0], entities, &index)?,
@@ -182,7 +198,12 @@ pub fn recover_treatment_healed_extrusion_core_from_cap_faces(
     let first_index = 0;
     let second_index = 1;
 
-    let evidence = crate::edge_treatments::detect_edge_treatment_evidence(entities);
+    let target_solid_ids = HashSet::from([solid_id]);
+    let evidence = crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
+        entities,
+        index,
+        &target_solid_ids,
+    );
     let mut healed_treatment_face_ids = Vec::new();
     let mut max_treatment_residual_mm = 0.0_f64;
     for &cap_index in &[first_index, second_index] {
@@ -191,8 +212,13 @@ pub fn recover_treatment_healed_extrusion_core_from_cap_faces(
             .iter()
             .filter(|item| {
                 item.solid_id == solid_id
-                    && item.kind == EdgeTreatmentKind::PlanarChamfer
+                    && matches!(
+                        item.kind,
+                        EdgeTreatmentKind::PlanarChamfer | EdgeTreatmentKind::CylindricalFillet
+                    )
                     && item.carrier_pair_unique
+                    && allowed_treatment_face_ids
+                        .is_none_or(|allowed| allowed.contains(&item.treatment_face_id))
                     && item
                         .carriers
                         .iter()

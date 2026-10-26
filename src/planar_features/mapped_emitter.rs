@@ -54,7 +54,7 @@ fn plan_additive_mapped_features(
     }
 
     let styles_by_target = collect_styles_by_target(entities);
-    let (_, groups) = grouped_boundary_features_with_index(entities, &index);
+    let (_, groups) = grouped_boundary_features_with_index(entities, &index, None);
     let mut hosts = Vec::<MappedFeatureHostPlan>::new();
     let mut host_positions = HashMap::<(u64, u64, u64, u64, u64), usize>::new();
     let mut claimed_faces = HashSet::<u64>::new();

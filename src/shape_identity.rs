@@ -117,6 +117,24 @@ pub(crate) fn solid_identity(
     })
 }
 
+pub(crate) fn relative_z90_quarter(
+    source: &SolidIdentity,
+    target: &SolidIdentity,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<u8> {
+    if source.key != target.key {
+        return None;
+    }
+    let target_points = normalized_points(&target.vertex_points, target.center, 0);
+    let target_topology = solid_topology_signature(target.root, entities, index, target.center, 0)?;
+    (0..4u8).find(|&quarter| {
+        normalized_points(&source.vertex_points, source.center, quarter) == target_points
+            && solid_topology_signature(source.root, entities, index, source.center, quarter)
+                .is_some_and(|topology| topology == target_topology)
+    })
+}
+
 /// Translation- and Z-quarter-turn-invariant identity for one manifold solid.
 pub fn solid_shape_key(
     root: u64,

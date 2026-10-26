@@ -202,20 +202,23 @@ fn infer_lattice(geoms: &HashMap<u64, FaceGeom>) -> Option<LatticeCandidate> {
 
     families
         .into_iter()
-        .map(
-            |((axis_index, pitch_ticks, sites), site_family_rows)| LatticeCandidate {
+        .map(|((axis_index, pitch_ticks, sites), mut site_family_rows)| {
+            site_family_rows.sort_unstable();
+            LatticeCandidate {
                 axis_index,
                 pitch_ticks,
                 sites,
                 votes: site_family_rows.len(),
                 site_family_rows,
-            },
-        )
+            }
+        })
         .max_by(|a, b| {
             a.votes
                 .cmp(&b.votes)
                 .then_with(|| a.sites.cmp(&b.sites))
                 .then_with(|| b.pitch_ticks.cmp(&a.pitch_ticks))
+                .then_with(|| b.axis_index.cmp(&a.axis_index))
+                .then_with(|| b.site_family_rows.cmp(&a.site_family_rows))
         })
 }
 fn choose_partition(
@@ -274,6 +277,18 @@ fn choose_partition(
             }
         }
     }
+
+    windows.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| {
+            a.1.iter()
+                .zip(&b.1)
+                .find_map(|(left, right)| {
+                    let ordering = left.total_cmp(right);
+                    ordering.is_ne().then_some(ordering)
+                })
+                .unwrap_or_else(|| a.1.len().cmp(&b.1.len()))
+        })
+    });
 
     let mut best: Option<Partition> = None;
     for (observation_score, centers) in windows {
@@ -518,7 +533,11 @@ fn classify_faces(
 
     let generic = census_hist
         .into_iter()
-        .max_by_key(|(_, count)| *count)
+        .max_by(|(left_census, left_count), (right_census, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_census.cmp(left_census))
+        })
         .map(|(census, _)| census)
         .unwrap_or_default();
     let generic_map = generic.into_iter().collect::<HashMap<_, _>>();
@@ -1110,6 +1129,29 @@ mod tests {
             support_axis: [0, 0, quantize_dir(1.0)],
             local_points: vec![[quantize_mm(-1.12), 0, 0], [quantize_mm(1.12), 0, 0]],
         }
+    }
+
+    #[test]
+    fn lattice_ties_choose_a_stable_axis() -> anyhow::Result<()> {
+        let pitch = 2.54;
+        let mut geoms = HashMap::new();
+        let mut id = 1_u64;
+        for x in 0_i32..4 {
+            for y in 0_i32..4 {
+                geoms.insert(
+                    id,
+                    test_face(id, [f64::from(x) * pitch, f64::from(y) * pitch, 0.0]),
+                );
+                id += 1;
+            }
+        }
+
+        let candidate = infer_lattice(&geoms).ok_or_else(|| anyhow::anyhow!("missing lattice"))?;
+        assert_eq!(candidate.axis_index, 0);
+        assert_eq!(candidate.pitch_ticks, quantize_mm(pitch));
+        assert_eq!(candidate.sites, 4);
+        assert_eq!(candidate.votes, 4);
+        Ok(())
     }
 
     #[test]

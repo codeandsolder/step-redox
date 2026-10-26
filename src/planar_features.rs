@@ -27,7 +27,8 @@ pub(crate) use mapped_emitter::instance_boundary_features;
 const MIN_GROUP: usize = 8;
 const MAX_FEATURE_FACES: usize = 128;
 const MAX_BOUNDARY_FEATURE_FACES: usize = 4096;
-const MIN_COMPLEX_HOST_EDGES: usize = 32;
+const MIN_BOUNDARY_HOST_BOUNDS: usize = 2;
+const MIN_BOUNDARY_HOST_EDGES: usize = 6;
 const SIDE_TOLERANCE: f64 = 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
@@ -674,6 +675,32 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
     BoundaryFeatureDiagnostics,
     Vec<BoundaryFeatureToolMaterialization>,
 )> {
+    materialize_boundary_feature_tools_for_analysis_filtered(entities, min_instances, None)
+}
+
+pub(crate) fn materialize_boundary_feature_tools_for_analysis_for_shells(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+    target_shells: &HashSet<u64>,
+) -> Result<(
+    BoundaryFeatureDiagnostics,
+    Vec<BoundaryFeatureToolMaterialization>,
+)> {
+    materialize_boundary_feature_tools_for_analysis_filtered(
+        entities,
+        min_instances,
+        Some(target_shells),
+    )
+}
+
+fn materialize_boundary_feature_tools_for_analysis_filtered(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+    target_shells: Option<&HashSet<u64>>,
+) -> Result<(
+    BoundaryFeatureDiagnostics,
+    Vec<BoundaryFeatureToolMaterialization>,
+)> {
     if min_instances == 0 {
         bail!("boundary feature tool materialization requires min_instances > 0");
     }
@@ -683,7 +710,8 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
         .into_iter()
         .map(|context| (context.shell_id, context.representation_id))
         .collect::<HashMap<_, _>>();
-    let report = diagnose_boundary_features_with_index(entities, &initial_index);
+    let report =
+        diagnose_boundary_features_with_index_filtered(entities, &initial_index, target_shells);
     let mut next_id = entities
         .iter()
         .map(entity_id)
@@ -909,10 +937,27 @@ pub fn peel_boundary_features_for_analysis(
         }
         bail!("boundary feature dependency graph has no leaf family");
     }
+    let stats = peel_boundary_feature_family_indices(entities, &report, &selected_indices)?;
+    Ok((report, stats))
+}
+
+pub(crate) fn peel_boundary_feature_family_indices(
+    entities: &mut [EntityInstance],
+    report: &BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+) -> Result<BoundaryFeaturePeelStats> {
+    if selected_indices.is_empty() {
+        return Ok(BoundaryFeaturePeelStats::default());
+    }
+    let index = build_index(entities);
     let selected = selected_indices
-        .into_iter()
-        .map(|index| &report.families[index])
-        .collect::<Vec<_>>();
+        .iter()
+        .map(|&index| {
+            report.families.get(index).ok_or_else(|| {
+                anyhow::anyhow!("boundary feature family index {index} is out of range")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
     let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
@@ -983,19 +1028,36 @@ pub fn peel_boundary_features_for_analysis(
 
     stats.faces_removed_from_shells = seen_faces.len();
     stats.interface_bounds_healed = seen_bounds.len();
-    Ok((report, stats))
+    Ok(stats)
 }
 
 pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatureDiagnostics {
     let index = build_index(entities);
-    diagnose_boundary_features_with_index(entities, &index)
+    diagnose_boundary_features_with_index_filtered(entities, &index, None)
+}
+
+pub(crate) fn diagnose_boundary_features_for_shells(
+    entities: &[EntityInstance],
+    target_shells: &HashSet<u64>,
+) -> BoundaryFeatureDiagnostics {
+    let index = build_index(entities);
+    diagnose_boundary_features_with_index_filtered(entities, &index, Some(target_shells))
 }
 
 fn diagnose_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> BoundaryFeatureDiagnostics {
-    let (mut report, grouped) = grouped_boundary_features_with_index(entities, index);
+    diagnose_boundary_features_with_index_filtered(entities, index, None)
+}
+
+fn diagnose_boundary_features_with_index_filtered(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    target_shells: Option<&HashSet<u64>>,
+) -> BoundaryFeatureDiagnostics {
+    let (mut report, grouped) =
+        grouped_boundary_features_with_index(entities, index, target_shells);
     let mut families = grouped
         .into_iter()
         .map(|members| {
@@ -1054,6 +1116,7 @@ fn diagnose_boundary_features_with_index(
 fn grouped_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
+    target_shells: Option<&HashSet<u64>>,
 ) -> (
     BoundaryFeatureDiagnostics,
     Vec<Vec<BoundaryFeatureCandidate>>,
@@ -1063,7 +1126,10 @@ fn grouped_boundary_features_with_index(
         return (report, Vec::new());
     }
 
-    let contexts = collect_shell_contexts(entities, index);
+    let contexts = collect_shell_contexts(entities, index)
+        .into_iter()
+        .filter(|context| target_shells.is_none_or(|shells| shells.contains(&context.shell_id)))
+        .collect::<Vec<_>>();
     report.shell_contexts = contexts.len();
     let mut candidates = Vec::<BoundaryFeatureCandidate>::new();
 
@@ -1083,7 +1149,8 @@ fn grouped_boundary_features_with_index(
                 let frame = plane_frame(face, entities, index)?;
                 let bounds = ref_list_param(face, 1, entities, index)?;
                 let boundary_edges = topology.face_edges.get(&face).map_or(0, HashSet::len);
-                (bounds.len() > MIN_GROUP || boundary_edges >= MIN_COMPLEX_HOST_EDGES)
+                (bounds.len() >= MIN_BOUNDARY_HOST_BOUNDS
+                    || boundary_edges >= MIN_BOUNDARY_HOST_EDGES)
                     .then_some((face, frame, bounds))
             })
             .collect::<Vec<_>>();

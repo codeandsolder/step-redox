@@ -436,7 +436,10 @@ fn find_matching_planar_face(
                 .is_some_and(|polygon| cyclic_polygon_match(expected, &polygon))
         })
         .collect::<Vec<_>>();
-    (matches.len() == 1).then_some(matches[0])
+    match matches.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
