@@ -605,10 +605,12 @@ fn detect_implicit_identity_site(
     };
     let source_items = source_params.get(1).and_then(entity_ref_list)?;
     let parent_items = parent_params.get(1).and_then(entity_ref_list)?;
-    source_items
+    let mut direct_items = source_items
         .iter()
         .copied()
-        .any(|item| item != mapping_origin && parent_items.contains(&item))
+        .filter(|item| *item != mapping_origin);
+    let first = direct_items.next()?;
+    (parent_items.contains(&first) && direct_items.all(|item| parent_items.contains(&item)))
         .then_some(site)
 }
 
