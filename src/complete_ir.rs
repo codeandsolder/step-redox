@@ -158,6 +158,17 @@ impl SectionReductionState {
             })
             .collect()
     }
+
+    fn next_boundary_pass_index(&self) -> usize {
+        self.replay
+            .values()
+            .flatten()
+            .filter_map(|step| match step {
+                LocalReductionStep::BoundaryFeature(feature) => Some(feature.pass_index),
+            })
+            .max()
+            .map_or(0, |last| last + 1)
+    }
 }
 
 #[derive(Debug)]
@@ -247,7 +258,10 @@ const WHOLE_SOLID_REDUCERS: [WholeSolidReducer; 2] = [
     recover_boundary_feature_candidates,
     recover_edge_treated_extrusion_candidates,
 ];
-const MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES: usize = 32;
+type LocalReducer = fn(&mut SectionReductionState, &HashMap<u64, u64>) -> Result<bool>;
+
+const LOCAL_REDUCERS: [LocalReducer; 1] = [recover_boundary_feature_pass];
+const MAX_LOCAL_REDUCTION_ROUNDS: usize = 32;
 const MAX_RECOVERY_FIXED_POINT_PASSES: usize = 16;
 
 /// Build the compact complete semantic IR for a normalized STEP exchange.
@@ -561,26 +575,8 @@ fn recover_boundary_feature_composites_for_section(
     }
 
     let mut reduction = SectionReductionState::new(entities, initial_index);
-    let mut recovered = BTreeMap::<u64, CadFragment>::new();
-    for pass_index in 0..MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES {
-        if !recover_boundary_feature_pass(&mut reduction, &active_target_shells, pass_index)? {
-            break;
-        }
-        let active_ids = active_target_shells
-            .values()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        for fragment in recover_replayed_boundary_hosts(&reduction, &active_ids)? {
-            recovered.insert(source_solid_id(&fragment.source), fragment);
-        }
-        if recovered.is_empty() {
-            continue;
-        }
-        active_target_shells.retain(|_, solid_id| !recovered.contains_key(solid_id));
-        if active_target_shells.is_empty() {
-            break;
-        }
-    }
+    let recovered =
+        recover_local_reductions_to_fixed_point(&mut reduction, &mut active_target_shells)?;
     let out = recovered.into_values().collect::<Vec<_>>();
 
     let mut expanded = Vec::new();
@@ -604,6 +600,42 @@ fn recover_boundary_feature_composites_for_section(
         expanded.push(fragment);
     }
     Ok(expanded)
+}
+
+fn recover_local_reductions_to_fixed_point(
+    reduction: &mut SectionReductionState,
+    active_target_shells: &mut HashMap<u64, u64>,
+) -> Result<BTreeMap<u64, CadFragment>> {
+    let mut recovered = BTreeMap::new();
+    for _ in 0..MAX_LOCAL_REDUCTION_ROUNDS {
+        let round_revision = reduction.revision;
+        for reducer in LOCAL_REDUCERS {
+            let reducer_revision = reduction.revision;
+            if !reducer(reduction, active_target_shells)? {
+                continue;
+            }
+            if reduction.revision == reducer_revision {
+                bail!("local reducer reported progress without advancing reduction state");
+            }
+
+            let active_ids = active_target_shells
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            for fragment in recover_replayed_boundary_hosts(reduction, &active_ids)? {
+                recovered.insert(source_solid_id(&fragment.source), fragment);
+            }
+            active_target_shells.retain(|_, solid_id| !recovered.contains_key(solid_id));
+            if active_target_shells.is_empty() {
+                return Ok(recovered);
+            }
+        }
+        if reduction.revision == round_revision {
+            return Ok(recovered);
+        }
+    }
+
+    bail!("local recovery did not reach a fixed point after {MAX_LOCAL_REDUCTION_ROUNDS} rounds")
 }
 
 fn recover_replayed_boundary_hosts(
@@ -718,8 +750,8 @@ fn relative_quarter_translation(
 fn recover_boundary_feature_pass(
     reduction: &mut SectionReductionState,
     target_shells: &HashMap<u64, u64>,
-    pass_index: usize,
 ) -> Result<bool> {
+    let pass_index = reduction.next_boundary_pass_index();
     let target_shell_ids = target_shells.keys().copied().collect::<HashSet<_>>();
     let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
         &reduction.working,
