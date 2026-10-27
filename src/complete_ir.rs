@@ -117,7 +117,6 @@ impl LocalRecoveryTargets {
         entities: &[EntityInstance],
         index: &HashMap<u64, usize>,
     ) -> Result<Self> {
-        let mut active_solids = BTreeSet::new();
         let mut shell_to_solid = BTreeMap::new();
         for &solid_id in solid_ids {
             let Some(shell_id) = crate::brep::manifold_shell(solid_id, entities, index) else {
@@ -130,10 +129,9 @@ impl LocalRecoveryTargets {
                     "local recovery shell #{shell_id} belongs to both solid #{previous} and #{solid_id}"
                 );
             }
-            active_solids.insert(solid_id);
         }
         Ok(Self {
-            solid_ids: active_solids,
+            solid_ids: solid_ids.clone(),
             shell_to_solid,
         })
     }
@@ -385,10 +383,10 @@ impl CompleteIrBuildState {
     }
 }
 
-type WholeSolidReducer =
+type WholeSolidCandidateProvider =
     for<'a> fn(&[RecoverySection<'a>], &BTreeSet<u64>) -> Result<Vec<CadFragment>>;
 
-const WHOLE_SOLID_REDUCERS: [WholeSolidReducer; 2] = [
+const WHOLE_SOLID_CANDIDATE_PROVIDERS: [WholeSolidCandidateProvider; 2] = [
     recover_boundary_feature_candidates,
     recover_edge_treated_extrusion_candidates,
 ];
@@ -396,7 +394,6 @@ type LocalReducer = fn(&mut SectionReductionState, &LocalRecoveryTargets) -> Res
 
 const LOCAL_REDUCERS: [LocalReducer; 1] = [recover_boundary_feature_pass];
 const MAX_LOCAL_REDUCTION_ROUNDS: usize = 32;
-const MAX_RECOVERY_FIXED_POINT_PASSES: usize = 16;
 
 /// Build the compact complete semantic IR for a normalized STEP exchange.
 ///
@@ -537,8 +534,7 @@ fn recover_complete_ir_build_state(
         .collect::<Vec<_>>();
 
     let instance_pattern_diagnostics = patterns;
-    let recovery =
-        recover_whole_solids_to_fixed_point(&recovery_sections, &body_scan, direct_candidates)?;
+    let recovery = recover_whole_solids(&recovery_sections, &body_scan, direct_candidates)?;
 
     let second = crate::clean_bytes(input, &Options::for_profile(OutputProfile::Compact))?;
     Ok(CompleteIrBuildState {
@@ -551,7 +547,7 @@ fn recover_complete_ir_build_state(
     })
 }
 
-fn recover_whole_solids_to_fixed_point(
+fn recover_whole_solids(
     sections: &[RecoverySection<'_>],
     body_scan: &[SourceSolidSummary],
     direct_candidates: Vec<CadFragment>,
@@ -559,38 +555,14 @@ fn recover_whole_solids_to_fixed_point(
     let mut recovery = WholeSolidRecoveryState::new(body_scan);
     recovery.add_candidates(direct_candidates)?;
 
-    for _ in 0..MAX_RECOVERY_FIXED_POINT_PASSES {
-        if recovery.unresolved_constructive_ids().is_empty() {
-            return Ok(recovery);
+    for provider in WHOLE_SOLID_CANDIDATE_PROVIDERS {
+        let targets = recovery.unresolved_constructive_ids();
+        if targets.is_empty() {
+            break;
         }
-        let revision_before = recovery.revision();
-
-        for reducer in WHOLE_SOLID_REDUCERS {
-            run_whole_solid_reducer(&mut recovery, |targets| reducer(sections, targets))?;
-        }
-
-        if recovery.revision() == revision_before {
-            return Ok(recovery);
-        }
+        recovery.add_candidates(provider(sections, &targets)?)?;
     }
-
-    bail!(
-        "complete IR whole-solid recovery did not reach a fixed point after {MAX_RECOVERY_FIXED_POINT_PASSES} passes"
-    )
-}
-
-fn run_whole_solid_reducer<F>(
-    recovery: &mut WholeSolidRecoveryState,
-    mut recover: F,
-) -> Result<usize>
-where
-    F: FnMut(&BTreeSet<u64>) -> Result<Vec<CadFragment>>,
-{
-    let targets = recovery.unresolved_constructive_ids();
-    if targets.is_empty() {
-        return Ok(0);
-    }
-    recovery.add_candidates(recover(&targets)?)
+    Ok(recovery)
 }
 
 fn recover_boundary_feature_candidates(
