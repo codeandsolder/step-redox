@@ -997,25 +997,25 @@ fn recover_reduced_brep_fragments(
 
     let mut out = Vec::new();
     for solid_id in candidate_solid_ids {
-        let Some(items) = by_solid.get_mut(&solid_id) else {
-            continue;
-        };
-        items.sort_by_key(|item| item.treatment_face_id);
         let Some(mut reduced) =
             crate::reduced_brep::ReducedSolid::from_step(solid_id, entities, index)
         else {
             continue;
         };
         let mut replay = Vec::new();
-        for item in items.iter().copied() {
-            let Some((profile, edge)) = replayable_edge_treatment(item) else {
-                continue;
-            };
-            if reduced.remove_edge_treatment(item).is_some() {
-                replay.push((item, profile, edge));
+        if let Some(items) = by_solid.get_mut(&solid_id) {
+            items.sort_by_key(|item| item.treatment_face_id);
+            for item in items.iter().copied() {
+                let Some((profile, edge)) = replayable_edge_treatment(item) else {
+                    continue;
+                };
+                if reduced.remove_edge_treatment(item).is_some() {
+                    replay.push((item, profile, edge));
+                }
             }
         }
-        if replay.is_empty() {
+        let coalesced = reduced.coalesce_coplanar_faces();
+        if replay.is_empty() && !coalesced {
             continue;
         }
 

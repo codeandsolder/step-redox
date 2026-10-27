@@ -5,7 +5,7 @@ use crate::math3::{
 };
 use crate::step_graph::entity_id;
 use ruststep::ast::EntityInstance;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const GEOM_TOL_MM: f64 = 1.0e-7;
 const DIR_TOL: f64 = 1.0e-10;
@@ -104,6 +104,124 @@ impl ReducedSolid {
 
     pub(crate) fn faces(&self) -> impl Iterator<Item = &ReducedFace> {
         self.faces.values()
+    }
+
+    /// Remove representation-only seams between coplanar faces.
+    ///
+    /// This is a geometry-preserving normalization, not a CAD feature replay:
+    /// two adjacent planar patches with the same oriented support become one
+    /// patch when their union has one unambiguous boundary loop.
+    pub(crate) fn coalesce_coplanar_faces(&mut self) -> bool {
+        let mut candidate = self.clone();
+        if !candidate.coalesce_coplanar_faces_inner() {
+            return false;
+        }
+        if candidate.validate_closed_topology().is_none() {
+            return false;
+        }
+        *self = candidate;
+        true
+    }
+
+    fn coalesce_coplanar_faces_inner(&mut self) -> bool {
+        let mut edge_faces = HashMap::<u64, BTreeSet<u64>>::new();
+        for face in self.faces.values() {
+            for edge in face.loop_edges() {
+                edge_faces.entry(edge.edge_id).or_default().insert(face.id);
+            }
+        }
+
+        let mut adjacency = BTreeMap::<u64, BTreeSet<u64>>::new();
+        for users in edge_faces.values() {
+            if users.len() != 2 {
+                continue;
+            }
+            let mut users = users.iter().copied();
+            let (Some(first_id), Some(second_id)) = (users.next(), users.next()) else {
+                continue;
+            };
+            let (Some(first), Some(second)) =
+                (self.faces.get(&first_id), self.faces.get(&second_id))
+            else {
+                continue;
+            };
+            if !coplanar_same_orientation(first, second) {
+                continue;
+            }
+            adjacency.entry(first_id).or_default().insert(second_id);
+            adjacency.entry(second_id).or_default().insert(first_id);
+        }
+        if adjacency.is_empty() {
+            return false;
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut components = Vec::<BTreeSet<u64>>::new();
+        for &root in adjacency.keys() {
+            if seen.contains(&root) {
+                continue;
+            }
+            let mut stack = vec![root];
+            let mut component = BTreeSet::new();
+            while let Some(face_id) = stack.pop() {
+                if !component.insert(face_id) {
+                    continue;
+                }
+                seen.insert(face_id);
+                if let Some(neighbors) = adjacency.get(&face_id) {
+                    stack.extend(neighbors.iter().copied());
+                }
+            }
+            if component.len() > 1 {
+                components.push(component);
+            }
+        }
+
+        let mut changed = false;
+        for component in components {
+            let Some((canonical_id, boundary)) =
+                coplanar_component_boundary(&component, &self.faces, &edge_faces)
+            else {
+                continue;
+            };
+            let Some((bound_id, loop_id)) = self.allocate_loop_ids() else {
+                continue;
+            };
+            let max_residual_mm = component
+                .iter()
+                .filter_map(|face_id| match self.faces.get(face_id)?.surface {
+                    SurfaceSupport::Plane(plane) => Some(plane.max_residual_mm),
+                    _ => None,
+                })
+                .fold(0.0_f64, f64::max);
+            let Some(canonical) = self.faces.get_mut(&canonical_id) else {
+                continue;
+            };
+            if let SurfaceSupport::Plane(ref mut plane) = canonical.surface {
+                plane.max_residual_mm = plane.max_residual_mm.max(max_residual_mm);
+            }
+            canonical.loops = vec![FaceLoop {
+                bound_id,
+                loop_id,
+                outer: true,
+                orientation: true,
+                edges: boundary,
+            }];
+            for face_id in component {
+                if face_id != canonical_id {
+                    self.faces.remove(&face_id);
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn allocate_loop_ids(&mut self) -> Option<(u64, u64)> {
+        let bound_id = self.next_virtual_id;
+        let loop_id = bound_id.checked_add(1)?;
+        self.next_virtual_id = bound_id.checked_add(2)?;
+        Some((bound_id, loop_id))
     }
 
     /// Undo one proven edge treatment as a topology operation.
@@ -266,6 +384,98 @@ impl ReducedSolid {
             })
             .then_some(())
     }
+}
+
+fn coplanar_same_orientation(first: &ReducedFace, second: &ReducedFace) -> bool {
+    let (SurfaceSupport::Plane(first_plane), SurfaceSupport::Plane(second_plane)) =
+        (&first.surface, &second.surface)
+    else {
+        return false;
+    };
+    let Some(first_normal) = normalize3(first_plane.normal, DIR_TOL) else {
+        return false;
+    };
+    let Some(second_normal) = normalize3(second_plane.normal, DIR_TOL) else {
+        return false;
+    };
+    let first_outward = if first.surface_forward {
+        first_normal
+    } else {
+        mul(first_normal, -1.0)
+    };
+    let second_outward = if second.surface_forward {
+        second_normal
+    } else {
+        mul(second_normal, -1.0)
+    };
+    if dot3(first_outward, second_outward) < 1.0 - DIR_TOL {
+        return false;
+    }
+    dot3(
+        first_normal,
+        sub(second_plane.origin_mm, first_plane.origin_mm),
+    )
+    .abs()
+        <= GEOM_TOL_MM
+}
+
+fn coplanar_component_boundary(
+    component: &BTreeSet<u64>,
+    faces: &BTreeMap<u64, ReducedFace>,
+    edge_faces: &HashMap<u64, BTreeSet<u64>>,
+) -> Option<(u64, Vec<OrientedEdgeUse>)> {
+    let canonical_id = *component.iter().next()?;
+    let mut boundary = Vec::new();
+    for face_id in component {
+        let face = faces.get(face_id)?;
+        for edge in face.loop_edges() {
+            let users = edge_faces.get(&edge.edge_id)?;
+            let internal = users.len() == 2 && users.iter().all(|user| component.contains(user));
+            if !internal {
+                boundary.push(edge.clone());
+            }
+        }
+    }
+    if boundary.is_empty() {
+        return None;
+    }
+    let mut edge_counts = HashMap::<u64, usize>::new();
+    for edge in &boundary {
+        *edge_counts.entry(edge.edge_id).or_default() += 1;
+    }
+    if edge_counts.values().any(|&count| count != 1) {
+        return None;
+    }
+    Some((canonical_id, trace_single_boundary_loop(boundary)?))
+}
+
+fn trace_single_boundary_loop(edges: Vec<OrientedEdgeUse>) -> Option<Vec<OrientedEdgeUse>> {
+    let mut by_start = BTreeMap::<u64, OrientedEdgeUse>::new();
+    for edge in edges {
+        if by_start.insert(edge.start_vertex, edge).is_some() {
+            return None;
+        }
+    }
+    let start_vertex = *by_start.keys().next()?;
+    let mut current_vertex = start_vertex;
+    let edge_count = by_start.len();
+    let mut out = Vec::with_capacity(edge_count);
+    for _ in 0..edge_count {
+        let edge = by_start.remove(&current_vertex)?;
+        current_vertex = edge.end_vertex;
+        out.push(edge);
+        if current_vertex == start_vertex {
+            break;
+        }
+    }
+    if current_vertex != start_vertex || !by_start.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+fn dot3(first: [f64; 3], second: [f64; 3]) -> f64 {
+    first[2].mul_add(second[2], first[1].mul_add(second[1], first[0] * second[0]))
 }
 
 fn deterministic_perpendicular(normal: [f64; 3]) -> Option<[f64; 3]> {
@@ -621,6 +831,59 @@ mod tests {
         assert_eq!(edges[2].start_mm, [1.0, 0.0, 0.0]);
         assert_eq!(edits.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn coplanar_partition_seam_collapses_to_one_face() {
+        let plane = SurfaceSupport::Plane(PlaneSupport {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            max_residual_mm: 0.0,
+        });
+        let first = ReducedFace {
+            id: 1,
+            surface: plane.clone(),
+            surface_forward: true,
+            loops: vec![FaceLoop {
+                bound_id: 101,
+                loop_id: 201,
+                outer: true,
+                orientation: true,
+                edges: vec![
+                    line_edge(10, 1, 2, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+                    line_edge(11, 2, 3, [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]),
+                    line_edge(12, 3, 1, [1.0, 1.0, 0.0], [0.0, 0.0, 0.0]),
+                ],
+            }],
+        };
+        let second = ReducedFace {
+            id: 2,
+            surface: plane,
+            surface_forward: true,
+            loops: vec![FaceLoop {
+                bound_id: 102,
+                loop_id: 202,
+                outer: true,
+                orientation: true,
+                edges: vec![
+                    line_edge(12, 1, 3, [0.0, 0.0, 0.0], [1.0, 1.0, 0.0]),
+                    line_edge(13, 3, 4, [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
+                    line_edge(14, 4, 1, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]),
+                ],
+            }],
+        };
+        let mut solid = ReducedSolid {
+            solid_id: 100,
+            faces: BTreeMap::from([(1, first), (2, second)]),
+            next_virtual_id: 1000,
+        };
+
+        assert!(solid.coalesce_coplanar_faces_inner());
+        assert_eq!(solid.faces.len(), 1);
+        let merged = &solid.faces[&1];
+        assert_eq!(merged.loops.len(), 1);
+        assert_eq!(merged.loops[0].edges.len(), 4);
+        assert!(merged.loops[0].edges.iter().all(|edge| edge.edge_id != 12));
     }
 
     #[test]
