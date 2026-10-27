@@ -278,7 +278,7 @@ impl WholeSolidRecoveryState {
         Ok(changes)
     }
 
-    fn unresolved_constructive_ids(&self) -> BTreeSet<u64> {
+    fn constructively_unresolved_ids(&self) -> BTreeSet<u64> {
         self.source_solid_ids
             .iter()
             .copied()
@@ -290,7 +290,7 @@ impl WholeSolidRecoveryState {
             .collect()
     }
 
-    fn unselected_ids(&self) -> BTreeSet<u64> {
+    fn semantically_unrecovered_ids(&self) -> BTreeSet<u64> {
         self.source_solid_ids
             .iter()
             .copied()
@@ -442,7 +442,7 @@ where
     F: FnMut(u64) -> Result<Option<CadFragment>>,
 {
     let mut failures = Vec::new();
-    for solid_id in recovery.unselected_ids() {
+    for solid_id in recovery.semantically_unrecovered_ids() {
         match recover(solid_id) {
             Ok(Some(fragment)) if source_solid_id(&fragment.source) == solid_id => {
                 if let Err(error) = recovery.add_candidates([fragment]) {
@@ -556,7 +556,7 @@ fn recover_whole_solids(
     recovery.add_candidates(direct_candidates)?;
 
     for provider in WHOLE_SOLID_CANDIDATE_PROVIDERS {
-        let targets = recovery.unresolved_constructive_ids();
+        let targets = recovery.constructively_unresolved_ids();
         if targets.is_empty() {
             break;
         }
@@ -1649,13 +1649,20 @@ mod tests {
     fn recovery_state_unifies_selection_and_unresolved_tracking() -> Result<()> {
         let report = report_with_unrecovered(&[7, 8]);
         let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
-        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([7, 8]));
+        assert_eq!(
+            state.constructively_unresolved_ids(),
+            BTreeSet::from([7, 8])
+        );
 
         assert_eq!(state.add_candidates([descriptive_fragment(7, 1)])?, 1);
-        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([7, 8]));
+        assert_eq!(
+            state.constructively_unresolved_ids(),
+            BTreeSet::from([7, 8])
+        );
+        assert_eq!(state.semantically_unrecovered_ids(), BTreeSet::from([8]));
 
         assert_eq!(state.add_candidates([constructive_fragment(7, 4)])?, 1);
-        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([8]));
+        assert_eq!(state.constructively_unresolved_ids(), BTreeSet::from([8]));
         let revision = state.revision();
 
         assert_eq!(state.add_candidates([constructive_fragment(7, 6)])?, 0);
