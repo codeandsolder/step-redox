@@ -99,6 +99,13 @@ struct RecoveredBoundaryFeatureFamily {
 }
 
 #[derive(Debug)]
+struct RecoverySection<'a> {
+    entities: &'a [EntityInstance],
+    index: HashMap<u64, usize>,
+    dominant_extrusions: Vec<crate::dominant_extrusions::DominantExtrusionCandidate>,
+}
+
+#[derive(Debug)]
 struct SelectedWholeSolid {
     fragment: CadFragment,
     complexity: u64,
@@ -271,15 +278,18 @@ pub(crate) fn recover_complete_ir_exchange(
     let mut patterns = Vec::new();
     let mut body_scan = Vec::new();
     let mut direct_candidates = Vec::new();
+    let mut recovery_sections = Vec::with_capacity(exchange.data.len());
 
     for section in &exchange.data {
         let index = crate::step_graph::build_index(&section.entities);
-        signatures.extend(
+        let section_signatures =
             crate::solid_revolutions::detect_solid_surface_signatures_with_index(
                 &section.entities,
                 &index,
-            ),
-        );
+            );
+        let dominant_extrusions =
+            crate::dominant_extrusions::detect_dominant_extrusion_candidates(&section_signatures);
+        signatures.extend(section_signatures);
         direct_candidates.extend(recover_constructive_fragments_from_entities_with_index(
             &section.entities,
             &index,
@@ -294,6 +304,11 @@ pub(crate) fn recover_complete_ir_exchange(
             4,
         ));
         body_scan.extend(scan_source_solids(&section.entities, &index));
+        recovery_sections.push(RecoverySection {
+            entities: &section.entities,
+            index,
+            dominant_extrusions,
+        });
     }
 
     body_scan.sort_by_key(|solid| solid.solid_id);
@@ -313,14 +328,8 @@ pub(crate) fn recover_complete_ir_exchange(
         .collect::<Vec<_>>();
 
     let instance_pattern_diagnostics = patterns;
-    let dominant_extrusions =
-        crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
-    let recovery = recover_whole_solids_to_fixed_point(
-        exchange,
-        &body_scan,
-        direct_candidates,
-        &dominant_extrusions,
-    )?;
+    let recovery =
+        recover_whole_solids_to_fixed_point(&recovery_sections, &body_scan, direct_candidates)?;
 
     let selected = recovery.selected_fragments();
     let recovered_ids = selected.keys().copied().collect::<BTreeSet<_>>();
@@ -378,10 +387,9 @@ pub(crate) fn recover_complete_ir_exchange(
 }
 
 fn recover_whole_solids_to_fixed_point(
-    exchange: &Exchange,
+    sections: &[RecoverySection<'_>],
     body_scan: &[SourceSolidSummary],
     direct_candidates: Vec<CadFragment>,
-    dominant_extrusions: &[crate::dominant_extrusions::DominantExtrusionCandidate],
 ) -> Result<WholeSolidRecoveryState> {
     let mut recovery = WholeSolidRecoveryState::new(body_scan);
     recovery.add_candidates(direct_candidates)?;
@@ -394,10 +402,9 @@ fn recover_whole_solids_to_fixed_point(
 
         run_whole_solid_reducer(&mut recovery, |targets| {
             let mut candidates = Vec::new();
-            for section in &exchange.data {
+            for section in sections {
                 candidates.extend(recover_boundary_feature_composites_for_section(
-                    &section.entities,
-                    targets,
+                    section, targets,
                 )?);
             }
             Ok(candidates)
@@ -405,17 +412,11 @@ fn recover_whole_solids_to_fixed_point(
 
         run_whole_solid_reducer(&mut recovery, |targets| {
             let mut candidates = Vec::new();
-            for section in &exchange.data {
-                let index = crate::step_graph::build_index(&section.entities);
-                let section_candidates = dominant_extrusions
-                    .iter()
-                    .filter(|candidate| index.contains_key(&candidate.solid_id))
-                    .cloned()
-                    .collect::<Vec<_>>();
+            for section in sections {
                 candidates.extend(recover_edge_treated_extrusion_fragments_from_candidates(
-                    &section.entities,
-                    &index,
-                    &section_candidates,
+                    section.entities,
+                    &section.index,
+                    &section.dominant_extrusions,
                     Some(targets),
                 )?);
             }
@@ -447,16 +448,17 @@ where
 }
 
 fn recover_boundary_feature_composites_for_section(
-    entities: &[EntityInstance],
+    section: &RecoverySection<'_>,
     target_solid_ids: &BTreeSet<u64>,
 ) -> Result<Vec<CadFragment>> {
-    let initial_index = crate::step_graph::build_index(entities);
+    let entities = section.entities;
+    let initial_index = &section.index;
     let mut keyed_targets = BTreeMap::<crate::shape_identity::ShapeKey, Vec<_>>::new();
     let mut representative_targets = BTreeSet::new();
     let mut recovery_groups = HashMap::new();
     for &solid_id in target_solid_ids {
         if let Some(identity) =
-            crate::shape_identity::solid_identity(solid_id, entities, &initial_index)
+            crate::shape_identity::solid_identity(solid_id, entities, initial_index)
         {
             keyed_targets
                 .entry(identity.key.clone())
@@ -478,7 +480,7 @@ fn recover_boundary_feature_composites_for_section(
     let target_shells = representative_targets
         .iter()
         .filter_map(|&solid_id| {
-            crate::brep::manifold_shell(solid_id, entities, &initial_index)
+            crate::brep::manifold_shell(solid_id, entities, initial_index)
                 .map(|shell_id| (shell_id, solid_id))
         })
         .collect::<HashMap<_, _>>();
@@ -533,7 +535,7 @@ fn recover_boundary_feature_composites_for_section(
                     source_identity,
                     target_identity,
                     entities,
-                    &initial_index,
+                    initial_index,
                 )? {
                     expanded.push(instance);
                 }
