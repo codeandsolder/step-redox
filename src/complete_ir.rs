@@ -549,50 +549,39 @@ fn recover_boundary_feature_composites_for_section(
         recovery_groups.insert(representative, group);
     }
 
-    let target_shells = representative_targets
+    let mut active_target_shells = representative_targets
         .iter()
         .filter_map(|&solid_id| {
             crate::brep::manifold_shell(solid_id, entities, initial_index)
                 .map(|shell_id| (shell_id, solid_id))
         })
         .collect::<HashMap<_, _>>();
-    if target_shells.is_empty() {
+    if active_target_shells.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut reduction = SectionReductionState::new(entities, initial_index);
+    let mut recovered = BTreeMap::<u64, CadFragment>::new();
     for pass_index in 0..MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES {
-        if !recover_boundary_feature_pass(&mut reduction, &target_shells, pass_index)? {
+        if !recover_boundary_feature_pass(&mut reduction, &active_target_shells, pass_index)? {
+            break;
+        }
+        let active_ids = active_target_shells
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for fragment in recover_replayed_boundary_hosts(&reduction, &active_ids)? {
+            recovered.insert(source_solid_id(&fragment.source), fragment);
+        }
+        if recovered.is_empty() {
+            continue;
+        }
+        active_target_shells.retain(|_, solid_id| !recovered.contains_key(solid_id));
+        if active_target_shells.is_empty() {
             break;
         }
     }
-
-    let mut host_candidates = recover_constructive_fragments_from_entities(&reduction.working)?;
-    let working_index = crate::step_graph::build_index(&reduction.working);
-    let host_target_ids = target_shells.values().copied().collect::<BTreeSet<_>>();
-    host_candidates.extend(recover_edge_treated_extrusion_fragments(
-        &reduction.working,
-        &working_index,
-        Some(&host_target_ids),
-    )?);
-    let host_refs = host_candidates.iter().collect::<Vec<_>>();
-    let selected_hosts = select_cheapest_whole_solid_fragments(&host_refs)?;
-    let mut out = Vec::new();
-    for &solid_id in reduction.replay.keys() {
-        let families = reduction.boundary_features(solid_id);
-        if families.is_empty() {
-            continue;
-        }
-        let Some(host) = selected_hosts.get(&solid_id) else {
-            continue;
-        };
-        if !is_constructive_source(&host.source) {
-            continue;
-        }
-        out.push(compose_boundary_feature_fragment(
-            solid_id, host, &families,
-        )?);
-    }
+    let out = recovered.into_values().collect::<Vec<_>>();
 
     let mut expanded = Vec::new();
     for fragment in out {
@@ -615,6 +604,43 @@ fn recover_boundary_feature_composites_for_section(
         expanded.push(fragment);
     }
     Ok(expanded)
+}
+
+fn recover_replayed_boundary_hosts(
+    reduction: &SectionReductionState,
+    target_solid_ids: &BTreeSet<u64>,
+) -> Result<Vec<CadFragment>> {
+    if target_solid_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut host_candidates = recover_constructive_fragments_from_entities_with_index(
+        &reduction.working,
+        &reduction.index,
+    )?;
+    host_candidates.extend(recover_edge_treated_extrusion_fragments(
+        &reduction.working,
+        &reduction.index,
+        Some(target_solid_ids),
+    )?);
+    let host_refs = host_candidates.iter().collect::<Vec<_>>();
+    let selected_hosts = select_cheapest_whole_solid_fragments(&host_refs)?;
+    let mut out = Vec::new();
+    for &solid_id in target_solid_ids {
+        let families = reduction.boundary_features(solid_id);
+        if families.is_empty() {
+            continue;
+        }
+        let Some(host) = selected_hosts.get(&solid_id) else {
+            continue;
+        };
+        if !is_constructive_source(&host.source) {
+            continue;
+        }
+        out.push(compose_boundary_feature_fragment(
+            solid_id, host, &families,
+        )?);
+    }
+    Ok(out)
 }
 
 fn instantiate_boundary_feature_fragment(
