@@ -98,7 +98,88 @@ struct RecoveredBoundaryFeatureFamily {
     members: Vec<BoundaryFeatureInstanceEvidence>,
 }
 
+#[derive(Debug)]
+struct SelectedWholeSolid {
+    fragment: CadFragment,
+    complexity: u64,
+}
+
+#[derive(Debug)]
+struct WholeSolidRecoveryState {
+    source_solid_ids: BTreeSet<u64>,
+    selected: BTreeMap<u64, SelectedWholeSolid>,
+    revision: u64,
+}
+
+impl WholeSolidRecoveryState {
+    fn new(body_scan: &[SourceSolidSummary]) -> Self {
+        Self {
+            source_solid_ids: body_scan.iter().map(|solid| solid.solid_id).collect(),
+            selected: BTreeMap::new(),
+            revision: 0,
+        }
+    }
+
+    fn add_candidates<I>(&mut self, candidates: I) -> Result<usize>
+    where
+        I: IntoIterator<Item = CadFragment>,
+    {
+        let mut changes = 0;
+        for fragment in candidates {
+            let solid_id = source_solid_id(&fragment.source);
+            if !self.source_solid_ids.contains(&solid_id) {
+                bail!("recovered CAD fragment refers to missing solid #{solid_id}");
+            }
+            let complexity = fragment.model.complexity_score(fragment.root)?;
+            let replace = self.selected.get(&solid_id).is_none_or(|existing| {
+                whole_solid_candidate_is_preferred(
+                    &existing.fragment.source,
+                    existing.complexity,
+                    &fragment.source,
+                    complexity,
+                )
+            });
+            if replace {
+                self.selected.insert(
+                    solid_id,
+                    SelectedWholeSolid {
+                        fragment,
+                        complexity,
+                    },
+                );
+                self.revision += 1;
+                changes += 1;
+            }
+        }
+        Ok(changes)
+    }
+
+    fn unresolved_constructive_ids(&self) -> BTreeSet<u64> {
+        self.source_solid_ids
+            .iter()
+            .copied()
+            .filter(|solid_id| {
+                self.selected
+                    .get(solid_id)
+                    .is_none_or(|selected| !is_constructive_source(&selected.fragment.source))
+            })
+            .collect()
+    }
+
+    fn selected_fragments(&self) -> BTreeMap<u64, &CadFragment> {
+        self.selected
+            .iter()
+            .map(|(&solid_id, selected)| (solid_id, &selected.fragment))
+            .collect()
+    }
+
+    const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
 const MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES: usize = 32;
+const MAX_RECOVERY_FIXED_POINT_PASSES: usize = 16;
 
 /// Build the compact complete semantic IR for a normalized STEP exchange.
 ///
@@ -187,15 +268,9 @@ pub(crate) fn recover_complete_ir_exchange(
     input: &[u8],
 ) -> Result<CompleteIr> {
     let mut signatures = Vec::new();
-    let mut extrusions = Vec::new();
-    let mut revolutions = Vec::new();
-    let mut radial_slots = Vec::new();
-    let mut closed_sweeps = Vec::new();
-    let mut revolved_round_tails = Vec::new();
-    let mut open_sweeps = Vec::new();
-    let mut periodic_chains = Vec::new();
     let mut patterns = Vec::new();
     let mut body_scan = Vec::new();
+    let mut direct_candidates = Vec::new();
 
     for section in &exchange.data {
         let index = crate::step_graph::build_index(&section.entities);
@@ -205,35 +280,13 @@ pub(crate) fn recover_complete_ir_exchange(
                 &index,
             ),
         );
-        extrusions.extend(crate::solid_extrusions::detect_solid_extrusions_with_index(
+        direct_candidates.extend(recover_constructive_fragments_from_entities_with_index(
             &section.entities,
             &index,
-        ));
-        revolutions.extend(
-            crate::solid_revolutions::detect_solid_revolutions_with_index(
-                &section.entities,
-                &index,
-            ),
-        );
-        radial_slots.extend(
-            crate::solid_revolutions::detect_radial_slot_revolutions_with_index(
-                &section.entities,
-                &index,
-            ),
-        );
-        closed_sweeps.extend(crate::solid_sweeps::detect_closed_round_sweeps(
-            &section.entities,
-        ));
-        revolved_round_tails.extend(crate::solid_sweeps::detect_revolved_round_tails(
-            &section.entities,
-        ));
-        open_sweeps.extend(crate::solid_sweeps::detect_open_rectangular_sweeps(
-            &section.entities,
-        ));
-        periodic_chains.extend(crate::periodic_chains::detect_periodic_chains_with_index(
-            &section.entities,
-            &index,
-        ));
+        )?);
+        let periodic_chains =
+            crate::periodic_chains::detect_periodic_chains_with_index(&section.entities, &index);
+        direct_candidates.extend(recover_periodic_chain_fragments(&periodic_chains)?);
         patterns.extend(crate::patterns::detect_instance_patterns_with_index(
             &section.entities,
             &index,
@@ -260,94 +313,17 @@ pub(crate) fn recover_complete_ir_exchange(
         .collect::<Vec<_>>();
 
     let instance_pattern_diagnostics = patterns;
-    let solid_extrusions = recover_solid_extrusion_fragments(&extrusions)?;
-    let solid_revolutions = recover_solid_revolution_fragments(&revolutions)?;
-    let radial_slot_revolutions = recover_radial_slot_revolution_fragments(&radial_slots)?;
-    let mut solid_sweeps = recover_closed_round_sweep_fragments(&closed_sweeps)?;
-    solid_sweeps.extend(recover_revolved_round_tail_fragments(
-        &revolved_round_tails,
-    )?);
-    solid_sweeps.extend(recover_open_rectangular_sweep_fragments(&open_sweeps)?);
-    let periodic_chains = recover_periodic_chain_fragments(&periodic_chains)?;
+    let dominant_extrusions =
+        crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
+    let recovery = recover_whole_solids_to_fixed_point(
+        exchange,
+        &body_scan,
+        direct_candidates,
+        &dominant_extrusions,
+    )?;
 
-    let base_candidates = solid_extrusions
-        .iter()
-        .chain(&solid_revolutions)
-        .chain(&radial_slot_revolutions)
-        .chain(&solid_sweeps)
-        .chain(&periodic_chains)
-        .collect::<Vec<_>>();
-    let base_selected = select_cheapest_whole_solid_fragments(&base_candidates)?;
-    let boundary_feature_targets = body_scan
-        .iter()
-        .filter_map(|solid| {
-            base_selected
-                .get(&solid.solid_id)
-                .is_none_or(|fragment| !is_constructive_source(&fragment.source))
-                .then_some(solid.solid_id)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut boundary_feature_composites = Vec::new();
-    if !boundary_feature_targets.is_empty() {
-        for section in &exchange.data {
-            boundary_feature_composites.extend(recover_boundary_feature_composites_for_section(
-                &section.entities,
-                &boundary_feature_targets,
-            )?);
-        }
-    }
-
-    let pre_treatment_candidates = base_candidates
-        .iter()
-        .copied()
-        .chain(boundary_feature_composites.iter())
-        .collect::<Vec<_>>();
-    let pre_treatment_selected = select_cheapest_whole_solid_fragments(&pre_treatment_candidates)?;
-    let treatment_targets = body_scan
-        .iter()
-        .filter_map(|solid| {
-            pre_treatment_selected
-                .get(&solid.solid_id)
-                .is_none_or(|fragment| !is_constructive_source(&fragment.source))
-                .then_some(solid.solid_id)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut treated_extrusions = Vec::new();
-    if !treatment_targets.is_empty() {
-        let dominant_extrusions =
-            crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
-        for section in &exchange.data {
-            let index = crate::step_graph::build_index(&section.entities);
-            let section_candidates = dominant_extrusions
-                .iter()
-                .filter(|candidate| index.contains_key(&candidate.solid_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            treated_extrusions.extend(recover_edge_treated_extrusion_fragments_from_candidates(
-                &section.entities,
-                &index,
-                &section_candidates,
-                Some(&treatment_targets),
-            )?);
-        }
-    }
-
-    let whole_solid_candidates = pre_treatment_candidates
-        .into_iter()
-        .chain(treated_extrusions.iter())
-        .collect::<Vec<_>>();
-    let selected = select_cheapest_whole_solid_fragments(&whole_solid_candidates)?;
+    let selected = recovery.selected_fragments();
     let recovered_ids = selected.keys().copied().collect::<BTreeSet<_>>();
-
-    let by_id = body_scan
-        .iter()
-        .map(|solid| (solid.solid_id, solid))
-        .collect::<HashMap<_, _>>();
-    for solid_id in &recovered_ids {
-        if !by_id.contains_key(solid_id) {
-            bail!("recovered CAD fragment refers to missing solid #{solid_id}");
-        }
-    }
 
     let unrecovered_solids = body_scan
         .iter()
@@ -399,6 +375,75 @@ pub(crate) fn recover_complete_ir_exchange(
         body_scan: BodyScanSummary { solids: body_scan },
         unrecovered_solids,
     })
+}
+
+fn recover_whole_solids_to_fixed_point(
+    exchange: &Exchange,
+    body_scan: &[SourceSolidSummary],
+    direct_candidates: Vec<CadFragment>,
+    dominant_extrusions: &[crate::dominant_extrusions::DominantExtrusionCandidate],
+) -> Result<WholeSolidRecoveryState> {
+    let mut recovery = WholeSolidRecoveryState::new(body_scan);
+    recovery.add_candidates(direct_candidates)?;
+
+    for _ in 0..MAX_RECOVERY_FIXED_POINT_PASSES {
+        if recovery.unresolved_constructive_ids().is_empty() {
+            return Ok(recovery);
+        }
+        let revision_before = recovery.revision();
+
+        run_whole_solid_reducer(&mut recovery, |targets| {
+            let mut candidates = Vec::new();
+            for section in &exchange.data {
+                candidates.extend(recover_boundary_feature_composites_for_section(
+                    &section.entities,
+                    targets,
+                )?);
+            }
+            Ok(candidates)
+        })?;
+
+        run_whole_solid_reducer(&mut recovery, |targets| {
+            let mut candidates = Vec::new();
+            for section in &exchange.data {
+                let index = crate::step_graph::build_index(&section.entities);
+                let section_candidates = dominant_extrusions
+                    .iter()
+                    .filter(|candidate| index.contains_key(&candidate.solid_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                candidates.extend(recover_edge_treated_extrusion_fragments_from_candidates(
+                    &section.entities,
+                    &index,
+                    &section_candidates,
+                    Some(targets),
+                )?);
+            }
+            Ok(candidates)
+        })?;
+
+        if recovery.revision() == revision_before {
+            return Ok(recovery);
+        }
+    }
+
+    bail!(
+        "complete IR whole-solid recovery did not reach a fixed point after {MAX_RECOVERY_FIXED_POINT_PASSES} passes"
+    )
+}
+
+fn run_whole_solid_reducer<F>(
+    recovery: &mut WholeSolidRecoveryState,
+    mut recover: F,
+) -> Result<usize>
+where
+    F: FnMut(&BTreeSet<u64>) -> Result<Vec<CadFragment>>,
+{
+    let targets = recovery.unresolved_constructive_ids();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    recovery.add_candidates(recover(&targets)?)
 }
 
 fn recover_boundary_feature_composites_for_section(
@@ -666,11 +711,18 @@ fn recover_constructive_fragments_from_entities(
     entities: &[EntityInstance],
 ) -> Result<Vec<CadFragment>> {
     let index = crate::step_graph::build_index(entities);
-    let extrusions = crate::solid_extrusions::detect_solid_extrusions_with_index(entities, &index);
+    recover_constructive_fragments_from_entities_with_index(entities, &index)
+}
+
+fn recover_constructive_fragments_from_entities_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<Vec<CadFragment>> {
+    let extrusions = crate::solid_extrusions::detect_solid_extrusions_with_index(entities, index);
     let revolutions =
-        crate::solid_revolutions::detect_solid_revolutions_with_index(entities, &index);
+        crate::solid_revolutions::detect_solid_revolutions_with_index(entities, index);
     let radial_slots =
-        crate::solid_revolutions::detect_radial_slot_revolutions_with_index(entities, &index);
+        crate::solid_revolutions::detect_radial_slot_revolutions_with_index(entities, index);
     let closed_sweeps = crate::solid_sweeps::detect_closed_round_sweeps(entities);
     let revolved_round_tails = crate::solid_sweeps::detect_revolved_round_tails(entities);
     let open_sweeps = crate::solid_sweeps::detect_open_rectangular_sweeps(entities);
@@ -1152,7 +1204,7 @@ fn scan_source_solids(
     out
 }
 
-fn source_solid_id(source: &CadFragmentSource) -> u64 {
+const fn source_solid_id(source: &CadFragmentSource) -> u64 {
     match source {
         CadFragmentSource::SolidExtrusion { solid_id, .. }
         | CadFragmentSource::SolidRevolution { solid_id, .. }
@@ -1169,6 +1221,22 @@ const fn is_constructive_source(source: &CadFragmentSource) -> bool {
     !matches!(source, CadFragmentSource::PeriodicChain { .. })
 }
 
+const fn whole_solid_candidate_is_preferred(
+    existing_source: &CadFragmentSource,
+    existing_complexity: u64,
+    candidate_source: &CadFragmentSource,
+    candidate_complexity: u64,
+) -> bool {
+    match (
+        is_constructive_source(existing_source),
+        is_constructive_source(candidate_source),
+    ) {
+        (true, false) => false,
+        (false, true) => true,
+        _ => candidate_complexity < existing_complexity,
+    }
+}
+
 fn select_cheapest_whole_solid_fragments<'a>(
     candidates: &[&'a CadFragment],
 ) -> Result<BTreeMap<u64, &'a CadFragment>> {
@@ -1176,20 +1244,19 @@ fn select_cheapest_whole_solid_fragments<'a>(
     for &fragment in candidates {
         let solid_id = source_solid_id(&fragment.source);
         let complexity = fragment.model.complexity_score(fragment.root)?;
-        match selected.get(&solid_id) {
-            Some((existing_fragment, existing_complexity))
-                if is_constructive_source(&existing_fragment.source)
-                    && !is_constructive_source(&fragment.source) => {}
-            Some((existing_fragment, _))
-                if !is_constructive_source(&existing_fragment.source)
-                    && is_constructive_source(&fragment.source) =>
-            {
-                selected.insert(solid_id, (fragment, complexity));
-            }
-            Some((_, existing_complexity)) if *existing_complexity <= complexity => {}
-            _ => {
-                selected.insert(solid_id, (fragment, complexity));
-            }
+        let replace =
+            selected
+                .get(&solid_id)
+                .is_none_or(|(existing_fragment, existing_complexity)| {
+                    whole_solid_candidate_is_preferred(
+                        &existing_fragment.source,
+                        *existing_complexity,
+                        &fragment.source,
+                        complexity,
+                    )
+                });
+        if replace {
+            selected.insert(solid_id, (fragment, complexity));
         }
     }
     Ok(selected
@@ -1274,6 +1341,29 @@ mod tests {
         }
     }
 
+    fn descriptive_fragment(solid_id: u64, boxes: usize) -> CadFragment {
+        assert!(boxes > 0);
+        let mut model = CadModel::new();
+        let children = (0..boxes)
+            .map(|_| {
+                model.add_node(CadNode::Primitive(Primitive::Box {
+                    size_mm: [1.0, 1.0, 1.0],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let root = if children.len() == 1 {
+            children[0]
+        } else {
+            model.add_node(CadNode::Assembly { children })
+        };
+        model.add_root(root).expect("test root");
+        CadFragment {
+            source: CadFragmentSource::PeriodicChain { solid_id, sites: 2 },
+            model,
+            root,
+        }
+    }
+
     fn extrusion_core_union_fragment(solid_id: u64) -> Result<CadFragment> {
         let mut model = CadModel::new();
         let root = model.add_node(CadNode::Primitive(Primitive::Box {
@@ -1288,6 +1378,42 @@ mod tests {
             model,
             root,
         })
+    }
+
+    #[test]
+    fn recovery_state_unifies_selection_and_unresolved_tracking() -> Result<()> {
+        let report = report_with_unrecovered(&[7, 8]);
+        let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
+        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([7, 8]));
+
+        assert_eq!(state.add_candidates([descriptive_fragment(7, 1)])?, 1);
+        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([7, 8]));
+
+        assert_eq!(state.add_candidates([constructive_fragment(7, 4)])?, 1);
+        assert_eq!(state.unresolved_constructive_ids(), BTreeSet::from([8]));
+        let revision = state.revision();
+
+        assert_eq!(state.add_candidates([constructive_fragment(7, 6)])?, 0);
+        assert_eq!(state.revision(), revision);
+        assert_eq!(state.add_candidates([constructive_fragment(7, 1)])?, 1);
+        assert!(state.revision() > revision);
+        assert_eq!(
+            state.selected_fragments()[&7]
+                .model
+                .complexity_score(state.selected_fragments()[&7].root)?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_state_rejects_candidate_for_unknown_solid() {
+        let report = report_with_unrecovered(&[7]);
+        let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
+        let error = state
+            .add_candidates([constructive_fragment(8, 1)])
+            .expect_err("unknown source solid must fail");
+        assert!(error.to_string().contains("missing solid #8"));
     }
 
     #[test]
