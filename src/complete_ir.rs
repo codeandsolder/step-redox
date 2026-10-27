@@ -105,6 +105,59 @@ struct RecoverySection<'a> {
     dominant_extrusions: Vec<crate::dominant_extrusions::DominantExtrusionCandidate>,
 }
 
+#[derive(Debug)]
+struct LocalRecoveryTargets {
+    solid_ids: BTreeSet<u64>,
+    shell_to_solid: BTreeMap<u64, u64>,
+}
+
+impl LocalRecoveryTargets {
+    fn from_solids(
+        solid_ids: &BTreeSet<u64>,
+        entities: &[EntityInstance],
+        index: &HashMap<u64, usize>,
+    ) -> Result<Self> {
+        let mut active_solids = BTreeSet::new();
+        let mut shell_to_solid = BTreeMap::new();
+        for &solid_id in solid_ids {
+            let Some(shell_id) = crate::brep::manifold_shell(solid_id, entities, index) else {
+                continue;
+            };
+            if let Some(previous) = shell_to_solid.insert(shell_id, solid_id)
+                && previous != solid_id
+            {
+                bail!(
+                    "local recovery shell #{shell_id} belongs to both solid #{previous} and #{solid_id}"
+                );
+            }
+            active_solids.insert(solid_id);
+        }
+        Ok(Self {
+            solid_ids: active_solids,
+            shell_to_solid,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.solid_ids.is_empty()
+    }
+
+    fn shell_ids(&self) -> HashSet<u64> {
+        self.shell_to_solid.keys().copied().collect()
+    }
+
+    fn solid_for_shell(&self, shell_id: u64) -> Option<u64> {
+        self.shell_to_solid.get(&shell_id).copied()
+    }
+
+    fn retain_unrecovered(&mut self, recovered: &BTreeMap<u64, CadFragment>) {
+        self.solid_ids
+            .retain(|solid_id| !recovered.contains_key(solid_id));
+        self.shell_to_solid
+            .retain(|_, solid_id| self.solid_ids.contains(solid_id));
+    }
+}
+
 #[derive(Debug, Clone)]
 enum LocalReductionStep {
     BoundaryFeature(RecoveredBoundaryFeatureFamily),
@@ -339,7 +392,7 @@ const WHOLE_SOLID_REDUCERS: [WholeSolidReducer; 2] = [
     recover_boundary_feature_candidates,
     recover_edge_treated_extrusion_candidates,
 ];
-type LocalReducer = fn(&mut SectionReductionState, &HashMap<u64, u64>) -> Result<bool>;
+type LocalReducer = fn(&mut SectionReductionState, &LocalRecoveryTargets) -> Result<bool>;
 
 const LOCAL_REDUCERS: [LocalReducer; 1] = [recover_boundary_feature_pass];
 const MAX_LOCAL_REDUCTION_ROUNDS: usize = 32;
@@ -599,20 +652,14 @@ fn recover_boundary_feature_composites_for_section(
         recovery_groups.insert(representative, group);
     }
 
-    let mut active_target_shells = representative_targets
-        .iter()
-        .filter_map(|&solid_id| {
-            crate::brep::manifold_shell(solid_id, entities, initial_index)
-                .map(|shell_id| (shell_id, solid_id))
-        })
-        .collect::<HashMap<_, _>>();
-    if active_target_shells.is_empty() {
+    let mut active_targets =
+        LocalRecoveryTargets::from_solids(&representative_targets, entities, initial_index)?;
+    if active_targets.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut reduction = SectionReductionState::new(entities, initial_index);
-    let recovered =
-        recover_local_reductions_to_fixed_point(&mut reduction, &mut active_target_shells)?;
+    let recovered = recover_local_reductions_to_fixed_point(&mut reduction, &mut active_targets)?;
     let out = recovered.into_values().collect::<Vec<_>>();
 
     let mut expanded = Vec::new();
@@ -640,29 +687,25 @@ fn recover_boundary_feature_composites_for_section(
 
 fn recover_local_reductions_to_fixed_point(
     reduction: &mut SectionReductionState,
-    active_target_shells: &mut HashMap<u64, u64>,
+    active_targets: &mut LocalRecoveryTargets,
 ) -> Result<BTreeMap<u64, CadFragment>> {
     let mut recovered = BTreeMap::new();
     for _ in 0..MAX_LOCAL_REDUCTION_ROUNDS {
         let round_revision = reduction.revision;
         for reducer in LOCAL_REDUCERS {
             let reducer_revision = reduction.revision;
-            if !reducer(reduction, active_target_shells)? {
+            if !reducer(reduction, active_targets)? {
                 continue;
             }
             if reduction.revision == reducer_revision {
                 bail!("local reducer reported progress without advancing reduction state");
             }
 
-            let active_ids = active_target_shells
-                .values()
-                .copied()
-                .collect::<BTreeSet<_>>();
-            for fragment in recover_replayed_boundary_hosts(reduction, &active_ids)? {
+            for fragment in recover_replayed_boundary_hosts(reduction, &active_targets.solid_ids)? {
                 recovered.insert(source_solid_id(&fragment.source), fragment);
             }
-            active_target_shells.retain(|_, solid_id| !recovered.contains_key(solid_id));
-            if active_target_shells.is_empty() {
+            active_targets.retain_unrecovered(&recovered);
+            if active_targets.is_empty() {
                 return Ok(recovered);
             }
         }
@@ -785,10 +828,10 @@ fn relative_quarter_translation(
 
 fn recover_boundary_feature_pass(
     reduction: &mut SectionReductionState,
-    target_shells: &HashMap<u64, u64>,
+    targets: &LocalRecoveryTargets,
 ) -> Result<bool> {
     let pass_index = reduction.next_boundary_pass_index();
-    let target_shell_ids = target_shells.keys().copied().collect::<HashSet<_>>();
+    let target_shell_ids = targets.shell_ids();
     let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
         &reduction.working,
         &reduction.index,
@@ -797,7 +840,11 @@ fn recover_boundary_feature_pass(
     let target_family_indices =
         crate::planar_features::leaf_feature_family_indices(&report.families)
             .into_iter()
-            .filter(|&index| target_shells.contains_key(&report.families[index].shell_id))
+            .filter(|&index| {
+                targets
+                    .shell_to_solid
+                    .contains_key(&report.families[index].shell_id)
+            })
             .collect::<Vec<_>>();
     if target_family_indices.is_empty() {
         return Ok(false);
@@ -822,7 +869,7 @@ fn recover_boundary_feature_pass(
 
     for family_index in target_family_indices {
         let family = &report.families[family_index];
-        let Some(&source_solid_id) = target_shells.get(&family.shell_id) else {
+        let Some(source_solid_id) = targets.solid_for_shell(family.shell_id) else {
             continue;
         };
         let Some(source_member) = family.members.first().cloned() else {
