@@ -237,6 +237,13 @@ impl WholeSolidRecoveryState {
     }
 }
 
+type WholeSolidReducer =
+    for<'a> fn(&[RecoverySection<'a>], &BTreeSet<u64>) -> Result<Vec<CadFragment>>;
+
+const WHOLE_SOLID_REDUCERS: [WholeSolidReducer; 2] = [
+    recover_boundary_feature_candidates,
+    recover_edge_treated_extrusion_candidates,
+];
 const MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES: usize = 32;
 const MAX_RECOVERY_FIXED_POINT_PASSES: usize = 16;
 
@@ -452,28 +459,9 @@ fn recover_whole_solids_to_fixed_point(
         }
         let revision_before = recovery.revision();
 
-        run_whole_solid_reducer(&mut recovery, |targets| {
-            let mut candidates = Vec::new();
-            for section in sections {
-                candidates.extend(recover_boundary_feature_composites_for_section(
-                    section, targets,
-                )?);
-            }
-            Ok(candidates)
-        })?;
-
-        run_whole_solid_reducer(&mut recovery, |targets| {
-            let mut candidates = Vec::new();
-            for section in sections {
-                candidates.extend(recover_edge_treated_extrusion_fragments_from_candidates(
-                    section.entities,
-                    &section.index,
-                    &section.dominant_extrusions,
-                    Some(targets),
-                )?);
-            }
-            Ok(candidates)
-        })?;
+        for reducer in WHOLE_SOLID_REDUCERS {
+            run_whole_solid_reducer(&mut recovery, |targets| reducer(sections, targets))?;
+        }
 
         if recovery.revision() == revision_before {
             return Ok(recovery);
@@ -497,6 +485,35 @@ where
         return Ok(0);
     }
     recovery.add_candidates(recover(&targets)?)
+}
+
+fn recover_boundary_feature_candidates(
+    sections: &[RecoverySection<'_>],
+    targets: &BTreeSet<u64>,
+) -> Result<Vec<CadFragment>> {
+    let mut candidates = Vec::new();
+    for section in sections {
+        candidates.extend(recover_boundary_feature_composites_for_section(
+            section, targets,
+        )?);
+    }
+    Ok(candidates)
+}
+
+fn recover_edge_treated_extrusion_candidates(
+    sections: &[RecoverySection<'_>],
+    targets: &BTreeSet<u64>,
+) -> Result<Vec<CadFragment>> {
+    let mut candidates = Vec::new();
+    for section in sections {
+        candidates.extend(recover_edge_treated_extrusion_fragments_from_candidates(
+            section.entities,
+            &section.index,
+            &section.dominant_extrusions,
+            Some(targets),
+        )?);
+    }
+    Ok(candidates)
 }
 
 fn recover_boundary_feature_composites_for_section(
