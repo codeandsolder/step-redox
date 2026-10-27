@@ -37,6 +37,7 @@ pub mod periodic_resize;
 mod planar_features;
 pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
 pub mod profile_curves;
+mod reduced_brep;
 mod shape_identity;
 pub mod solid_extrusions;
 pub mod solid_revolutions;

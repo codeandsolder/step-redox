@@ -2,7 +2,7 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
-use crate::edge_treatments::{EdgeTreatmentEvidence, EdgeTreatmentKind, EdgeTreatmentVirtualEdge};
+use crate::edge_treatments::EdgeTreatmentVirtualEdge;
 use crate::math2::{
     cross as cross2, distance as distance2, dot as dot2, normalize as normalize2, sub as sub2,
 };
@@ -11,6 +11,7 @@ use crate::math3::{
     point_to_unit_line_distance, sub,
 };
 pub use crate::profile_curves::RecoveredProfileCurve;
+use crate::reduced_brep::{ReducedFace, ReducedSolid};
 use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
@@ -175,69 +176,53 @@ pub(crate) fn recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
     index: &HashMap<u64, usize>,
     allowed_treatment_face_ids: Option<&HashSet<u64>>,
 ) -> Option<TreatmentHealedExtrusionCoreCandidate> {
-    let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
-    let mut faces = vec![
-        face_info(cap_face_ids[0], entities, index)?,
-        face_info(cap_face_ids[1], entities, index)?,
-    ];
-    let mut unreadable_planes = Vec::<PlaneSupport>::new();
-    for face_id in face_ids
-        .iter()
-        .copied()
-        .filter(|face_id| !cap_face_ids.contains(face_id))
-    {
-        if let Some(face) = face_info(face_id, entities, index) {
-            faces.push(face);
-            continue;
-        }
-        let surface_id = brep::face_surface(face_id, entities, index)?;
-        if let SurfaceSupport::Plane(plane) = brep::surface_support(surface_id, entities, index) {
-            unreadable_planes.push(plane);
-        }
-    }
-    let first_index = 0;
-    let second_index = 1;
-
     let target_solid_ids = HashSet::from([solid_id]);
     let evidence = crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
         entities,
         index,
         &target_solid_ids,
     );
+    let mut reduced = ReducedSolid::from_step(solid_id, entities, index)?;
+    let cap_set = cap_face_ids.into_iter().collect::<HashSet<_>>();
+    let mut reductions = evidence
+        .iter()
+        .filter(|item| {
+            item.solid_id == solid_id
+                && item.carrier_pair_unique
+                && matches!(item.virtual_edge, EdgeTreatmentVirtualEdge::Segment { .. })
+                && allowed_treatment_face_ids
+                    .is_none_or(|allowed| allowed.contains(&item.treatment_face_id))
+                && item
+                    .carriers
+                    .iter()
+                    .any(|carrier| cap_set.contains(&carrier.face_id))
+        })
+        .collect::<Vec<_>>();
+    reductions.sort_by_key(|item| item.treatment_face_id);
+    reductions.dedup_by_key(|item| item.treatment_face_id);
+
     let mut healed_treatment_face_ids = Vec::new();
     let mut max_treatment_residual_mm = 0.0_f64;
-    for &cap_index in &[first_index, second_index] {
-        let cap_id = faces[cap_index].id;
-        let cap_evidence = evidence
-            .iter()
-            .filter(|item| {
-                item.solid_id == solid_id
-                    && matches!(
-                        item.kind,
-                        EdgeTreatmentKind::PlanarChamfer | EdgeTreatmentKind::CylindricalFillet
-                    )
-                    && item.carrier_pair_unique
-                    && allowed_treatment_face_ids
-                        .is_none_or(|allowed| allowed.contains(&item.treatment_face_id))
-                    && item
-                        .carriers
-                        .iter()
-                        .any(|carrier| carrier.face_id == cap_id)
-            })
-            .collect::<Vec<_>>();
-        for item in cap_evidence {
-            heal_cap_planar_chamfer(&mut faces[cap_index], item)?;
-            healed_treatment_face_ids.push(item.treatment_face_id);
-            max_treatment_residual_mm =
-                max_treatment_residual_mm.max(item.max_boundary_residual_mm);
-        }
+    for item in reductions {
+        reduced.remove_edge_treatment(item)?;
+        healed_treatment_face_ids.push(item.treatment_face_id);
+        max_treatment_residual_mm = max_treatment_residual_mm.max(item.max_boundary_residual_mm);
     }
     if healed_treatment_face_ids.is_empty() {
         return None;
     }
-    healed_treatment_face_ids.sort_unstable();
-    healed_treatment_face_ids.dedup();
 
+    let mut faces = Vec::new();
+    let mut unreadable_planes = Vec::<PlaneSupport>::new();
+    for face in reduced.faces() {
+        if let Some(face) = face_info_from_reduced(face) {
+            faces.push(face);
+        } else if let SurfaceSupport::Plane(plane) = face.surface {
+            unreadable_planes.push(plane);
+        }
+    }
+    let first_index = faces.iter().position(|face| face.id == cap_face_ids[0])?;
+    let second_index = faces.iter().position(|face| face.id == cap_face_ids[1])?;
     let pair = ordered_cap_pair(first_index, second_index, &faces)?;
     let translated_residual = prove_translated_caps(&pair)?;
     if has_intervening_translated_boundary(&pair, &faces)
@@ -278,89 +263,26 @@ fn unreadable_parallel_plane_may_intervene(pair: &CapPairProof<'_>, plane: Plane
     offset > GEOM_TOL_MM && offset < pair.height_mm - GEOM_TOL_MM
 }
 
-fn heal_cap_planar_chamfer(face: &mut FaceInfo, evidence: &EdgeTreatmentEvidence) -> Option<()> {
-    let carrier = evidence
-        .carriers
-        .iter()
-        .find(|carrier| carrier.face_id == face.id)?;
-    let [shared_edge_id] = carrier.shared_edge_ids.as_slice() else {
-        return None;
-    };
-    let EdgeTreatmentVirtualEdge::Segment { start_mm, end_mm } = evidence.virtual_edge else {
-        return None;
-    };
-
-    let matches = face
-        .loops
-        .iter()
-        .enumerate()
-        .flat_map(|(loop_index, loop_)| {
-            loop_
-                .edges
-                .iter()
-                .enumerate()
-                .filter_map(move |(edge_index, edge)| {
-                    (edge.edge_id == *shared_edge_id).then_some((loop_index, edge_index))
-                })
+fn face_info_from_reduced(face: &ReducedFace) -> Option<FaceInfo> {
+    if matches!(face.surface, SurfaceSupport::Other { .. })
+        || face.loops.is_empty()
+        || face.loops.iter().any(|loop_| {
+            loop_.edges.is_empty()
+                || loop_
+                    .edges
+                    .iter()
+                    .any(|edge| matches!(edge.support, CurveSupport::Other { .. }))
         })
-        .collect::<Vec<_>>();
-    let [(loop_index, edge_index)] = matches.as_slice() else {
-        return None;
-    };
-    let loop_ = &mut face.loops[*loop_index];
-    if loop_.edges.len() < 3 {
-        return None;
-    }
-    let previous_index = (edge_index + loop_.edges.len() - 1) % loop_.edges.len();
-    let next_index = (edge_index + 1) % loop_.edges.len();
-    let current = &loop_.edges[*edge_index];
-    if distance(loop_.edges[previous_index].end_mm, current.start_mm) > GEOM_TOL_MM
-        || distance(current.end_mm, loop_.edges[next_index].start_mm) > GEOM_TOL_MM
     {
         return None;
     }
-    let CurveSupport::Line(previous_line) = loop_.edges[previous_index].support else {
-        return None;
-    };
-    let CurveSupport::Line(next_line) = loop_.edges[next_index].support else {
-        return None;
-    };
-    let previous_direction = normalize3(previous_line.direction, DIR_TOL)?;
-    let next_direction = normalize3(next_line.direction, DIR_TOL)?;
-    let assignment = [(start_mm, end_mm), (end_mm, start_mm)].into_iter().find(
-        |(previous_point, next_point)| {
-            point_to_unit_line_distance(
-                *previous_point,
-                previous_line.origin_mm,
-                previous_direction,
-            ) <= GEOM_TOL_MM
-                && point_to_unit_line_distance(*next_point, next_line.origin_mm, next_direction)
-                    <= GEOM_TOL_MM
-        },
-    )?;
-    let (healed_start, healed_end) = assignment;
-    let healed_direction = normalize3(sub(healed_end, healed_start), DIR_TOL)?;
-
-    loop_.edges[previous_index].end_mm = healed_start;
-    loop_.edges[*edge_index].start_mm = healed_start;
-    loop_.edges[*edge_index].end_mm = healed_end;
-    loop_.edges[*edge_index].support = CurveSupport::Line(brep::LineSupport {
-        origin_mm: healed_start,
-        direction: healed_direction,
-    });
-    loop_.edges[next_index].start_mm = healed_end;
-    if loop_.edges.iter().enumerate().any(|(index, edge)| {
-        let next = &loop_.edges[(index + 1) % loop_.edges.len()];
-        distance(edge.end_mm, next.start_mm) > GEOM_TOL_MM
-    }) {
-        return None;
-    }
-    face.loop_edges = face
-        .loops
-        .iter()
-        .flat_map(|loop_| loop_.edges.iter().cloned())
-        .collect();
-    Some(())
+    Some(FaceInfo {
+        id: face.id,
+        surface: face.surface.clone(),
+        surface_forward: face.surface_forward,
+        loops: face.loops.clone(),
+        loop_edges: face.loop_edges().cloned().collect(),
+    })
 }
 
 pub(crate) fn recover_extrusion_core_from_cap_faces_with_index(
@@ -2090,59 +2012,6 @@ mod tests {
             loops: vec![loop_],
             loop_edges: edges,
         }
-    }
-
-    #[test]
-    fn planar_chamfer_heals_trimmed_cap_edge_to_virtual_edge() -> anyhow::Result<()> {
-        let mut face = square_face_info(1, 10, 0.0, false);
-        face.loops[0].edges[0].start_mm = [0.0, 0.25, 0.0];
-        face.loops[0].edges[0].end_mm = [1.0, 0.25, 0.0];
-        face.loops[0].edges[0].support = CurveSupport::Line(brep::LineSupport {
-            origin_mm: [0.0, 0.25, 0.0],
-            direction: [1.0, 0.0, 0.0],
-        });
-        face.loops[0].edges[3].end_mm = [0.0, 0.25, 0.0];
-        face.loops[0].edges[1].start_mm = [1.0, 0.25, 0.0];
-        face.loop_edges = face.loops[0].edges.clone();
-
-        let evidence = EdgeTreatmentEvidence {
-            solid_id: 100,
-            treatment_face_id: 99,
-            kind: EdgeTreatmentKind::PlanarChamfer,
-            strength: crate::edge_treatments::EdgeTreatmentEvidenceStrength::ContinuationCandidate,
-            carrier_pair_unique: true,
-            treatment_support: "plane".to_owned(),
-            carriers: [
-                crate::edge_treatments::EdgeTreatmentCarrier {
-                    face_id: 1,
-                    support: "plane".to_owned(),
-                    shared_edge_ids: vec![10],
-                },
-                crate::edge_treatments::EdgeTreatmentCarrier {
-                    face_id: 2,
-                    support: "plane".to_owned(),
-                    shared_edge_ids: vec![20],
-                },
-            ],
-            inferred_radius_mm: None,
-            inferred_setbacks_mm: None,
-            inferred_angle_rad: Some(std::f64::consts::FRAC_PI_4),
-            carrier_angle_rad: std::f64::consts::FRAC_PI_2,
-            virtual_edge: EdgeTreatmentVirtualEdge::Segment {
-                start_mm: [0.0, 0.0, 0.0],
-                end_mm: [1.0, 0.0, 0.0],
-            },
-            max_boundary_residual_mm: 0.0,
-        };
-
-        heal_cap_planar_chamfer(&mut face, &evidence)
-            .ok_or_else(|| anyhow::anyhow!("single-line cap chamfer should heal analytically"))?;
-        let healed = &face.loops[0].edges;
-        assert_eq!(healed[0].start_mm, [0.0, 0.0, 0.0]);
-        assert_eq!(healed[0].end_mm, [1.0, 0.0, 0.0]);
-        assert_eq!(healed[3].end_mm, [0.0, 0.0, 0.0]);
-        assert_eq!(healed[1].start_mm, [1.0, 0.0, 0.0]);
-        Ok(())
     }
 
     #[test]
