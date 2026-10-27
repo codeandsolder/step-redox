@@ -204,8 +204,8 @@ impl SectionReductionState {
             .get(&solid_id)
             .into_iter()
             .flatten()
-            .filter_map(|step| match step {
-                LocalReductionStep::BoundaryFeature(feature) => Some(feature.clone()),
+            .map(|step| match step {
+                LocalReductionStep::BoundaryFeature(feature) => feature.clone(),
             })
             .collect()
     }
@@ -214,12 +214,18 @@ impl SectionReductionState {
         self.replay
             .values()
             .flatten()
-            .filter_map(|step| match step {
-                LocalReductionStep::BoundaryFeature(feature) => Some(feature.pass_index),
+            .map(|step| match step {
+                LocalReductionStep::BoundaryFeature(feature) => feature.pass_index,
             })
             .max()
             .map_or(0, |last| last + 1)
     }
+}
+
+#[derive(Debug)]
+struct PreparedBoundaryReduction {
+    steps: Vec<(u64, LocalReductionStep)>,
+    family_indices: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -303,10 +309,6 @@ impl WholeSolidRecoveryState {
             .iter()
             .map(|(&solid_id, selected)| (solid_id, &selected.fragment))
             .collect()
-    }
-
-    const fn revision(&self) -> u64 {
-        self.revision
     }
 }
 
@@ -822,12 +824,52 @@ fn recover_boundary_feature_pass(
         return Ok(false);
     }
 
+    let prepared = prepare_boundary_feature_reduction(
+        reduction,
+        targets,
+        &target_shell_ids,
+        &report,
+        &target_family_indices,
+        pass_index,
+    )?;
+
+    if prepared.family_indices.is_empty() {
+        return Ok(false);
+    }
+    let working_index = reduction.index.clone();
+    let peelable_family_indices = prepared.family_indices;
+    reduction.apply(prepared.steps, |working| {
+        let stats = crate::planar_features::peel_boundary_feature_family_indices_with_index(
+            working,
+            &working_index,
+            &report,
+            &peelable_family_indices,
+        )?;
+        if stats.families != peelable_family_indices.len() {
+            bail!(
+                "boundary-feature reduction peeled {} of {} selected families",
+                stats.families,
+                peelable_family_indices.len()
+            );
+        }
+        Ok(stats.families != 0)
+    })
+}
+
+fn prepare_boundary_feature_reduction(
+    reduction: &SectionReductionState,
+    targets: &LocalRecoveryTargets,
+    target_shell_ids: &HashSet<u64>,
+    report: &crate::planar_features::BoundaryFeatureDiagnostics,
+    target_family_indices: &[usize],
+    pass_index: usize,
+) -> Result<PreparedBoundaryReduction> {
     let mut tool_entities = reduction.working.clone();
     let (tool_report, materialized) =
         crate::planar_features::materialize_boundary_feature_tools_for_analysis_for_shells(
             &mut tool_entities,
             1,
-            &target_shell_ids,
+            target_shell_ids,
         )?;
     if tool_report.families.len() != report.families.len() {
         bail!("boundary-feature tool materialization changed family indexing");
@@ -835,11 +877,10 @@ fn recover_boundary_feature_pass(
     let tool_candidates = recover_constructive_fragments_from_entities(&tool_entities)?;
     let tool_refs = tool_candidates.iter().collect::<Vec<_>>();
     let selected_tools = select_cheapest_whole_solid_fragments(&tool_refs)?;
-    let working_index = &reduction.index;
     let mut peelable_family_indices = Vec::new();
     let mut pending_steps = Vec::new();
 
-    for family_index in target_family_indices {
+    for &family_index in target_family_indices {
         let family = &report.families[family_index];
         let Some(source_solid_id) = targets.solid_for_shell(family.shell_id) else {
             continue;
@@ -860,19 +901,8 @@ fn recover_boundary_feature_pass(
             continue;
         }
         let mut tool = (*tool).clone();
-        if matches!(tool.source, CadFragmentSource::SolidExtrusion { .. }) {
-            let Some(host_outwards) = feature_host_outward_directions(
-                &family.host_face_ids,
-                &reduction.working,
-                working_index,
-            ) else {
-                continue;
-            };
-            if regularize_boundary_tool_for_boolean(&mut tool, family.polarity, &host_outwards)
-                .is_err()
-            {
-                continue;
-            }
+        if !regularize_boundary_feature_tool(&mut tool, family, reduction) {
+            continue;
         }
         pending_steps.push((
             source_solid_id,
@@ -886,27 +916,28 @@ fn recover_boundary_feature_pass(
         ));
         peelable_family_indices.push(family_index);
     }
-
-    if peelable_family_indices.is_empty() {
-        return Ok(false);
-    }
-    let working_index = reduction.index.clone();
-    reduction.apply(pending_steps, |working| {
-        let stats = crate::planar_features::peel_boundary_feature_family_indices_with_index(
-            working,
-            &working_index,
-            &report,
-            &peelable_family_indices,
-        )?;
-        if stats.families != peelable_family_indices.len() {
-            bail!(
-                "boundary-feature reduction peeled {} of {} selected families",
-                stats.families,
-                peelable_family_indices.len()
-            );
-        }
-        Ok(stats.families != 0)
+    Ok(PreparedBoundaryReduction {
+        steps: pending_steps,
+        family_indices: peelable_family_indices,
     })
+}
+
+fn regularize_boundary_feature_tool(
+    tool: &mut CadFragment,
+    family: &crate::planar_features::BoundaryFeatureFamilyEvidence,
+    reduction: &SectionReductionState,
+) -> bool {
+    if !matches!(tool.source, CadFragmentSource::SolidExtrusion { .. }) {
+        return true;
+    }
+    let Some(host_outwards) = feature_host_outward_directions(
+        &family.host_face_ids,
+        &reduction.working,
+        &reduction.index,
+    ) else {
+        return false;
+    };
+    regularize_boundary_tool_for_boolean(tool, family.polarity, &host_outwards).is_ok()
 }
 
 fn recover_constructive_fragments_from_entities(
@@ -1539,8 +1570,10 @@ mod tests {
         build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures)
     }
 
-    fn constructive_fragment(solid_id: u64, boxes: usize) -> CadFragment {
-        assert!(boxes > 0);
+    fn constructive_fragment(solid_id: u64, boxes: usize) -> Result<CadFragment> {
+        if boxes == 0 {
+            bail!("test fragment requires at least one box");
+        }
         let mut model = CadModel::new();
         let children = (0..boxes)
             .map(|_| {
@@ -1554,8 +1587,8 @@ mod tests {
         } else {
             model.add_node(CadNode::Assembly { children })
         };
-        model.add_root(root).expect("test root");
-        CadFragment {
+        model.add_root(root)?;
+        Ok(CadFragment {
             source: CadFragmentSource::SolidExtrusion {
                 solid_id,
                 cap_face_ids: [1, 2],
@@ -1563,30 +1596,32 @@ mod tests {
             },
             model,
             root,
-        }
+        })
     }
 
-    fn boundary_reduction_step(solid_id: u64) -> (u64, LocalReductionStep) {
+    fn boundary_reduction_step(solid_id: u64) -> Result<(u64, LocalReductionStep)> {
         let member = BoundaryFeatureInstanceEvidence {
             face_ids: vec![10],
             center_mm: [0.0; 3],
             normalized_quarter: 0,
             interface_bound_ids: vec![11],
         };
-        (
+        Ok((
             solid_id,
             LocalReductionStep::BoundaryFeature(RecoveredBoundaryFeatureFamily {
                 pass_index: 0,
                 polarity: FeaturePolarity::Subtractive,
-                tool: constructive_fragment(99, 1),
+                tool: constructive_fragment(99, 1)?,
                 source_member: member.clone(),
                 members: vec![member],
             }),
-        )
+        ))
     }
 
-    fn descriptive_fragment(solid_id: u64, boxes: usize) -> CadFragment {
-        assert!(boxes > 0);
+    fn descriptive_fragment(solid_id: u64, boxes: usize) -> Result<CadFragment> {
+        if boxes == 0 {
+            bail!("test fragment requires at least one box");
+        }
         let mut model = CadModel::new();
         let children = (0..boxes)
             .map(|_| {
@@ -1600,12 +1635,12 @@ mod tests {
         } else {
             model.add_node(CadNode::Assembly { children })
         };
-        model.add_root(root).expect("test root");
-        CadFragment {
+        model.add_root(root)?;
+        Ok(CadFragment {
             source: CadFragmentSource::PeriodicChain { solid_id, sites: 2 },
             model,
             root,
-        }
+        })
     }
 
     fn extrusion_core_union_fragment(solid_id: u64) -> Result<CadFragment> {
@@ -1628,18 +1663,18 @@ mod tests {
     fn section_reduction_commits_working_state_and_replay_atomically() -> Result<()> {
         let mut state = SectionReductionState::new(&[], &HashMap::new());
 
-        assert!(!state.apply(vec![boundary_reduction_step(7)], |_| Ok(false))?);
+        assert!(!state.apply(vec![boundary_reduction_step(7)?], |_| Ok(false))?);
         assert_eq!(state.revision, 0);
         assert!(state.replay.is_empty());
 
-        let failed = state.apply(vec![boundary_reduction_step(7)], |_| {
+        let failed = state.apply(vec![boundary_reduction_step(7)?], |_| {
             bail!("synthetic reduction failure")
         });
         assert!(failed.is_err());
         assert_eq!(state.revision, 0);
         assert!(state.replay.is_empty());
 
-        assert!(state.apply(vec![boundary_reduction_step(7)], |_| Ok(true))?);
+        assert!(state.apply(vec![boundary_reduction_step(7)?], |_| Ok(true))?);
         assert_eq!(state.revision, 1);
         assert_eq!(state.boundary_features(7).len(), 1);
         Ok(())
@@ -1654,21 +1689,21 @@ mod tests {
             BTreeSet::from([7, 8])
         );
 
-        assert_eq!(state.add_candidates([descriptive_fragment(7, 1)])?, 1);
+        assert_eq!(state.add_candidates([descriptive_fragment(7, 1)?])?, 1);
         assert_eq!(
             state.constructively_unresolved_ids(),
             BTreeSet::from([7, 8])
         );
         assert_eq!(state.semantically_unrecovered_ids(), BTreeSet::from([8]));
 
-        assert_eq!(state.add_candidates([constructive_fragment(7, 4)])?, 1);
+        assert_eq!(state.add_candidates([constructive_fragment(7, 4)?])?, 1);
         assert_eq!(state.constructively_unresolved_ids(), BTreeSet::from([8]));
-        let revision = state.revision();
+        let revision = state.revision;
 
-        assert_eq!(state.add_candidates([constructive_fragment(7, 6)])?, 0);
-        assert_eq!(state.revision(), revision);
-        assert_eq!(state.add_candidates([constructive_fragment(7, 1)])?, 1);
-        assert!(state.revision() > revision);
+        assert_eq!(state.add_candidates([constructive_fragment(7, 6)?])?, 0);
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.add_candidates([constructive_fragment(7, 1)?])?, 1);
+        assert!(state.revision > revision);
         assert_eq!(
             state.selected_fragments()[&7]
                 .model
@@ -1679,13 +1714,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_state_rejects_candidate_for_unknown_solid() {
+    fn recovery_state_rejects_candidate_for_unknown_solid() -> Result<()> {
         let report = report_with_unrecovered(&[7]);
         let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
-        let error = state
-            .add_candidates([constructive_fragment(8, 1)])
-            .expect_err("unknown source solid must fail");
+        let result = state.add_candidates([constructive_fragment(8, 1)?]);
+        let Err(error) = result else {
+            bail!("unknown source solid unexpectedly succeeded");
+        };
         assert!(error.to_string().contains("missing solid #8"));
+        Ok(())
     }
 
     #[test]
@@ -1737,17 +1774,17 @@ mod tests {
 
     #[test]
     fn cheapest_whole_solid_candidate_wins() -> Result<()> {
-        let expensive = constructive_fragment(7, 4);
-        let cheap = constructive_fragment(7, 1);
+        let expensive = constructive_fragment(7, 4)?;
+        let cheap = constructive_fragment(7, 1)?;
         let selected = select_cheapest_whole_solid_fragments(&[&expensive, &cheap])?;
         assert_eq!(selected.len(), 1);
-        assert!(std::ptr::eq(selected[&7], &cheap));
+        assert_eq!(selected[&7], &cheap);
         Ok(())
     }
 
     #[test]
     fn constructive_candidate_beats_cheaper_descriptive_chain() -> Result<()> {
-        let constructive = constructive_fragment(7, 3);
+        let constructive = constructive_fragment(7, 3)?;
         let mut model = CadModel::new();
         let root = model.add_node(CadNode::Primitive(Primitive::Box {
             size_mm: [1.0, 1.0, 1.0],
@@ -1762,7 +1799,7 @@ mod tests {
             root,
         };
         let selected = select_cheapest_whole_solid_fragments(&[&descriptive, &constructive])?;
-        assert!(std::ptr::eq(selected[&7], &raw const constructive));
+        assert_eq!(selected[&7], &constructive);
         Ok(())
     }
 }
