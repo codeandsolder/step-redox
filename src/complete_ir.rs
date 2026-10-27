@@ -102,7 +102,6 @@ struct RecoveredBoundaryFeatureFamily {
 struct RecoverySection<'a> {
     entities: &'a [EntityInstance],
     index: HashMap<u64, usize>,
-    dominant_extrusions: Vec<crate::dominant_extrusions::DominantExtrusionCandidate>,
 }
 
 #[derive(Debug)]
@@ -390,7 +389,7 @@ type WholeSolidCandidateProvider =
 
 const WHOLE_SOLID_CANDIDATE_PROVIDERS: [WholeSolidCandidateProvider; 2] = [
     recover_boundary_feature_candidates,
-    recover_edge_treated_extrusion_candidates,
+    recover_reduced_brep_candidates,
 ];
 type LocalReducer = fn(&mut SectionReductionState, &LocalRecoveryTargets) -> Result<bool>;
 
@@ -495,8 +494,6 @@ fn recover_complete_ir_build_state(
                 &section.entities,
                 &index,
             );
-        let dominant_extrusions =
-            crate::dominant_extrusions::detect_dominant_extrusion_candidates(&section_signatures);
         signatures.extend(section_signatures);
         direct_candidates.extend(recover_constructive_fragments_from_entities_with_index(
             &section.entities,
@@ -515,7 +512,6 @@ fn recover_complete_ir_build_state(
         recovery_sections.push(RecoverySection {
             entities: &section.entities,
             index,
-            dominant_extrusions,
         });
     }
 
@@ -580,16 +576,15 @@ fn recover_boundary_feature_candidates(
     Ok(candidates)
 }
 
-fn recover_edge_treated_extrusion_candidates(
+fn recover_reduced_brep_candidates(
     sections: &[RecoverySection<'_>],
     targets: &BTreeSet<u64>,
 ) -> Result<Vec<CadFragment>> {
     let mut candidates = Vec::new();
     for section in sections {
-        candidates.extend(recover_edge_treated_extrusion_fragments_from_candidates(
+        candidates.extend(recover_reduced_brep_fragments(
             section.entities,
             &section.index,
-            &section.dominant_extrusions,
             Some(targets),
         )?);
     }
@@ -702,7 +697,7 @@ fn recover_replayed_boundary_hosts(
         &reduction.working,
         &reduction.index,
     )?;
-    host_candidates.extend(recover_edge_treated_extrusion_fragments(
+    host_candidates.extend(recover_reduced_brep_fragments(
         &reduction.working,
         &reduction.index,
         Some(target_solid_ids),
@@ -971,129 +966,106 @@ fn recover_constructive_fragments_from_entities_with_index(
     Ok(out)
 }
 
-fn recover_edge_treated_extrusion_fragments(
+fn recover_reduced_brep_fragments(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
     target_solid_ids: Option<&BTreeSet<u64>>,
 ) -> Result<Vec<CadFragment>> {
-    let signatures =
-        crate::solid_revolutions::detect_solid_surface_signatures_with_index(entities, index);
-    let dominant = crate::dominant_extrusions::detect_dominant_extrusion_candidates(&signatures);
-    recover_edge_treated_extrusion_fragments_from_candidates(
-        entities,
-        index,
-        &dominant,
-        target_solid_ids,
-    )
-}
-
-fn recover_edge_treated_extrusion_fragments_from_candidates(
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-    dominant: &[crate::dominant_extrusions::DominantExtrusionCandidate],
-    target_solid_ids: Option<&BTreeSet<u64>>,
-) -> Result<Vec<CadFragment>> {
-    let candidate_solid_ids = dominant
+    let candidate_solid_ids = entities
         .iter()
-        .filter(|candidate| {
-            !candidate.residual_faces.is_empty()
-                && target_solid_ids.is_none_or(|targets| targets.contains(&candidate.solid_id))
+        .filter_map(|entity| {
+            let record = crate::step_graph::simple_record(entity)?;
+            (record.name == "MANIFOLD_SOLID_BREP").then(|| crate::step_graph::entity_id(entity))
         })
-        .map(|candidate| candidate.solid_id)
+        .filter(|solid_id| target_solid_ids.is_none_or(|targets| targets.contains(solid_id)))
         .collect::<HashSet<_>>();
     if candidate_solid_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let treatments = crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
+
+    let evidence = crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
         entities,
         index,
         &candidate_solid_ids,
     );
-    let mut out = Vec::new();
-
-    for candidate in dominant {
-        if candidate.residual_faces.is_empty()
-            || target_solid_ids.is_some_and(|targets| !targets.contains(&candidate.solid_id))
-        {
-            continue;
+    let mut by_solid = BTreeMap::<u64, Vec<_>>::new();
+    for item in &evidence {
+        if replayable_edge_treatment(item).is_some() {
+            by_solid.entry(item.solid_id).or_default().push(item);
         }
-
-        let mut selected = Vec::with_capacity(candidate.residual_faces.len());
-        let mut usable = true;
-        for residual in &candidate.residual_faces {
-            let mut matches = treatments.iter().filter_map(|item| {
-                let same_solid = item.solid_id == candidate.solid_id;
-                let same_face = item.treatment_face_id == residual.face_id;
-                (same_solid && same_face)
-                    .then(|| replayable_edge_treatment(item))
-                    .flatten()
-                    .map(|(profile, edge)| (item, profile, edge))
-            });
-            let Some(replay) = matches.next() else {
-                usable = false;
-                break;
-            };
-            if matches.next().is_some() {
-                usable = false;
-                break;
-            }
-            selected.push(replay);
-        }
-        if !usable || selected.len() != candidate.residual_faces.len() {
-            continue;
-        }
-
-        let residual_face_ids = candidate
-            .residual_faces
-            .iter()
-            .map(|face| face.face_id)
-            .collect::<HashSet<_>>();
-        let core = crate::solid_extrusions::recover_extrusion_core_from_cap_faces_with_index(
-            candidate.solid_id,
-            candidate.cap_face_ids,
-            entities,
-            index,
-        )
-        .or_else(|| {
-            crate::solid_extrusions::recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
-                candidate.solid_id,
-                candidate.cap_face_ids,
-                entities,
-                index,
-                Some(&residual_face_ids),
-            )
-            .map(|healed| healed.core)
-        });
-        let Some(core) = core else {
-            continue;
-        };
-
-        selected.sort_by_key(|(item, _, _)| item.treatment_face_id);
-        let mut fragment = recover_solid_extrusion_fragment(&core)?;
-        fragment.model.roots.clear();
-        let mut root = fragment.root;
-        for (item, profile, edge) in selected {
-            root = fragment.model.add_node(CadNode::EdgeTreatment {
-                child: root,
-                profile,
-                edges: vec![edge],
-            });
-            fragment.model.set_provenance(
-                root,
-                Provenance {
-                    source_entity_ids: vec![candidate.solid_id, item.treatment_face_id],
-                    proof: ProofStatus::WithinTolerance,
-                    max_residual_mm: Some(item.max_boundary_residual_mm),
-                },
-            )?;
-        }
-        fragment.model.add_root(root)?;
-        fragment.root = root;
-        fragment.model.validate()?;
-        out.push(fragment);
     }
 
+    let mut out = Vec::new();
+    for solid_id in candidate_solid_ids {
+        let Some(items) = by_solid.get_mut(&solid_id) else {
+            continue;
+        };
+        items.sort_by_key(|item| item.treatment_face_id);
+        let Some(mut reduced) =
+            crate::reduced_brep::ReducedSolid::from_step(solid_id, entities, index)
+        else {
+            continue;
+        };
+        let mut replay = Vec::new();
+        for item in items.iter().copied() {
+            let Some((profile, edge)) = replayable_edge_treatment(item) else {
+                continue;
+            };
+            if reduced.remove_edge_treatment(item).is_some() {
+                replay.push((item, profile, edge));
+            }
+        }
+        if replay.is_empty() {
+            continue;
+        }
+
+        if let Some(extrusion) =
+            crate::solid_extrusions::detect_solid_extrusion_from_reduced(&reduced)
+        {
+            let fragment = recover_solid_extrusion_fragment(&extrusion)?;
+            out.push(replay_edge_treatments(fragment, solid_id, replay.clone())?);
+        }
+        if let Some(revolution) = crate::solid_revolutions::detect_solid_revolution_from_reduced(
+            &reduced, entities, index,
+        ) {
+            let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&revolution)?;
+            out.push(replay_edge_treatments(fragment, solid_id, replay)?);
+        }
+    }
     Ok(out)
+}
+
+fn replay_edge_treatments(
+    mut fragment: CadFragment,
+    solid_id: u64,
+    mut replay: Vec<(
+        &crate::edge_treatments::EdgeTreatmentEvidence,
+        EdgeTreatmentProfile,
+        EdgeTreatmentEdge,
+    )>,
+) -> Result<CadFragment> {
+    replay.sort_by_key(|(item, _, _)| item.treatment_face_id);
+    fragment.model.roots.clear();
+    let mut root = fragment.root;
+    for (item, profile, edge) in replay {
+        root = fragment.model.add_node(CadNode::EdgeTreatment {
+            child: root,
+            profile,
+            edges: vec![edge],
+        });
+        fragment.model.set_provenance(
+            root,
+            Provenance {
+                source_entity_ids: vec![solid_id, item.treatment_face_id],
+                proof: ProofStatus::WithinTolerance,
+                max_residual_mm: Some(item.max_boundary_residual_mm),
+            },
+        )?;
+    }
+    fragment.model.add_root(root)?;
+    fragment.root = root;
+    fragment.model.validate()?;
+    Ok(fragment)
 }
 
 fn replayable_edge_treatment(
@@ -1109,7 +1081,15 @@ fn replayable_edge_treatment(
                 end_mm: *end_mm,
             }
         }
-        crate::edge_treatments::EdgeTreatmentVirtualEdge::Circle { .. } => return None,
+        crate::edge_treatments::EdgeTreatmentVirtualEdge::Circle {
+            center_mm,
+            normal,
+            radius_mm,
+        } => EdgeSelector::Circle {
+            center_mm: *center_mm,
+            normal: *normal,
+            radius_mm: *radius_mm,
+        },
     };
     let (profile, radius_mm) = match item.kind {
         crate::edge_treatments::EdgeTreatmentKind::PlanarChamfer => {
@@ -1120,14 +1100,15 @@ fn replayable_edge_treatment(
             }
             (EdgeTreatmentProfile::Chamfer, first.midpoint(second))
         }
-        crate::edge_treatments::EdgeTreatmentKind::CylindricalFillet => {
+        crate::edge_treatments::EdgeTreatmentKind::CylindricalFillet
+        | crate::edge_treatments::EdgeTreatmentKind::ToroidalFillet => {
             let radius = item.inferred_radius_mm?;
             if !radius.is_finite() || radius <= 0.0 {
                 return None;
             }
             (EdgeTreatmentProfile::Round, radius)
         }
-        _ => return None,
+        crate::edge_treatments::EdgeTreatmentKind::ConicalChamfer => return None,
     };
     Some((
         profile,

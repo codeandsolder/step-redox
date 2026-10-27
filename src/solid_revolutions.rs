@@ -5,6 +5,7 @@ use crate::math3::{
     normalize as normalize3, point_to_unit_line_distance, sub,
 };
 use crate::profile_curves::RecoveredProfileCurve;
+use crate::reduced_brep::ReducedSolid;
 use crate::step_entities::{parameter_number, representation_items_and_context};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
@@ -491,7 +492,51 @@ fn detect_one_solid(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    detect_one_solid_from_faces(
+        solid_id,
+        face_ids,
+        faces,
+        entities,
+        index,
+        source_tolerance_mm,
+    )
+}
 
+pub(crate) fn detect_solid_revolution_from_reduced(
+    solid: &ReducedSolid,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredSolidRevolution> {
+    let face_ids = solid.faces().map(|face| face.id).collect::<Vec<_>>();
+    let faces = solid
+        .faces()
+        .map(|face| FaceInfo {
+            surface: face.surface.clone(),
+            loops: face.loops.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_tolerance_mm = source_tolerance_by_representation_item(entities, index)
+        .get(&solid.solid_id())
+        .copied()
+        .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+    detect_one_solid_from_faces(
+        solid.solid_id(),
+        face_ids,
+        faces,
+        entities,
+        index,
+        source_tolerance_mm,
+    )
+}
+
+fn detect_one_solid_from_faces(
+    solid_id: u64,
+    face_ids: Vec<u64>,
+    faces: Vec<FaceInfo>,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    source_tolerance_mm: f64,
+) -> Option<RecoveredSolidRevolution> {
     // Closed two-manifold proof. A STEP seam may occur twice on one face; counting
     // oriented uses rather than distinct faces handles that case correctly.
     let mut edge_faces = HashMap::<u64, Vec<usize>>::new();

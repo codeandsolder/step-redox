@@ -2,7 +2,6 @@ use crate::brep::{
     self, BSplineSupport, CircleSupport, CurveSupport, OrientedEdgeUse, PlaneSupport,
     SplineExtrusionSupport, SurfaceSupport,
 };
-use crate::edge_treatments::EdgeTreatmentVirtualEdge;
 use crate::math2::{
     cross as cross2, distance as distance2, dot as dot2, normalize as normalize2, sub as sub2,
 };
@@ -148,8 +147,8 @@ pub struct TreatmentHealedExtrusionCoreCandidate {
     pub healed_treatment_face_ids: Vec<u64>,
 }
 
-/// Recover an extrusion core after analytically undoing unique planar chamfers
-/// that trim the two requested source caps.
+/// Recover an extrusion core after analytically undoing uniquely proven local
+/// edge treatments that trim the two requested source caps.
 ///
 /// This is still only a host candidate: treatment replay and whole-solid
 /// source/rebuild boundary equivalence are required before semantic admission.
@@ -189,7 +188,6 @@ pub(crate) fn recover_treatment_healed_extrusion_core_from_cap_faces_with_index(
         .filter(|item| {
             item.solid_id == solid_id
                 && item.carrier_pair_unique
-                && matches!(item.virtual_edge, EdgeTreatmentVirtualEdge::Segment { .. })
                 && allowed_treatment_face_ids
                     .is_none_or(|allowed| allowed.contains(&item.treatment_face_id))
                 && item
@@ -403,16 +401,31 @@ fn detect_one_solid(
     index: &HashMap<u64, usize>,
 ) -> Option<RecoveredSolidExtrusion> {
     let face_ids = brep::solid_face_ids(solid_id, entities, index)?;
-    if face_ids.len() < 3 {
-        return None;
-    }
-
     let faces = face_ids
         .iter()
         .copied()
         .map(|face_id| face_info(face_id, entities, index))
         .collect::<Option<Vec<_>>>()?;
+    detect_one_solid_from_faces(solid_id, &faces)
+}
 
+pub(crate) fn detect_solid_extrusion_from_reduced(
+    solid: &ReducedSolid,
+) -> Option<RecoveredSolidExtrusion> {
+    let faces = solid
+        .faces()
+        .map(face_info_from_reduced)
+        .collect::<Option<Vec<_>>>()?;
+    detect_one_solid_from_faces(solid.solid_id(), &faces)
+}
+
+fn detect_one_solid_from_faces(
+    solid_id: u64,
+    faces: &[FaceInfo],
+) -> Option<RecoveredSolidExtrusion> {
+    if faces.len() < 3 {
+        return None;
+    }
     let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
     for (face_index, face) in faces.iter().enumerate() {
         for edge in &face.loop_edges {
@@ -426,8 +439,7 @@ fn detect_one_solid(
     let mut candidates = Vec::new();
     for first in 0..faces.len() {
         for second in first + 1..faces.len() {
-            if let Some(candidate) =
-                cap_pair_candidate(solid_id, first, second, &faces, &edge_faces)
+            if let Some(candidate) = cap_pair_candidate(solid_id, first, second, faces, &edge_faces)
             {
                 candidates.push(candidate);
             }

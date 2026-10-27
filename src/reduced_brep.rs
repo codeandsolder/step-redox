@@ -1,6 +1,8 @@
 use crate::brep::{self, CurveSupport, FaceLoop, OrientedEdgeUse, SurfaceSupport};
 use crate::edge_treatments::{EdgeTreatmentEvidence, EdgeTreatmentVirtualEdge};
-use crate::math3::{distance, normalize as normalize3, point_to_unit_line_distance, sub};
+use crate::math3::{
+    add, cross, distance, mul, normalize as normalize3, point_to_unit_line_distance, sub,
+};
 use crate::step_graph::entity_id;
 use ruststep::ast::EntityInstance;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -96,6 +98,10 @@ impl ReducedSolid {
         })
     }
 
+    pub(crate) fn solid_id(&self) -> u64 {
+        self.solid_id
+    }
+
     pub(crate) fn faces(&self) -> impl Iterator<Item = &ReducedFace> {
         self.faces.values()
     }
@@ -110,9 +116,6 @@ impl ReducedSolid {
         if evidence.solid_id != self.solid_id || !evidence.carrier_pair_unique {
             return None;
         }
-        let EdgeTreatmentVirtualEdge::Segment { start_mm, end_mm } = evidence.virtual_edge else {
-            return None;
-        };
         if !self.faces.contains_key(&evidence.treatment_face_id)
             || evidence
                 .carriers
@@ -123,7 +126,18 @@ impl ReducedSolid {
         }
 
         let mut candidate = self.clone();
-        candidate.remove_segment_treatment_inner(evidence, start_mm, end_mm)?;
+        match evidence.virtual_edge {
+            EdgeTreatmentVirtualEdge::Segment { start_mm, end_mm } => {
+                candidate.remove_segment_treatment_inner(evidence, start_mm, end_mm)?;
+            }
+            EdgeTreatmentVirtualEdge::Circle {
+                center_mm,
+                normal,
+                radius_mm,
+            } => {
+                candidate.remove_circle_treatment_inner(evidence, center_mm, normal, radius_mm)?;
+            }
+        }
         candidate.validate_closed_topology()?;
         *self = candidate;
         Some(())
@@ -149,6 +163,36 @@ impl ReducedSolid {
             )?);
         }
         self.propagate_endpoint_edits(&edits)?;
+        self.faces.remove(&evidence.treatment_face_id)?;
+        Some(())
+    }
+
+    fn remove_circle_treatment_inner(
+        &mut self,
+        evidence: &EdgeTreatmentEvidence,
+        center_mm: [f64; 3],
+        normal: [f64; 3],
+        radius_mm: f64,
+    ) -> Option<()> {
+        if !radius_mm.is_finite() || radius_mm <= GEOM_TOL_MM {
+            return None;
+        }
+        let normal = normalize3(normal, DIR_TOL)?;
+        let x_direction = deterministic_perpendicular(normal)?;
+        let ids = self.allocate_virtual_segment_ids()?;
+        for (carrier_index, carrier) in evidence.carriers.iter().enumerate() {
+            let face = self.faces.get_mut(&carrier.face_id)?;
+            splice_face_virtual_circle(
+                face,
+                &carrier.shared_edge_ids,
+                center_mm,
+                normal,
+                x_direction,
+                radius_mm,
+                ids,
+                ids.oriented[carrier_index],
+            )?;
+        }
         self.faces.remove(&evidence.treatment_face_id)?;
         Some(())
     }
@@ -200,7 +244,7 @@ impl ReducedSolid {
         let mut uses = HashMap::<u64, Vec<(u64, u64)>>::new();
         for face in self.faces.values() {
             for loop_ in &face.loops {
-                if loop_.edges.len() < 2 {
+                if loop_.edges.is_empty() {
                     return None;
                 }
                 for (index, edge) in loop_.edges.iter().enumerate() {
@@ -222,6 +266,79 @@ impl ReducedSolid {
             })
             .then_some(())
     }
+}
+
+fn deterministic_perpendicular(normal: [f64; 3]) -> Option<[f64; 3]> {
+    let seed = if normal[0].abs() <= normal[1].abs() && normal[0].abs() <= normal[2].abs() {
+        [1.0, 0.0, 0.0]
+    } else if normal[1].abs() <= normal[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    normalize3(cross(normal, seed), DIR_TOL)
+}
+
+fn splice_face_virtual_circle(
+    face: &mut ReducedFace,
+    shared_edge_ids: &[u64],
+    center_mm: [f64; 3],
+    normal: [f64; 3],
+    x_direction: [f64; 3],
+    radius_mm: f64,
+    ids: VirtualSegmentIds,
+    oriented_edge_id: u64,
+) -> Option<()> {
+    if shared_edge_ids.is_empty() {
+        return None;
+    }
+    let shared = shared_edge_ids.iter().copied().collect::<HashSet<_>>();
+    if shared.len() != shared_edge_ids.len() {
+        return None;
+    }
+    let matches = face
+        .loops
+        .iter()
+        .enumerate()
+        .filter_map(|(loop_index, loop_)| {
+            let count = loop_
+                .edges
+                .iter()
+                .filter(|edge| shared.contains(&edge.edge_id))
+                .count();
+            (count != 0).then_some((loop_index, count, loop_.edges.len()))
+        })
+        .collect::<Vec<_>>();
+    let [(loop_index, count, edge_count)] = matches.as_slice() else {
+        return None;
+    };
+    if *count != shared.len() || *count != *edge_count {
+        return None;
+    }
+
+    let seam = add(center_mm, mul(x_direction, radius_mm));
+    let source_forward = face.loops[*loop_index]
+        .edges
+        .first()
+        .map_or(true, |edge| edge.parameter_forward);
+    face.loops[*loop_index].edges = vec![OrientedEdgeUse {
+        oriented_edge_id,
+        edge_id: ids.edge,
+        curve_id: ids.curve,
+        curve_same_sense: true,
+        parameter_forward: source_forward,
+        start_vertex: ids.start_vertex,
+        end_vertex: ids.start_vertex,
+        start_mm: seam,
+        end_mm: seam,
+        support: CurveSupport::Circle(brep::CircleSupport {
+            center_mm,
+            normal,
+            x_direction,
+            radius_mm,
+        }),
+    }];
+    Some(())
 }
 
 fn unordered_pair(pair: (u64, u64)) -> (u64, u64) {
@@ -446,6 +563,42 @@ mod tests {
         }
     }
 
+    fn circular_carrier_face(face_id: u64, edge_id: u64, vertex_id: u64) -> ReducedFace {
+        let seam = [1.0, 0.0, 0.0];
+        ReducedFace {
+            id: face_id,
+            surface: SurfaceSupport::Plane(PlaneSupport {
+                origin_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            surface_forward: true,
+            loops: vec![FaceLoop {
+                bound_id: face_id + 100,
+                loop_id: face_id + 200,
+                outer: true,
+                orientation: true,
+                edges: vec![OrientedEdgeUse {
+                    oriented_edge_id: edge_id + 1000,
+                    edge_id,
+                    curve_id: edge_id + 2000,
+                    curve_same_sense: true,
+                    parameter_forward: true,
+                    start_vertex: vertex_id,
+                    end_vertex: vertex_id,
+                    start_mm: seam,
+                    end_mm: seam,
+                    support: CurveSupport::Circle(brep::CircleSupport {
+                        center_mm: [0.0, 0.0, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                        x_direction: [1.0, 0.0, 0.0],
+                        radius_mm: 1.0,
+                    }),
+                }],
+            }],
+        }
+    }
+
     #[test]
     fn virtual_segment_splice_collapses_contiguous_edge_run() -> anyhow::Result<()> {
         let mut face = trimmed_face();
@@ -467,6 +620,66 @@ mod tests {
         assert_eq!(edges[0].end_mm, [0.0, 0.0, 0.0]);
         assert_eq!(edges[2].start_mm, [1.0, 0.0, 0.0]);
         assert_eq!(edits.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn circular_treatment_reduction_reconnects_carriers_with_one_shared_edge() -> anyhow::Result<()>
+    {
+        let first = circular_carrier_face(1, 10, 1);
+        let second = circular_carrier_face(2, 20, 2);
+        let treatment = ReducedFace {
+            id: 99,
+            surface: SurfaceSupport::Other { entity_id: 9999 },
+            surface_forward: true,
+            loops: Vec::new(),
+        };
+        let mut solid = ReducedSolid {
+            solid_id: 100,
+            faces: BTreeMap::from([(1, first), (2, second), (99, treatment)]),
+            next_virtual_id: 1000,
+        };
+        let evidence = EdgeTreatmentEvidence {
+            solid_id: 100,
+            treatment_face_id: 99,
+            kind: crate::edge_treatments::EdgeTreatmentKind::ToroidalFillet,
+            strength: crate::edge_treatments::EdgeTreatmentEvidenceStrength::AnalyticTangency,
+            carrier_pair_unique: true,
+            treatment_support: "torus".to_owned(),
+            carriers: [
+                crate::edge_treatments::EdgeTreatmentCarrier {
+                    face_id: 1,
+                    support: "plane".to_owned(),
+                    shared_edge_ids: vec![10],
+                },
+                crate::edge_treatments::EdgeTreatmentCarrier {
+                    face_id: 2,
+                    support: "cylinder".to_owned(),
+                    shared_edge_ids: vec![20],
+                },
+            ],
+            inferred_radius_mm: Some(0.1),
+            inferred_setbacks_mm: None,
+            inferred_angle_rad: None,
+            carrier_angle_rad: std::f64::consts::FRAC_PI_2,
+            virtual_edge: EdgeTreatmentVirtualEdge::Circle {
+                center_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                radius_mm: 1.0,
+            },
+            max_boundary_residual_mm: 0.0,
+        };
+
+        solid
+            .remove_edge_treatment(&evidence)
+            .ok_or_else(|| anyhow::anyhow!("circular inverse treatment should reduce"))?;
+        assert!(!solid.faces.contains_key(&99));
+        let first_edge = &solid.faces[&1].loops[0].edges[0];
+        let second_edge = &solid.faces[&2].loops[0].edges[0];
+        assert_eq!(first_edge.edge_id, second_edge.edge_id);
+        assert_eq!(first_edge.start_vertex, first_edge.end_vertex);
+        assert_eq!(first_edge.start_vertex, second_edge.start_vertex);
+        assert!(matches!(first_edge.support, CurveSupport::Circle(_)));
         Ok(())
     }
 
