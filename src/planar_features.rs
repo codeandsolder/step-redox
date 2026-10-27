@@ -946,14 +946,23 @@ pub fn peel_boundary_feature_family_indices(
     report: &BoundaryFeatureDiagnostics,
     selected_indices: &[usize],
 ) -> Result<BoundaryFeaturePeelStats> {
+    let index = build_index(entities);
+    peel_boundary_feature_family_indices_with_index(entities, &index, report, selected_indices)
+}
+
+pub(crate) fn peel_boundary_feature_family_indices_with_index(
+    entities: &mut [EntityInstance],
+    index: &HashMap<u64, usize>,
+    report: &BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+) -> Result<BoundaryFeaturePeelStats> {
     if selected_indices.is_empty() {
         return Ok(BoundaryFeaturePeelStats::default());
     }
-    let index = build_index(entities);
     let selected = selected_indices
         .iter()
-        .map(|&index| {
-            report.families.get(index).ok_or_else(|| {
+        .map(|index| {
+            report.families.get(*index).ok_or_else(|| {
                 anyhow::anyhow!("boundary feature family index {index} is out of range")
             })
         })
@@ -968,7 +977,7 @@ pub fn peel_boundary_feature_family_indices(
 
     for family in selected {
         for &host in &family.host_face_ids {
-            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+            let Some(bounds) = ref_list_param(host, 1, entities, index) else {
                 bail!("feature host face #{host} has no readable bounds");
             };
             for bound in bounds {
@@ -1036,12 +1045,12 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
     diagnose_boundary_features_with_index_filtered(entities, &index, None)
 }
 
-pub fn diagnose_boundary_features_for_shells(
+pub(crate) fn diagnose_boundary_features_for_shells_with_index(
     entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     target_shells: &HashSet<u64>,
 ) -> BoundaryFeatureDiagnostics {
-    let index = build_index(entities);
-    diagnose_boundary_features_with_index_filtered(entities, &index, Some(target_shells))
+    diagnose_boundary_features_with_index_filtered(entities, index, Some(target_shells))
 }
 
 fn diagnose_boundary_features_with_index(

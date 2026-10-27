@@ -113,14 +113,16 @@ enum LocalReductionStep {
 #[derive(Debug)]
 struct SectionReductionState {
     working: Vec<EntityInstance>,
+    index: HashMap<u64, usize>,
     replay: BTreeMap<u64, Vec<LocalReductionStep>>,
     revision: usize,
 }
 
 impl SectionReductionState {
-    fn new(entities: &[EntityInstance]) -> Self {
+    fn new(entities: &[EntityInstance], index: &HashMap<u64, usize>) -> Self {
         Self {
             working: entities.to_vec(),
+            index: index.clone(),
             replay: BTreeMap::new(),
             revision: 0,
         }
@@ -137,6 +139,7 @@ impl SectionReductionState {
         if !mutate(&mut candidate)? {
             return Ok(false);
         }
+        self.index = crate::step_graph::build_index(&candidate);
         self.working = candidate;
         for (solid_id, step) in steps {
             self.replay.entry(solid_id).or_default().push(step);
@@ -557,7 +560,7 @@ fn recover_boundary_feature_composites_for_section(
         return Ok(Vec::new());
     }
 
-    let mut reduction = SectionReductionState::new(entities);
+    let mut reduction = SectionReductionState::new(entities, initial_index);
     for pass_index in 0..MAX_BOUNDARY_FEATURE_DECOMPOSITION_PASSES {
         if !recover_boundary_feature_pass(&mut reduction, &target_shells, pass_index)? {
             break;
@@ -692,8 +695,9 @@ fn recover_boundary_feature_pass(
     pass_index: usize,
 ) -> Result<bool> {
     let target_shell_ids = target_shells.keys().copied().collect::<HashSet<_>>();
-    let report = crate::planar_features::diagnose_boundary_features_for_shells(
+    let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
         &reduction.working,
+        &reduction.index,
         &target_shell_ids,
     );
     let target_family_indices =
@@ -718,7 +722,7 @@ fn recover_boundary_feature_pass(
     let tool_candidates = recover_constructive_fragments_from_entities(&tool_entities)?;
     let tool_refs = tool_candidates.iter().collect::<Vec<_>>();
     let selected_tools = select_cheapest_whole_solid_fragments(&tool_refs)?;
-    let working_index = crate::step_graph::build_index(&reduction.working);
+    let working_index = &reduction.index;
     let mut peelable_family_indices = Vec::new();
     let mut pending_steps = Vec::new();
 
@@ -747,7 +751,7 @@ fn recover_boundary_feature_pass(
             let Some(host_outwards) = feature_host_outward_directions(
                 &family.host_face_ids,
                 &reduction.working,
-                &working_index,
+                working_index,
             ) else {
                 continue;
             };
@@ -773,9 +777,11 @@ fn recover_boundary_feature_pass(
     if peelable_family_indices.is_empty() {
         return Ok(false);
     }
+    let working_index = reduction.index.clone();
     reduction.apply(pending_steps, |working| {
-        let stats = crate::planar_features::peel_boundary_feature_family_indices(
+        let stats = crate::planar_features::peel_boundary_feature_family_indices_with_index(
             working,
+            &working_index,
             &report,
             &peelable_family_indices,
         )?;
@@ -1484,7 +1490,7 @@ mod tests {
 
     #[test]
     fn section_reduction_commits_working_state_and_replay_atomically() -> Result<()> {
-        let mut state = SectionReductionState::new(&[]);
+        let mut state = SectionReductionState::new(&[], &HashMap::new());
 
         assert!(!state.apply(vec![boundary_reduction_step(7)], |_| Ok(false))?);
         assert_eq!(state.revision, 0);
