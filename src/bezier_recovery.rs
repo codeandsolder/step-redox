@@ -3,7 +3,7 @@ use crate::step_graph::{entity_id, visit_entity_refs};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct BezierRecoveryStats {
     pub curves_recovered: usize,
 }
