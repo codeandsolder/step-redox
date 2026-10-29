@@ -1,7 +1,7 @@
 [project]
 name = "step-redox-python-tools"
 version = "0.0.0"
-requires-python = ">=3.14,<3.15"
+requires-python = ">=3.15,<3.16"
 dependencies = [
     "cadquery-ocp==8.0.1.1.0",
     "cadquery-ocp-stubs==8.0.1.1.0",
