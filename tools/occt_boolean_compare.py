@@ -2,13 +2,13 @@
 # Dynamic CAD/prototype boundary: ty still checks soundness; exhaustive annotations would be mostly opaque external types.
 import sys
 
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Common  # ty: ignore[unresolved-import]
-from OCP.BRepGProp import BRepGProp  # ty: ignore[unresolved-import]
-from OCP.GProp import GProp_GProps  # ty: ignore[unresolved-import]
-from OCP.IFSelect import IFSelect_RetDone  # ty: ignore[unresolved-import]
-from OCP.STEPControl import STEPControl_Reader  # ty: ignore[unresolved-import]
-from OCP.TopAbs import TopAbs_SOLID  # ty: ignore[unresolved-import]
-from OCP.TopExp import TopExp_Explorer  # ty: ignore[unresolved-import]
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+from OCP.BRepGProp import BRepGProp
+from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
+from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 
 
@@ -36,7 +36,7 @@ def solids(s):
     e = TopExp_Explorer(s, TopAbs_SOLID)
     out = []
     while e.More():
-        x = TopoDS.Solid(e.Current())  # ty: ignore[unresolved-attribute]
+        x = TopoDS.Solid(e.Current())
         out.append(x)
         e.Next()
     return sorted(out, key=lambda s: tuple(round(x, 9) for x in center(s)))

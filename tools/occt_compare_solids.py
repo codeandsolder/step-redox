@@ -6,16 +6,16 @@ import math
 import re
 from pathlib import Path
 
-from OCP.Bnd import Bnd_Box  # ty: ignore[unresolved-import]
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut  # ty: ignore[unresolved-import]
-from OCP.BRepBndLib import BRepBndLib  # ty: ignore[unresolved-import]
-from OCP.BRepCheck import BRepCheck_Analyzer  # ty: ignore[unresolved-import]
-from OCP.BRepGProp import BRepGProp  # ty: ignore[unresolved-import]
-from OCP.GProp import GProp_GProps  # ty: ignore[unresolved-import]
-from OCP.IFSelect import IFSelect_RetDone  # ty: ignore[unresolved-import]
-from OCP.STEPControl import STEPControl_Reader  # ty: ignore[unresolved-import]
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SOLID, TopAbs_VERTEX  # ty: ignore[unresolved-import]
-from OCP.TopExp import TopExp_Explorer  # ty: ignore[unresolved-import]
+from OCP.Bnd import Bnd_Box
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepGProp import BRepGProp
+from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SOLID, TopAbs_VERTEX
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 
 ABS_GEOM_TOL = 1.0e-9
@@ -105,7 +105,7 @@ def solids_from_shape(shape):
     explorer = TopExp_Explorer(shape, TopAbs_SOLID)
     out = []
     while explorer.More():
-        out.append(prop(TopoDS.Solid(explorer.Current())))  # ty: ignore[unresolved-attribute]
+        out.append(prop(TopoDS.Solid(explorer.Current())))
         explorer.Next()
 
     # STEP mapped-item transforms can introduce ~1e-12 coordinate roundoff.

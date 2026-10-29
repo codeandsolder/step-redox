@@ -6,24 +6,24 @@ import json
 import struct
 from pathlib import Path
 
-from OCP.Bnd import Bnd_Box  # ty: ignore[unresolved-import]
-from OCP.BRep import BRep_Tool  # ty: ignore[unresolved-import]
-from OCP.BRepBndLib import BRepBndLib  # ty: ignore[unresolved-import]
-from OCP.BRepCheck import BRepCheck_Analyzer  # ty: ignore[unresolved-import]
-from OCP.BRepGProp import BRepGProp  # ty: ignore[unresolved-import]
-from OCP.BRepMesh import BRepMesh_IncrementalMesh  # ty: ignore[unresolved-import]
-from OCP.GProp import GProp_GProps  # ty: ignore[unresolved-import]
-from OCP.IFSelect import IFSelect_RetDone  # ty: ignore[unresolved-import]
-from OCP.STEPControl import STEPControl_Reader  # ty: ignore[unresolved-import]
+from OCP.Bnd import Bnd_Box
+from OCP.BRep import BRep_Tool
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepGProp import BRepGProp
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
 from OCP.TopAbs import (
-    TopAbs_EDGE,  # ty: ignore[unresolved-import]
-    TopAbs_FACE,  # ty: ignore[unresolved-import]
-    TopAbs_SHELL,  # ty: ignore[unresolved-import]
-    TopAbs_SOLID,  # ty: ignore[unresolved-import]
-    TopAbs_VERTEX,  # ty: ignore[unresolved-import]
+    TopAbs_EDGE,
+    TopAbs_FACE,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
+    TopAbs_VERTEX,
 )
-from OCP.TopExp import TopExp_Explorer  # ty: ignore[unresolved-import]
-from OCP.TopLoc import TopLoc_Location  # ty: ignore[unresolved-import]
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
 
 
@@ -45,7 +45,7 @@ def mesh_hash(shape, linear=0.002, angular=0.2):
     faces = TopExp_Explorer(shape, TopAbs_FACE)
     tris = []
     while faces.More():
-        face = TopoDS.Face(faces.Current())  # ty: ignore[unresolved-attribute]
+        face = TopoDS.Face(faces.Current())
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is not None:
