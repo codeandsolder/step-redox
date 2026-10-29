@@ -14,3 +14,7 @@ validation/harness-*.stderr
 .cache/step-redox-validation/
 web/**/target/
 tools/**/target/
+
+# standalone experiment build state
+experiments/**/target/
+experiments/**/Cargo.lock
