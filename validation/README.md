@@ -36,9 +36,9 @@ translation without permitting scaling or shape changes.
 
 Local invocation:
 
-    python -m pip install -r validation/requirements.txt
+    uv sync --frozen
     cargo build --release --bin step-redox --bin step-count-resize
-    python validation/harness.py run \
+    uv run --frozen python validation/harness.py run \
       --manifest validation/fixtures.json \
       --cache .cache/step-redox-validation \
       --out validation/out \
