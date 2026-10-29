@@ -343,3 +343,7 @@ The default tier should be boring:
 
 More invasive transformations belong behind explicit experimental/aggressive
 modes until separately validated.
+
+## License
+
+Apache-2.0.
