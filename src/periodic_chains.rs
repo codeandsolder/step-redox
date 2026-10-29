@@ -547,8 +547,7 @@ fn classify_faces(
                 .cmp(right_count)
                 .then_with(|| right_census.cmp(left_census))
         })
-        .map(|(census, _)| census)
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |(census, _)| census);
     let generic_map = generic.into_iter().collect::<HashMap<_, _>>();
 
     let mut gap_of = HashMap::<u64, usize>::new();

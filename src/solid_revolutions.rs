@@ -1095,8 +1095,8 @@ fn detect_one_radial_slot(
         if max_residual_mm > source_tolerance_mm {
             #[cfg(test)]
             eprintln!(
-                "radial-slot base profile residual {:.12e} exceeds source tolerance {:.12e} after face #{}",
-                max_residual_mm, source_tolerance_mm, face_ids[face_index]
+                "radial-slot base profile residual {max_residual_mm:.12e} exceeds source tolerance {source_tolerance_mm:.12e} after face #{}",
+                face_ids[face_index]
             );
             return None;
         }
