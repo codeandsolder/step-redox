@@ -315,10 +315,6 @@ pub mod monstertruck {
         clippy::too_many_lines,
         reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
     )]
-    #[expect(
-        clippy::float_cmp,
-        reason = "clamped B-spline endpoint knots require exact equality"
-    )]
     fn profile_wire(curves: &[Curve2d]) -> Result<Wire> {
         let starts = curves
             .iter()

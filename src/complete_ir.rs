@@ -470,10 +470,6 @@ where
     failures
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
-)]
 pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],

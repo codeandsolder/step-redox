@@ -499,7 +499,7 @@ fn detect_one_solid(
     detect_one_solid_from_faces(
         solid_id,
         face_ids,
-        faces,
+        &faces,
         entities,
         index,
         source_tolerance_mm,
@@ -526,7 +526,7 @@ pub(crate) fn detect_solid_revolution_from_reduced(
     detect_one_solid_from_faces(
         solid.solid_id(),
         face_ids,
-        faces,
+        &faces,
         entities,
         index,
         source_tolerance_mm,
@@ -536,7 +536,7 @@ pub(crate) fn detect_solid_revolution_from_reduced(
 fn detect_one_solid_from_faces(
     solid_id: u64,
     face_ids: Vec<u64>,
-    faces: Vec<FaceInfo>,
+    faces: &[FaceInfo],
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
     source_tolerance_mm: f64,
@@ -558,22 +558,22 @@ fn detect_one_solid_from_faces(
         return None;
     }
     let context = TopologyContext {
-        faces: &faces,
+        faces,
         edge_faces: &edge_faces,
         entities,
         index,
     };
 
-    if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, &faces) {
+    if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, faces) {
         return Some(torus);
     }
-    if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, &faces) {
+    if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, faces) {
         return Some(cap);
     }
-    if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, &faces, &context) {
+    if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, faces, &context) {
         return Some(end);
     }
-    if let Some(mixed) = detect_mixed_curved_revolution(solid_id, &face_ids, &faces, &context) {
+    if let Some(mixed) = detect_mixed_curved_revolution(solid_id, &face_ids, faces, &context) {
         return Some(mixed);
     }
     if face_ids.len() < 3 {

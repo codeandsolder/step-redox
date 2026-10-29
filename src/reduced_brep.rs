@@ -16,11 +16,11 @@ const DIR_TOL: f64 = 1.0e-10;
 /// simplify this representation; primitive recognizers are consumers of the
 /// simplified result rather than owners of the simplification rules.
 #[derive(Debug, Clone)]
-pub(crate) struct ReducedFace {
-    pub(crate) id: u64,
-    pub(crate) surface: SurfaceSupport,
-    pub(crate) surface_forward: bool,
-    pub(crate) loops: Vec<FaceLoop>,
+pub struct ReducedFace {
+    pub id: u64,
+    pub surface: SurfaceSupport,
+    pub surface_forward: bool,
+    pub loops: Vec<FaceLoop>,
 }
 
 impl ReducedFace {
@@ -45,13 +45,13 @@ impl ReducedFace {
         })
     }
 
-    pub(crate) fn loop_edges(&self) -> impl Iterator<Item = &OrientedEdgeUse> {
+    pub fn loop_edges(&self) -> impl Iterator<Item = &OrientedEdgeUse> {
         self.loops.iter().flat_map(|loop_| loop_.edges.iter())
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ReducedSolid {
+pub struct ReducedSolid {
     solid_id: u64,
     faces: BTreeMap<u64, ReducedFace>,
     next_virtual_id: u64,
@@ -75,7 +75,7 @@ struct EndpointEdit {
 }
 
 impl ReducedSolid {
-    pub(crate) fn from_step(
+    pub fn from_step(
         solid_id: u64,
         entities: &[EntityInstance],
         index: &HashMap<u64, usize>,
@@ -98,11 +98,11 @@ impl ReducedSolid {
         })
     }
 
-    pub(crate) fn solid_id(&self) -> u64 {
+    pub const fn solid_id(&self) -> u64 {
         self.solid_id
     }
 
-    pub(crate) fn faces(&self) -> impl Iterator<Item = &ReducedFace> {
+    pub fn faces(&self) -> impl Iterator<Item = &ReducedFace> {
         self.faces.values()
     }
 
@@ -111,7 +111,7 @@ impl ReducedSolid {
     /// This is a geometry-preserving normalization, not a CAD feature replay:
     /// two adjacent planar patches with the same oriented support become one
     /// patch when their union has one unambiguous boundary loop.
-    pub(crate) fn coalesce_coplanar_faces(&mut self) -> bool {
+    pub fn coalesce_coplanar_faces(&mut self) -> bool {
         let mut candidate = self.clone();
         if !candidate.coalesce_coplanar_faces_inner() {
             return false;
@@ -230,7 +230,7 @@ impl ReducedSolid {
     /// reduction is generic: delete the treatment face, extend both carrier
     /// boundaries to their inferred intersection, and make that virtual edge a
     /// shared topological edge of the carriers. The operation is transactional.
-    pub(crate) fn remove_edge_treatment(&mut self, evidence: &EdgeTreatmentEvidence) -> Option<()> {
+    pub fn remove_edge_treatment(&mut self, evidence: &EdgeTreatmentEvidence) -> Option<()> {
         if evidence.solid_id != self.solid_id || !evidence.carrier_pair_unique {
             return None;
         }
@@ -297,16 +297,19 @@ impl ReducedSolid {
         }
         let normal = normalize3(normal, DIR_TOL)?;
         let x_direction = deterministic_perpendicular(normal)?;
+        let circle = brep::CircleSupport {
+            center_mm,
+            normal,
+            x_direction,
+            radius_mm,
+        };
         let ids = self.allocate_virtual_segment_ids()?;
         for (carrier_index, carrier) in evidence.carriers.iter().enumerate() {
             let face = self.faces.get_mut(&carrier.face_id)?;
             splice_face_virtual_circle(
                 face,
                 &carrier.shared_edge_ids,
-                center_mm,
-                normal,
-                x_direction,
-                radius_mm,
+                circle,
                 ids,
                 ids.oriented[carrier_index],
             )?;
@@ -492,10 +495,7 @@ fn deterministic_perpendicular(normal: [f64; 3]) -> Option<[f64; 3]> {
 fn splice_face_virtual_circle(
     face: &mut ReducedFace,
     shared_edge_ids: &[u64],
-    center_mm: [f64; 3],
-    normal: [f64; 3],
-    x_direction: [f64; 3],
-    radius_mm: f64,
+    circle: brep::CircleSupport,
     ids: VirtualSegmentIds,
     oriented_edge_id: u64,
 ) -> Option<()> {
@@ -526,11 +526,11 @@ fn splice_face_virtual_circle(
         return None;
     }
 
-    let seam = add(center_mm, mul(x_direction, radius_mm));
+    let seam = add(circle.center_mm, mul(circle.x_direction, circle.radius_mm));
     let source_forward = face.loops[*loop_index]
         .edges
         .first()
-        .map_or(true, |edge| edge.parameter_forward);
+        .is_none_or(|edge| edge.parameter_forward);
     face.loops[*loop_index].edges = vec![OrientedEdgeUse {
         oriented_edge_id,
         edge_id: ids.edge,
@@ -541,17 +541,12 @@ fn splice_face_virtual_circle(
         end_vertex: ids.start_vertex,
         start_mm: seam,
         end_mm: seam,
-        support: CurveSupport::Circle(brep::CircleSupport {
-            center_mm,
-            normal,
-            x_direction,
-            radius_mm,
-        }),
+        support: CurveSupport::Circle(circle),
     }];
     Some(())
 }
 
-fn unordered_pair(pair: (u64, u64)) -> (u64, u64) {
+const fn unordered_pair(pair: (u64, u64)) -> (u64, u64) {
     if pair.0 <= pair.1 {
         pair
     } else {
@@ -559,6 +554,10 @@ fn unordered_pair(pair: (u64, u64)) -> (u64, u64) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "virtual-edge splicing keeps loop matching, endpoint edits, and topology reconstruction in one transactional reducer"
+)]
 fn splice_face_virtual_segment(
     face: &mut ReducedFace,
     shared_edge_ids: &[u64],

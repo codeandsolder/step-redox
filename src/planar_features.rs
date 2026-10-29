@@ -676,10 +676,6 @@ fn coplanar_feature_cap_holes(
     Some(out)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
-)]
 pub fn materialize_boundary_feature_tools_for_analysis(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
@@ -705,6 +701,10 @@ pub fn materialize_boundary_feature_tools_for_analysis_for_shells(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "boundary-tool materialization keeps proof, emission, and provenance bookkeeping transactional"
+)]
 fn materialize_boundary_feature_tools_for_analysis_filtered(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
@@ -962,7 +962,7 @@ pub fn peel_boundary_feature_family_indices(
     peel_boundary_feature_family_indices_with_index(entities, &index, report, selected_indices)
 }
 
-pub(crate) fn peel_boundary_feature_family_indices_with_index(
+pub fn peel_boundary_feature_family_indices_with_index(
     entities: &mut [EntityInstance],
     index: &HashMap<u64, usize>,
     report: &BoundaryFeatureDiagnostics,
@@ -1057,7 +1057,7 @@ pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatur
     diagnose_boundary_features_with_index_filtered(entities, &index, None)
 }
 
-pub(crate) fn diagnose_boundary_features_for_shells_with_index(
+pub fn diagnose_boundary_features_for_shells_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
     target_shells: &HashSet<u64>,
