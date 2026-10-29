@@ -17,6 +17,10 @@ enum Profile {
     name = "step-redox",
     about = "Semantics-preserving STEP Part 21 cleanup"
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags map directly to independent transformation switches"
+)]
 struct Cli {
     #[arg(
         long,
@@ -182,6 +186,10 @@ struct Cli {
     periodic_chains_json: Option<PathBuf>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI main keeps profile resolution and output side effects in one linear orchestration path"
+)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let input =

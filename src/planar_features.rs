@@ -22,12 +22,13 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod mapped_emitter;
-pub(crate) use mapped_emitter::instance_boundary_features;
+pub use mapped_emitter::instance_boundary_features;
 
 const MIN_GROUP: usize = 8;
 const MAX_FEATURE_FACES: usize = 128;
 const MAX_BOUNDARY_FEATURE_FACES: usize = 4096;
-const MIN_COMPLEX_HOST_EDGES: usize = 32;
+const MIN_BOUNDARY_HOST_BOUNDS: usize = 2;
+const MIN_BOUNDARY_HOST_EDGES: usize = 6;
 const SIDE_TOLERANCE: f64 = 1.0e-8;
 
 #[derive(Debug, Default, Clone)]
@@ -39,6 +40,10 @@ pub struct PlanarFeatureStats {
     pub styles_replaced: usize,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "all fields are explicit STEP entity identifiers"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellContext {
     representation_id: u64,
@@ -278,6 +283,10 @@ enum PlaneSide {
     Coplanar,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn diagnose_open_chain_patterns(entities: &[EntityInstance]) -> OpenChainDiagnostics {
     const MIN_LOOP_EDGES: usize = 16;
     const MAX_MOTIF_EDGES: usize = 32;
@@ -446,7 +455,7 @@ fn collect_cyclic_open_chain_runs(
     out: &mut Vec<OpenChainRunEvidence>,
 ) {
     let n = loop_data.edges.len();
-    if period == 0 || n % period != 0 {
+    if period == 0 || !n.is_multiple_of(period) {
         return;
     }
     let block_count = n / period;
@@ -667,9 +676,39 @@ fn coplanar_feature_cap_holes(
     Some(out)
 }
 
-pub(crate) fn materialize_boundary_feature_tools_for_analysis(
+pub fn materialize_boundary_feature_tools_for_analysis(
     entities: &mut Vec<EntityInstance>,
     min_instances: usize,
+) -> Result<(
+    BoundaryFeatureDiagnostics,
+    Vec<BoundaryFeatureToolMaterialization>,
+)> {
+    materialize_boundary_feature_tools_for_analysis_filtered(entities, min_instances, None)
+}
+
+pub fn materialize_boundary_feature_tools_for_analysis_for_shells(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+    target_shells: &HashSet<u64>,
+) -> Result<(
+    BoundaryFeatureDiagnostics,
+    Vec<BoundaryFeatureToolMaterialization>,
+)> {
+    materialize_boundary_feature_tools_for_analysis_filtered(
+        entities,
+        min_instances,
+        Some(target_shells),
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "boundary-tool materialization keeps proof, emission, and provenance bookkeeping transactional"
+)]
+fn materialize_boundary_feature_tools_for_analysis_filtered(
+    entities: &mut Vec<EntityInstance>,
+    min_instances: usize,
+    target_shells: Option<&HashSet<u64>>,
 ) -> Result<(
     BoundaryFeatureDiagnostics,
     Vec<BoundaryFeatureToolMaterialization>,
@@ -683,7 +722,8 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
         .into_iter()
         .map(|context| (context.shell_id, context.representation_id))
         .collect::<HashMap<_, _>>();
-    let report = diagnose_boundary_features_with_index(entities, &initial_index);
+    let report =
+        diagnose_boundary_features_with_index_filtered(entities, &initial_index, target_shells);
     let mut next_id = entities
         .iter()
         .map(entity_id)
@@ -703,7 +743,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
         let index = &initial_index;
         let mut bound_owner = HashMap::<u64, u64>::new();
         for &host in &family.host_face_ids {
-            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+            let Some(bounds) = ref_list_param(host, 1, entities, index) else {
                 bail!("feature host face #{host} has no readable bounds");
             };
             for bound in bounds {
@@ -721,7 +761,7 @@ pub(crate) fn materialize_boundary_feature_tools_for_analysis(
             let Some(&host_id) = bound_owner.get(&bound_id) else {
                 bail!("feature interface bound #{bound_id} has no owning host face");
             };
-            let Some(frame) = plane_frame(host_id, entities, &index) else {
+            let Some(frame) = plane_frame(host_id, entities, index) else {
                 bail!("feature host face #{host_id} is not a supported plane");
             };
             let Some(&bound_index) = index.get(&bound_id) else {
@@ -898,7 +938,7 @@ pub fn leaf_feature_family_indices(families: &[BoundaryFeatureFamilyEvidence]) -
 }
 
 pub fn peel_boundary_features_for_analysis(
-    entities: &mut Vec<EntityInstance>,
+    entities: &mut [EntityInstance],
 ) -> Result<(BoundaryFeatureDiagnostics, BoundaryFeaturePeelStats)> {
     let index = build_index(entities);
     let report = diagnose_boundary_features_with_index(entities, &index);
@@ -909,10 +949,36 @@ pub fn peel_boundary_features_for_analysis(
         }
         bail!("boundary feature dependency graph has no leaf family");
     }
+    let stats = peel_boundary_feature_family_indices(entities, &report, &selected_indices)?;
+    Ok((report, stats))
+}
+
+pub fn peel_boundary_feature_family_indices(
+    entities: &mut [EntityInstance],
+    report: &BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+) -> Result<BoundaryFeaturePeelStats> {
+    let index = build_index(entities);
+    peel_boundary_feature_family_indices_with_index(entities, &index, report, selected_indices)
+}
+
+pub fn peel_boundary_feature_family_indices_with_index(
+    entities: &mut [EntityInstance],
+    index: &HashMap<u64, usize>,
+    report: &BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+) -> Result<BoundaryFeaturePeelStats> {
+    if selected_indices.is_empty() {
+        return Ok(BoundaryFeaturePeelStats::default());
+    }
     let selected = selected_indices
-        .into_iter()
-        .map(|index| &report.families[index])
-        .collect::<Vec<_>>();
+        .iter()
+        .map(|index| {
+            report.families.get(*index).ok_or_else(|| {
+                anyhow::anyhow!("boundary feature family index {index} is out of range")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
     let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
@@ -923,14 +989,14 @@ pub fn peel_boundary_features_for_analysis(
 
     for family in selected {
         for &host in &family.host_face_ids {
-            let Some(bounds) = ref_list_param(host, 1, entities, &index) else {
+            let Some(bounds) = ref_list_param(host, 1, entities, index) else {
                 bail!("feature host face #{host} has no readable bounds");
             };
             for bound in bounds {
-                if let Some(previous) = bound_owner.insert(bound, host) {
-                    if previous != host {
-                        bail!("interface bound #{bound} is owned by multiple host faces");
-                    }
+                if let Some(previous) = bound_owner.insert(bound, host)
+                    && previous != host
+                {
+                    bail!("interface bound #{bound} is owned by multiple host faces");
                 }
             }
         }
@@ -983,19 +1049,36 @@ pub fn peel_boundary_features_for_analysis(
 
     stats.faces_removed_from_shells = seen_faces.len();
     stats.interface_bounds_healed = seen_bounds.len();
-    Ok((report, stats))
+    Ok(stats)
 }
 
 pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatureDiagnostics {
     let index = build_index(entities);
-    diagnose_boundary_features_with_index(entities, &index)
+    diagnose_boundary_features_with_index_filtered(entities, &index, None)
+}
+
+pub fn diagnose_boundary_features_for_shells_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    target_shells: &HashSet<u64>,
+) -> BoundaryFeatureDiagnostics {
+    diagnose_boundary_features_with_index_filtered(entities, index, Some(target_shells))
 }
 
 fn diagnose_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> BoundaryFeatureDiagnostics {
-    let (mut report, grouped) = grouped_boundary_features_with_index(entities, index);
+    diagnose_boundary_features_with_index_filtered(entities, index, None)
+}
+
+fn diagnose_boundary_features_with_index_filtered(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    target_shells: Option<&HashSet<u64>>,
+) -> BoundaryFeatureDiagnostics {
+    let (mut report, grouped) =
+        grouped_boundary_features_with_index(entities, index, target_shells);
     let mut families = grouped
         .into_iter()
         .map(|members| {
@@ -1051,9 +1134,14 @@ fn diagnose_boundary_features_with_index(
     report
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn grouped_boundary_features_with_index(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
+    target_shells: Option<&HashSet<u64>>,
 ) -> (
     BoundaryFeatureDiagnostics,
     Vec<Vec<BoundaryFeatureCandidate>>,
@@ -1063,7 +1151,10 @@ fn grouped_boundary_features_with_index(
         return (report, Vec::new());
     }
 
-    let contexts = collect_shell_contexts(entities, index);
+    let contexts = collect_shell_contexts(entities, index)
+        .into_iter()
+        .filter(|context| target_shells.is_none_or(|shells| shells.contains(&context.shell_id)))
+        .collect::<Vec<_>>();
     report.shell_contexts = contexts.len();
     let mut candidates = Vec::<BoundaryFeatureCandidate>::new();
 
@@ -1083,7 +1174,8 @@ fn grouped_boundary_features_with_index(
                 let frame = plane_frame(face, entities, index)?;
                 let bounds = ref_list_param(face, 1, entities, index)?;
                 let boundary_edges = topology.face_edges.get(&face).map_or(0, HashSet::len);
-                (bounds.len() > MIN_GROUP || boundary_edges >= MIN_COMPLEX_HOST_EDGES)
+                (bounds.len() >= MIN_BOUNDARY_HOST_BOUNDS
+                    || boundary_edges >= MIN_BOUNDARY_HOST_EDGES)
                     .then_some((face, frame, bounds))
             })
             .collect::<Vec<_>>();
@@ -1202,6 +1294,14 @@ fn grouped_boundary_features_with_index(
     (report, grouped)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "topology proof keeps all evidence inputs explicit at the candidate boundary"
+)]
+#[expect(
+    clippy::type_complexity,
+    reason = "nested STEP lookup maps preserve their source-domain structure"
+)]
 fn boundary_feature_candidate(
     context: &ShellContext,
     component: HashSet<u64>,
@@ -1327,6 +1427,10 @@ fn component_is_two_manifold_with_hosts(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn diagnose_planar_features(entities: &[EntityInstance]) -> PlanarFeatureDiagnostics {
     let mut report = PlanarFeatureDiagnostics::default();
     if entities.is_empty() {

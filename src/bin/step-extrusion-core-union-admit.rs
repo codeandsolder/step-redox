@@ -21,7 +21,9 @@ fn main() -> Result<()> {
         bail!("{usage}");
     }
     let cap_pairs = pair_args
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             Ok([
                 pair[0]

@@ -36,7 +36,7 @@ pub struct FormedSheetEvidence {
     pub paired_planar_faces: usize,
     pub coaxial_radius_pairs: usize,
     /// Raw count of parallel plane-support pairs at the dominant thickness.
-    /// This can exceed paired_planar_patches because spatially disjoint
+    /// This can exceed `paired_planar_patches` because spatially disjoint
     /// faces can happen to lie one material thickness apart.
     pub parallel_plane_pairs: usize,
     pub paired_planar_patches: usize,
@@ -86,14 +86,14 @@ pub enum SheetPatchId {
     Cylinder(usize),
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SheetPatchAdjacency {
     pub patch_a: SheetPatchId,
     pub patch_b: SheetPatchId,
     /// True when the two source-skin face pairings cross relative to each patch's
     /// local ordering (negative/positive for planes, inner/outer for cylinders).
     pub crossed_source_sides: bool,
-    /// Source EDGE_CURVEs proving the adjacency, normally one on each skin.
+    /// Source `EDGE_CURVEs` proving the adjacency, normally one on each skin.
     pub source_edge_ids: Vec<u64>,
 }
 
@@ -137,6 +137,14 @@ pub fn detect_formed_sheet_evidence(entities: &[EntityInstance]) -> Vec<FormedSh
 /// constructive recovery, whose own grammar may legitimately prove a body from
 /// a single bend pair plus independent topology/trim evidence.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub(crate) fn detect_formed_sheet_evidence_with_min_pairs(
     entities: &[EntityInstance],
     min_coaxial_pairs: usize,
@@ -171,15 +179,14 @@ pub(crate) fn detect_formed_sheet_evidence_with_min_pairs(
                     if let (Some((origin, normal)), Some(vertices)) = (
                         surface_axis(surface_id, entities, &index),
                         face_vertices(face_id, entities, &index),
-                    ) {
-                        if vertices.len() >= 3 {
-                            planes.push(PlaneFace {
-                                face_id,
-                                origin,
-                                normal,
-                                vertices,
-                            });
-                        }
+                    ) && vertices.len() >= 3
+                    {
+                        planes.push(PlaneFace {
+                            face_id,
+                            origin,
+                            normal,
+                            vertices,
+                        });
                     }
                 }
                 "CYLINDRICAL_SURFACE" => {
@@ -648,7 +655,7 @@ fn graph_connected(
     seen.into_iter().all(|value| value)
 }
 
-fn patch_linear_index(patch: SheetPatchId, plane_count: usize) -> usize {
+const fn patch_linear_index(patch: SheetPatchId, plane_count: usize) -> usize {
     match patch {
         SheetPatchId::Plane(index) => index,
         SheetPatchId::Cylinder(index) => plane_count + index,
@@ -827,6 +834,10 @@ fn normalize(vector: [f64; 3]) -> Option<[f64; 3]> {
     normalize3(vector, DIR_TOL)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quantize_mm(value: f64) -> i64 {
     (value / GEOM_TOL_MM).round() as i64
 }
@@ -902,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn closest_axis_intersection_handles_near_parallel_axes() {
+    fn closest_axis_intersection_handles_near_parallel_axes() -> anyhow::Result<()> {
         let angle: f64 = 2.0e-5;
         let second_axis = [angle.cos(), -angle.sin(), 0.0];
         let (center, gap) = closest_axis_intersection(
@@ -911,25 +922,27 @@ mod tests {
             [0.0, 1.0, 0.0],
             second_axis,
         )
-        .expect("test lines should have a well-defined closest approach");
+        .ok_or_else(|| anyhow::anyhow!("test lines should have a well-defined closest approach"))?;
         let expected_x = 1.0 / angle.tan();
         assert!(gap < 1.0e-9);
         assert!((center[0] - expected_x).abs() < 1.0e-5);
         assert!(center[1].abs() < 1.0e-9);
+        Ok(())
     }
 
     #[test]
-    fn rational_bezier_de_casteljau_handles_extreme_weights() {
+    fn rational_bezier_de_casteljau_handles_extreme_weights() -> anyhow::Result<()> {
         let scale = 1.0e100;
         let root_half = std::f64::consts::FRAC_1_SQRT_2;
         let poles = [[scale, 0.0, 0.0], [scale, scale, 0.0], [0.0, scale, 0.0]];
         let weights = [1.0e300, root_half * 1.0e300, 1.0e300];
         let point = rational_bezier_point(&poles, &weights, 0.5)
-            .expect("extreme finite weights should remain evaluable");
+            .ok_or_else(|| anyhow::anyhow!("extreme finite weights should remain evaluable"))?;
         let expected = root_half * scale;
         assert!(point[0].is_finite() && point[1].is_finite());
         assert!((point[0] - expected).abs() / scale < 1.0e-14);
         assert!((point[1] - expected).abs() / scale < 1.0e-14);
+        Ok(())
     }
 
     #[test]

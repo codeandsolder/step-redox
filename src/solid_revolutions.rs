@@ -5,6 +5,7 @@ use crate::math3::{
     normalize as normalize3, point_to_unit_line_distance, sub,
 };
 use crate::profile_curves::RecoveredProfileCurve;
+use crate::reduced_brep::ReducedSolid;
 use crate::step_entities::{parameter_number, representation_items_and_context};
 use crate::step_graph::{build_index, entity_id, entity_ref_value, simple_record};
 use ruststep::ast::{EntityInstance, Parameter, Record};
@@ -45,9 +46,9 @@ pub struct RecoveredSolidRevolution {
     /// analytic/profile geometry.
     pub max_residual_mm: f64,
     /// Maximum source-evidence residual admitted for this recovery. Exact/legacy
-    /// paths use GEOM_TOL_MM; a straight analytic path may inherit a larger,
+    /// paths use `GEOM_TOL_MM`; a straight analytic path may inherit a larger,
     /// explicitly declared representation-context uncertainty, capped by
-    /// MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM.
+    /// `MAX_REVOLUTION_SOURCE_UNCERTAINTY_MM`.
     pub source_tolerance_mm: f64,
 }
 
@@ -143,6 +144,7 @@ pub struct SolidLoopSignature {
 }
 
 impl RecoveredSolidRevolution {
+    #[must_use]
     pub fn polygon_points(&self) -> Option<Vec<[f64; 2]>> {
         if self.profile_curves.len() < 3 {
             return None;
@@ -318,6 +320,7 @@ fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a
     }
 }
 
+#[must_use]
 pub fn detect_solid_surface_signatures(entities: &[EntityInstance]) -> Vec<SolidSurfaceSignature> {
     let index = build_index(entities);
     detect_solid_surface_signatures_with_index(entities, &index)
@@ -404,6 +407,7 @@ pub(crate) fn detect_solid_surface_signatures_with_index(
     out
 }
 
+#[must_use]
 pub fn detect_solid_revolutions(entities: &[EntityInstance]) -> Vec<RecoveredSolidRevolution> {
     let index = build_index(entities);
     detect_solid_revolutions_with_index(entities, &index)
@@ -435,6 +439,7 @@ pub(crate) fn detect_solid_revolutions_with_index(
     out
 }
 
+#[must_use]
 pub fn detect_radial_slot_revolutions(
     entities: &[EntityInstance],
 ) -> Vec<RecoveredRadialSlotRevolution> {
@@ -491,7 +496,51 @@ fn detect_one_solid(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    detect_one_solid_from_faces(
+        solid_id,
+        face_ids,
+        &faces,
+        entities,
+        index,
+        source_tolerance_mm,
+    )
+}
 
+pub(crate) fn detect_solid_revolution_from_reduced(
+    solid: &ReducedSolid,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<RecoveredSolidRevolution> {
+    let face_ids = solid.faces().map(|face| face.id).collect::<Vec<_>>();
+    let faces = solid
+        .faces()
+        .map(|face| FaceInfo {
+            surface: face.surface.clone(),
+            loops: face.loops.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_tolerance_mm = source_tolerance_by_representation_item(entities, index)
+        .get(&solid.solid_id())
+        .copied()
+        .unwrap_or(REVOLUTION_SOURCE_SUPPORT_TOL_MM);
+    detect_one_solid_from_faces(
+        solid.solid_id(),
+        face_ids,
+        &faces,
+        entities,
+        index,
+        source_tolerance_mm,
+    )
+}
+
+fn detect_one_solid_from_faces(
+    solid_id: u64,
+    face_ids: Vec<u64>,
+    faces: &[FaceInfo],
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    source_tolerance_mm: f64,
+) -> Option<RecoveredSolidRevolution> {
     // Closed two-manifold proof. A STEP seam may occur twice on one face; counting
     // oriented uses rather than distinct faces handles that case correctly.
     let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
@@ -509,22 +558,22 @@ fn detect_one_solid(
         return None;
     }
     let context = TopologyContext {
-        faces: &faces,
+        faces,
         edge_faces: &edge_faces,
         entities,
         index,
     };
 
-    if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, &faces) {
+    if let Some(torus) = detect_full_ring_torus(solid_id, &face_ids, faces) {
         return Some(torus);
     }
-    if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, &faces) {
+    if let Some(cap) = detect_spherical_cap(solid_id, &face_ids, faces) {
         return Some(cap);
     }
-    if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, &faces, &context) {
+    if let Some(end) = detect_hemispherical_end(solid_id, &face_ids, faces, &context) {
         return Some(end);
     }
-    if let Some(mixed) = detect_mixed_curved_revolution(solid_id, &face_ids, &faces, &context) {
+    if let Some(mixed) = detect_mixed_curved_revolution(solid_id, &face_ids, faces, &context) {
         return Some(mixed);
     }
     if face_ids.len() < 3 {
@@ -622,6 +671,10 @@ fn selected_faces_connected(face_count: usize, edge_faces: &HashMap<u64, Vec<usi
 /// Recover a connected axisymmetric subset of one source solid when removing the
 /// remaining feature leaves exactly one circular interface. The missing interface
 /// is capped only in constructive meridian space; source topology remains untouched.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub(crate) fn recover_axisymmetric_subbody_with_circular_cap(
     solid_id: u64,
     selected_face_ids: &[u64],
@@ -740,6 +793,10 @@ pub(crate) fn recover_axisymmetric_subbody_with_circular_cap(
     Some((recovered, interface_circle))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn detect_one_radial_slot(
     solid_id: u64,
     entities: &[EntityInstance],
@@ -1038,8 +1095,8 @@ fn detect_one_radial_slot(
         if max_residual_mm > source_tolerance_mm {
             #[cfg(test)]
             eprintln!(
-                "radial-slot base profile residual {:.12e} exceeds source tolerance {:.12e} after face #{}",
-                max_residual_mm, source_tolerance_mm, face_ids[face_index]
+                "radial-slot base profile residual {max_residual_mm:.12e} exceeds source tolerance {source_tolerance_mm:.12e} after face #{}",
+                face_ids[face_index]
             );
             return None;
         }
@@ -1084,8 +1141,7 @@ fn detect_one_radial_slot(
     if slot_max_residual_mm > source_tolerance_mm {
         #[cfg(test)]
         eprintln!(
-            "radial-slot slot residual {:.12e} exceeds source tolerance {:.12e}",
-            slot_max_residual_mm, source_tolerance_mm
+            "radial-slot slot residual {slot_max_residual_mm:.12e} exceeds source tolerance {source_tolerance_mm:.12e}"
         );
         return None;
     }
@@ -1108,7 +1164,7 @@ fn detect_one_radial_slot(
     })
 }
 
-fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
+const fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
     match surface {
         SurfaceSupport::Plane(plane) => SolidSurfaceGeometrySignature::Plane {
             origin_mm: plane.origin_mm,
@@ -1152,7 +1208,7 @@ fn surface_geometry(surface: &SurfaceSupport) -> SolidSurfaceGeometrySignature {
     }
 }
 
-fn curve_kind(curve: &CurveSupport) -> &'static str {
+const fn curve_kind(curve: &CurveSupport) -> &'static str {
     match curve {
         CurveSupport::Line(_) => "line",
         CurveSupport::Circle(_) => "circle",
@@ -1161,7 +1217,7 @@ fn curve_kind(curve: &CurveSupport) -> &'static str {
     }
 }
 
-fn surface_kind(surface: &SurfaceSupport) -> &'static str {
+const fn surface_kind(surface: &SurfaceSupport) -> &'static str {
     match surface {
         SurfaceSupport::Plane(_) => "plane",
         SurfaceSupport::Cylinder(_) => "cylinder",
@@ -1179,9 +1235,8 @@ fn detect_full_ring_torus(
     face_ids: &[u64],
     faces: &[FaceInfo],
 ) -> Option<RecoveredSolidRevolution> {
-    let first = match faces.first()?.surface {
-        SurfaceSupport::Torus(torus) => torus,
-        _ => return None,
+    let SurfaceSupport::Torus(first) = faces.first()?.surface else {
+        return None;
     };
     if !first.major_radius_mm.is_finite()
         || !first.minor_radius_mm.is_finite()
@@ -1225,7 +1280,7 @@ fn detect_full_ring_torus(
 
             let circle_y = normalize(cross(circle.normal, circle.x_direction))?;
             for sample in 0..16 {
-                let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+                let angle = std::f64::consts::TAU * f64::from(sample) / 16.0;
                 let point = add(
                     circle.center_mm,
                     add(
@@ -1265,6 +1320,10 @@ fn detect_full_ring_torus(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn detect_spherical_cap(
     solid_id: u64,
     face_ids: &[u64],
@@ -1280,7 +1339,7 @@ fn detect_spherical_cap(
         match face.surface {
             SurfaceSupport::Sphere(sphere) => sphere_faces.push((face, sphere)),
             SurfaceSupport::Plane(plane) if plane_face.is_none() => {
-                plane_face = Some((face, plane))
+                plane_face = Some((face, plane));
             }
             _ => return None,
         }
@@ -1429,6 +1488,14 @@ fn detect_spherical_cap(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "signum is compared to the exact discrete sphere side ±1"
+)]
 fn detect_hemispherical_end(
     solid_id: u64,
     face_ids: &[u64],
@@ -1714,6 +1781,10 @@ fn detect_mixed_curved_revolution(
     detect_mixed_curved_revolution_with_synthetic(solid_id, face_ids, faces, context, &[])
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn detect_mixed_curved_revolution_with_synthetic(
     solid_id: u64,
     face_ids: &[u64],
@@ -1882,6 +1953,10 @@ fn same_sphere_support(a: brep::SphereSupport, b: brep::SphereSupport) -> bool {
         && (a.radius_mm - b.radius_mm).abs() <= GEOM_TOL_MM
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn sphere_profile_arc(
     face_indices: &[usize],
     sphere: brep::SphereSupport,
@@ -1970,20 +2045,19 @@ fn sphere_profile_arc(
 
     let angle_tol = (GEOM_TOL_MM / sphere.radius_mm).max(1.0e-12);
     let mut candidates = Vec::<(f64, f64)>::new();
+    let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
     if boundary_points.len() == 1 {
-        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         candidates.push((start, std::f64::consts::FRAC_PI_2));
         candidates.push((start, -std::f64::consts::FRAC_PI_2));
     } else {
-        let start = meridian::angle(boundary_points[0], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
         let end = meridian::angle(boundary_points[1], center_mm, sphere.radius_mm, GEOM_TOL_MM)?;
-        let ccw_delta = meridian::positive_angle_delta(start, end);
-        let cw_delta = std::f64::consts::TAU - ccw_delta;
-        if ccw_delta <= angle_tol || cw_delta <= angle_tol {
+        let counterclockwise_delta = meridian::positive_angle_delta(start, end);
+        let clockwise_delta = std::f64::consts::TAU - counterclockwise_delta;
+        if counterclockwise_delta <= angle_tol || clockwise_delta <= angle_tol {
             return None;
         }
-        candidates.push((start, start + ccw_delta));
-        candidates.push((start, start - cw_delta));
+        candidates.push((start, start + counterclockwise_delta));
+        candidates.push((start, start - clockwise_delta));
     }
 
     let valid = candidates
@@ -2067,6 +2141,10 @@ fn same_torus_support(a: brep::TorusSupport, b: brep::TorusSupport, axis: [f64; 
         && (a.minor_radius_mm - b.minor_radius_mm).abs() <= GEOM_TOL_MM
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn torus_profile_arc(
     face_indices: &[usize],
     torus: brep::TorusSupport,
@@ -2151,15 +2229,15 @@ fn torus_profile_arc(
     }
     let start_angle = meridian::angle(*start, center_mm, torus.minor_radius_mm, GEOM_TOL_MM)?;
     let end_angle = meridian::angle(*end, center_mm, torus.minor_radius_mm, GEOM_TOL_MM)?;
-    let ccw_delta = meridian::positive_angle_delta(start_angle, end_angle);
-    let cw_delta = std::f64::consts::TAU - ccw_delta;
+    let counterclockwise_delta = meridian::positive_angle_delta(start_angle, end_angle);
+    let clockwise_delta = std::f64::consts::TAU - counterclockwise_delta;
     let angle_tol = (GEOM_TOL_MM / torus.minor_radius_mm).max(1.0e-12);
-    if ccw_delta <= angle_tol || cw_delta <= angle_tol {
+    if counterclockwise_delta <= angle_tol || clockwise_delta <= angle_tol {
         return None;
     }
     let candidates = [
-        (start_angle, start_angle + ccw_delta),
-        (start_angle, start_angle - cw_delta),
+        (start_angle, start_angle + counterclockwise_delta),
+        (start_angle, start_angle - clockwise_delta),
     ];
     let valid = candidates
         .into_iter()
@@ -2248,7 +2326,7 @@ fn torus_meridian_circle_residual(
     }
     let y_direction = normalize(cross(normal, x_direction))?;
     for sample in 0..16 {
-        let angle = std::f64::consts::TAU * sample as f64 / 16.0;
+        let angle = std::f64::consts::TAU * f64::from(sample) / 16.0;
         let point = add(
             circle.center_mm,
             add(
@@ -2327,6 +2405,10 @@ fn linear_profile_segment(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn cylinder_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,
@@ -2489,6 +2571,10 @@ fn cone_profile_segment_with_angular_trims(
     cone_profile_segment_with_angular_trims_inner(face_index, face, cone, segment_context, true)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn cone_profile_segment_with_angular_trims_inner(
     face_index: usize,
     face: &FaceInfo,
@@ -3040,6 +3126,10 @@ fn linear_radius_at(support: LinearMeridianSupport, axial: f64) -> Option<f64> {
     Some(linear_signed_radius_at(support, axial)?.abs())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn plane_profile_segment_with_angular_trims(
     face_index: usize,
     face: &FaceInfo,

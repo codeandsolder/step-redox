@@ -1,21 +1,22 @@
+# ruff: file-ignore[missing-type-function-argument, missing-return-type-undocumented-public-function]
+# Dynamic CAD/prototype boundary: ty still checks soundness; exhaustive annotations would be mostly opaque external types.
 import argparse
 import json
 import math
 import re
 from pathlib import Path
 
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
-from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.BRepBndLib import BRepBndLib
-from OCP.BRepGProp import BRepGProp
 from OCP.Bnd import Bnd_Box
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepGProp import BRepGProp
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.STEPControl import STEPControl_Reader
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SOLID, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
-
 
 ABS_GEOM_TOL = 1.0e-9
 ABS_VOLUME_TOL = 1.0e-10
@@ -149,11 +150,13 @@ def compare_solid(a, b):
     if not close(a["area"], b["area"], ABS_AREA_TOL):
         errors["area"] = abs(a["area"] - b["area"])
 
-    center_error = max(abs(x - y) for x, y in zip(a["center"], b["center"]))
+    center_error = max(
+        abs(x - y) for x, y in zip(a["center"], b["center"], strict=False)
+    )
     if center_error > ABS_GEOM_TOL:
         errors["center"] = center_error
 
-    bbox_error = max(abs(x - y) for x, y in zip(a["bbox"], b["bbox"]))
+    bbox_error = max(abs(x - y) for x, y in zip(a["bbox"], b["bbox"], strict=False))
     if bbox_error > ABS_GEOM_TOL:
         errors["bbox"] = bbox_error
 
@@ -190,9 +193,11 @@ if args.a_entity_id is not None:
     volume_error = abs(a_solid["volume"] - b_solid["volume"])
     area_error = abs(a_solid["area"] - b_solid["area"])
     center_error = max(
-        abs(x - y) for x, y in zip(a_solid["center"], b_solid["center"])
+        abs(x - y) for x, y in zip(a_solid["center"], b_solid["center"], strict=False)
     )
-    bbox_error = max(abs(x - y) for x, y in zip(a_solid["bbox"], b_solid["bbox"]))
+    bbox_error = max(
+        abs(x - y) for x, y in zip(a_solid["bbox"], b_solid["bbox"], strict=False)
+    )
     source_minus_candidate = cut_volume(a_shape, b_shape)
     candidate_minus_source = cut_volume(b_shape, a_shape)
     boolean_volume_tolerance = volume_tolerance(a_solid["volume"], b_solid["volume"])
@@ -247,7 +252,7 @@ mismatches = []
 if len(a_solids) != len(b_solids):
     mismatches.append({"solid_count": [len(a_solids), len(b_solids)]})
 else:
-    for index, (a_solid, b_solid) in enumerate(zip(a_solids, b_solids)):
+    for index, (a_solid, b_solid) in enumerate(zip(a_solids, b_solids, strict=False)):
         errors = compare_solid(a_solid, b_solid)
         if errors:
             mismatches.append(

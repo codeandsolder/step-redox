@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    BoundaryFeatureCandidate, EntityInstance, FeaturePolarity, HashMap, HashSet, MIN_GROUP,
+    Parameter, PlanarFeatureStats, PlaneFrame, ReferenceGraph, Result, ShellContext, StyleRef,
+    append_refs_to_list_param, bail, build_index, collect_styles_by_target, entity_id, entity_ref,
+    entity_ref_value, grouped_boundary_features_with_index, patch_presentation_lists, plane_frame,
+    push_point, push_simple, ref_list_param, remove_refs_from_list_param,
+    representation_items_and_context, rigid_translation, simple_record, simple_record_mut,
+    toggle_tf,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum StyleKey {
@@ -42,6 +50,10 @@ pub fn instance_boundary_features(
     apply_mapped_feature_plan(entities, plan)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn plan_additive_mapped_features(
     entities: &[EntityInstance],
 ) -> Result<BoundaryFeatureInstancePlan> {
@@ -54,7 +66,7 @@ fn plan_additive_mapped_features(
     }
 
     let styles_by_target = collect_styles_by_target(entities);
-    let (_, groups) = grouped_boundary_features_with_index(entities, &index);
+    let (_, groups) = grouped_boundary_features_with_index(entities, &index, None);
     let mut hosts = Vec::<MappedFeatureHostPlan>::new();
     let mut host_positions = HashMap::<(u64, u64, u64, u64, u64), usize>::new();
     let mut claimed_faces = HashSet::<u64>::new();
@@ -191,6 +203,10 @@ fn plan_additive_mapped_features(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn apply_mapped_feature_plan(
     entities: &mut Vec<EntityInstance>,
     plan: BoundaryFeatureInstancePlan,

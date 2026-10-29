@@ -5,7 +5,7 @@ use crate::math3::{
 use crate::step_graph::{build_index, entity_id, simple_record};
 use ruststep::ast::EntityInstance;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const GEOM_TOL_MM: f64 = 1.0e-7;
 const DIR_TOL: f64 = 1.0e-8;
@@ -81,6 +81,22 @@ struct MeridianLine {
 #[must_use]
 pub fn detect_edge_treatment_evidence(entities: &[EntityInstance]) -> Vec<EdgeTreatmentEvidence> {
     let index = build_index(entities);
+    detect_edge_treatment_evidence_with_index(entities, &index, None)
+}
+
+pub(crate) fn detect_edge_treatment_evidence_for_solids_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    solid_ids: &HashSet<u64>,
+) -> Vec<EdgeTreatmentEvidence> {
+    detect_edge_treatment_evidence_with_index(entities, index, Some(solid_ids))
+}
+
+fn detect_edge_treatment_evidence_with_index(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    solid_ids: Option<&HashSet<u64>>,
+) -> Vec<EdgeTreatmentEvidence> {
     let mut out = Vec::new();
     for entity in entities {
         let Some(record) = simple_record(entity) else {
@@ -90,11 +106,14 @@ pub fn detect_edge_treatment_evidence(entities: &[EntityInstance]) -> Vec<EdgeTr
             continue;
         }
         let solid_id = entity_id(entity);
-        let Some(face_ids) = brep::solid_face_ids(solid_id, entities, &index) else {
+        if solid_ids.is_some_and(|ids| !ids.contains(&solid_id)) {
+            continue;
+        }
+        let Some(face_ids) = brep::solid_face_ids(solid_id, entities, index) else {
             continue;
         };
         out.extend(detect_solid_edge_treatments(
-            solid_id, &face_ids, entities, &index,
+            solid_id, &face_ids, entities, index,
         ));
     }
     out.sort_by(|a, b| {

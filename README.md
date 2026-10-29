@@ -118,8 +118,8 @@ contact sheets for inspection.
 Run locally with:
 
     cargo build --release --bin step-redox
-    python -m pip install -r validation/requirements.txt
-    python validation/harness.py run \
+    uv sync --frozen
+    uv run --frozen python validation/harness.py run \
       --manifest validation/fixtures.json \
       --cache .cache/step-redox-validation \
       --out validation/out \
@@ -343,3 +343,7 @@ The default tier should be boring:
 
 More invasive transformations belong behind explicit experimental/aggressive
 modes until separately validated.
+
+## License
+
+Apache-2.0.

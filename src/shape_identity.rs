@@ -17,7 +17,7 @@ pub struct ShapeKey {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SolidIdentity {
+pub struct SolidIdentity {
     pub(crate) root: u64,
     pub(crate) closure: HashSet<u64>,
     pub(crate) center: [f64; 3],
@@ -29,7 +29,7 @@ pub(crate) struct SolidIdentity {
 
 /// Build the canonical geometry/topology identity once, independently of any
 /// rewrite policy such as presentation-style preservation.
-pub(crate) fn solid_identity(
+pub fn solid_identity(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -117,6 +117,24 @@ pub(crate) fn solid_identity(
     })
 }
 
+pub fn relative_z90_quarter(
+    source: &SolidIdentity,
+    target: &SolidIdentity,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Option<u8> {
+    if source.key != target.key {
+        return None;
+    }
+    let target_points = normalized_points(&target.vertex_points, target.center, 0);
+    let target_topology = solid_topology_signature(target.root, entities, index, target.center, 0)?;
+    (0..4u8).find(|&quarter| {
+        normalized_points(&source.vertex_points, source.center, quarter) == target_points
+            && solid_topology_signature(source.root, entities, index, source.center, quarter)
+                .is_some_and(|topology| topology == target_topology)
+    })
+}
+
 /// Translation- and Z-quarter-turn-invariant identity for one manifold solid.
 pub fn solid_shape_key(
     root: u64,
@@ -186,7 +204,7 @@ pub fn manifold_solid_face_ids(
     (!faces.is_empty()).then_some(faces)
 }
 
-pub(crate) fn solid_topology_signature(
+pub fn solid_topology_signature(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -341,7 +359,7 @@ pub fn resolve_edge_curve_use(
     None
 }
 
-pub(crate) fn oriented_edge_signature(
+pub fn oriented_edge_signature(
     oriented_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -408,7 +426,7 @@ fn vertex_signature(
     Some(format!("P({},{},{})", q[0], q[1], q[2]))
 }
 
-pub(crate) fn support_entity_signature(
+pub fn support_entity_signature(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -542,6 +560,10 @@ fn curve_replica_support_signature(
     )
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn line_support_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -582,7 +604,11 @@ fn line_support_signature(
     ))
 }
 
-pub(crate) fn circle_support_signature(
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+pub fn circle_support_signature(
     record: &Record,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -619,7 +645,11 @@ pub(crate) fn circle_support_signature(
     ))
 }
 
-pub(crate) fn cylindrical_surface_signature(
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+pub fn cylindrical_surface_signature(
     record: &Record,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -662,7 +692,11 @@ pub(crate) fn cylindrical_surface_signature(
     ))
 }
 
-pub(crate) fn canonical_axis_offset(
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
+pub fn canonical_axis_offset(
     point: [f64; 3],
     direction: [f64; 3],
     center: [f64; 3],
@@ -697,6 +731,10 @@ pub(crate) fn canonical_axis_offset(
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn plane_support_signature(
     record: &Record,
     entities: &[EntityInstance],
@@ -817,6 +855,10 @@ fn support_record_signature(
     Some(format!("{}{params}", record.name))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn support_param_signature(
     parameter: &Parameter,
     entities: &[EntityInstance],
@@ -903,6 +945,10 @@ fn direction_components(record: &Record) -> Option<[f64; 3]> {
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn transform_point(point: [f64; 3], center: [f64; 3], quarter: u8) -> [i64; 3] {
     let x = point[0] - center[0];
     let y = point[1] - center[1];
@@ -915,6 +961,10 @@ fn transform_point(point: [f64; 3], center: [f64; 3], quarter: u8) -> [i64; 3] {
     ]
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn transform_direction(direction: [f64; 3], quarter: u8) -> [i64; 3] {
     let (x, y) = rotate_xy(direction[0], direction[1], quarter);
     [
@@ -924,6 +974,10 @@ fn transform_direction(direction: [f64; 3], quarter: u8) -> [i64; 3] {
     ]
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn parameter_literal_signature(parameter: &Parameter) -> Option<String> {
     match parameter {
         Parameter::Enumeration(value) => Some(format!(".{value}.")),
@@ -953,7 +1007,7 @@ fn canonical_cycle(items: &[String]) -> Vec<String> {
     best
 }
 
-pub(crate) fn resolved_geometry_signatures(
+pub fn resolved_geometry_signatures(
     ids: &[u64],
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -969,7 +1023,7 @@ pub(crate) fn resolved_geometry_signatures(
     Some(out)
 }
 
-pub(crate) fn canonical_z90_solid_signature(
+pub fn canonical_z90_solid_signature(
     root: u64,
     points: &[[f64; 3]],
     entities: &[EntityInstance],
@@ -991,11 +1045,7 @@ pub(crate) fn canonical_z90_solid_signature(
     best
 }
 
-pub(crate) fn normalized_points(
-    points: &[[f64; 3]],
-    center: [f64; 3],
-    quarter: u8,
-) -> Vec<[i64; 3]> {
+pub fn normalized_points(points: &[[f64; 3]], center: [f64; 3], quarter: u8) -> Vec<[i64; 3]> {
     let mut candidate: Vec<[i64; 3]> = points
         .iter()
         .map(|point| transform_point(*point, center, quarter))
@@ -1005,7 +1055,7 @@ pub(crate) fn normalized_points(
 }
 
 #[cfg(test)]
-pub(crate) fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Vec<[i64; 3]>, u8) {
+pub fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Vec<[i64; 3]>, u8) {
     let mut best: Option<Vec<[i64; 3]>> = None;
     let mut best_rotation = 0u8;
     for quarter in 0..4u8 {
@@ -1018,7 +1068,11 @@ pub(crate) fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Ve
     (best.unwrap_or_default(), best_rotation)
 }
 
-pub(crate) fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
+pub fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
     // Points are normally collected by walking a HashSet closure. Summing in
     // that randomized iteration order made the final few bits of the centroid
     // process-dependent and could flip coordinates across the 1e-9 canonical

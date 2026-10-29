@@ -4,31 +4,41 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from pathlib import Path
 import subprocess
-import sys
+from pathlib import Path
+from typing import Any
 
 
-def fixture_path(cache: Path, spec: dict) -> Path:
-    return cache / spec.get("filename", "")
+def fixture_path(cache: Path, spec: dict[str, Any]) -> Path:
+    filename = spec.get("filename", "")
+    if not isinstance(filename, str):
+        raise TypeError("fixture filename must be a string")
+    return cache / filename
 
 
-def run_probe(step_redox: Path, input_path: Path, prefix: Path):
+def run_probe(step_redox: Path, input_path: Path, prefix: Path) -> None:
     prefix.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(step_redox),
-        "--profile", "compact",
+        "--profile",
+        "compact",
         str(input_path),
         str(prefix.with_suffix(".compact.step")),
-        "--patterns-json", str(prefix.with_suffix(".patterns.json")),
-        "--cad-fragments-json", str(prefix.with_suffix(".cad-fragments.json")),
-        "--formed-sheet-json", str(prefix.with_suffix(".formed-sheet.json")),
-        "--periodic-bodies-json", str(prefix.with_suffix(".bodies.json")),
-        "--count-parameters-json", str(prefix.with_suffix(".counts.json")),
-        "--periodic-chains-json", str(prefix.with_suffix(".chains.json")),
+        "--patterns-json",
+        str(prefix.with_suffix(".patterns.json")),
+        "--cad-fragments-json",
+        str(prefix.with_suffix(".cad-fragments.json")),
+        "--formed-sheet-json",
+        str(prefix.with_suffix(".formed-sheet.json")),
+        "--periodic-bodies-json",
+        str(prefix.with_suffix(".bodies.json")),
+        "--count-parameters-json",
+        str(prefix.with_suffix(".counts.json")),
+        "--periodic-chains-json",
+        str(prefix.with_suffix(".chains.json")),
         "--json",
     ]
-    proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.run(command, check=False, text=True, capture_output=True)
     prefix.with_suffix(".stdout.txt").write_text(proc.stdout)
     prefix.with_suffix(".stats.json").write_text(proc.stderr)
     if proc.returncode != 0:
@@ -42,7 +52,9 @@ def close(a: float, b: float, tol: float = 1e-8) -> bool:
     return math.isfinite(a) and abs(a - b) <= tol
 
 
-def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) -> dict:
+def validate_instance_patterns(
+    name: str, patterns: list[dict[str, Any]], expected: dict[str, Any]
+) -> dict[str, Any]:
     linear = [pattern for pattern in patterns if pattern.get("dimension") == 1]
     expected_count = expected["linear_patterns"]
     if len(linear) != expected_count:
@@ -61,13 +73,17 @@ def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) 
                 f"{name}: pattern {index} count {len(pattern['item_ids'])} != {expected_instances}"
             )
         if len(pattern["basis"]) != 1 or len(pattern["pitch"]) != 1:
-            raise AssertionError(f"{name}: pattern {index} has inconsistent 1-D lattice metadata")
+            raise AssertionError(
+                f"{name}: pattern {index} has inconsistent 1-D lattice metadata"
+            )
         # `basis[0]` is the physical lattice step vector; `pitch[0]` is its
         # scalar norm. Multiplying them would square the step length. Validate
         # both representations independently so this probe also catches stale
         # or internally inconsistent metadata.
         step = pattern["basis"][0]
-        if any(not close(a, b, 1e-12) for a, b in zip(step, expected_step)):
+        if any(
+            not close(a, b, 1e-12) for a, b in zip(step, expected_step, strict=False)
+        ):
             raise AssertionError(
                 f"{name}: pattern {index} step {step} != canonical {expected_step}"
             )
@@ -82,12 +98,14 @@ def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) 
             raise AssertionError(
                 f"{name}: pattern {index} residual {residual} exceeds {max_residual}"
             )
-        observed.append({
-            "count": len(pattern["item_ids"]),
-            "step_mm": step,
-            "max_residual_mm": residual,
-            "representation_map": pattern["representation_map"],
-        })
+        observed.append(
+            {
+                "count": len(pattern["item_ids"]),
+                "step_mm": step,
+                "max_residual_mm": residual,
+                "representation_map": pattern["representation_map"],
+            }
+        )
 
     return {
         "fixture": name,
@@ -96,10 +114,14 @@ def validate_instance_patterns(name: str, patterns: list[dict], expected: dict) 
 
 
 def validate_periodic_cad_fragment(
-    name: str, fragments: list[dict], expected: dict, detected_chain: dict
-) -> dict:
+    name: str,
+    fragments: list[dict[str, Any]],
+    expected: dict[str, Any],
+    detected_chain: dict[str, Any],
+) -> dict[str, Any]:
     candidates = [
-        fragment for fragment in fragments
+        fragment
+        for fragment in fragments
         if fragment.get("source", {}).get("kind") == "periodic_chain"
         and fragment.get("source", {}).get("sites") == expected["sites"]
     ]
@@ -121,15 +143,16 @@ def validate_periodic_cad_fragment(
         "source_solid": node["source_solid_id"] == fragment["source"]["solid_id"],
         "sites": node["sites"] == expected["sites"],
         "pitch_mm": close(node["pitch_mm"], expected["pitch_mm"], 1e-9),
-        "interior_site_face_count":
-            node["interior_site_face_count"] == expected["interior_site_face_count"],
-        "interior_gap_face_count":
-            node["interior_gap_face_count"] == expected["interior_gap_face_count"],
-        "stretch_face_count": node["stretch_face_count"] == detected_chain["stretch_faces"],
-        "fixed_negative_face_count":
-            node["fixed_negative_face_count"] == detected_chain["fixed_negative_faces"],
-        "fixed_positive_face_count":
-            node["fixed_positive_face_count"] == detected_chain["fixed_positive_faces"],
+        "interior_site_face_count": node["interior_site_face_count"]
+        == expected["interior_site_face_count"],
+        "interior_gap_face_count": node["interior_gap_face_count"]
+        == expected["interior_gap_face_count"],
+        "stretch_face_count": node["stretch_face_count"]
+        == detected_chain["stretch_faces"],
+        "fixed_negative_face_count": node["fixed_negative_face_count"]
+        == detected_chain["fixed_negative_faces"],
+        "fixed_positive_face_count": node["fixed_positive_face_count"]
+        == detected_chain["fixed_positive_faces"],
     }
     failed = [key for key, ok in checks.items() if not ok]
     if failed:
@@ -156,7 +179,9 @@ def validate_periodic_cad_fragment(
     }
 
 
-def validate_formed_sheet(name: str, candidates: list[dict], expected: dict) -> dict:
+def validate_formed_sheet(
+    name: str, candidates: list[dict[str, Any]], expected: dict[str, Any]
+) -> dict[str, Any]:
     if len(candidates) != expected["candidates"]:
         raise AssertionError(
             f"{name}: expected {expected['candidates']} formed-sheet candidates, got {len(candidates)}"
@@ -165,37 +190,50 @@ def validate_formed_sheet(name: str, candidates: list[dict], expected: dict) -> 
     observed = []
     for index, candidate in enumerate(candidates):
         checks = {
-            "thickness_mm": close(candidate["thickness_mm"], expected["thickness_mm"], 1e-9),
-            "cylindrical_faces": candidate["cylindrical_faces"] == expected["cylindrical_faces"],
-            "paired_cylindrical_faces": candidate["paired_cylindrical_faces"] == expected["paired_cylindrical_faces"],
-            "coaxial_radius_pairs": candidate["coaxial_radius_pairs"] == expected["coaxial_radius_pairs"],
-            "parallel_plane_pairs": candidate["parallel_plane_pairs"] == expected["parallel_plane_pairs"],
+            "thickness_mm": close(
+                candidate["thickness_mm"], expected["thickness_mm"], 1e-9
+            ),
+            "cylindrical_faces": candidate["cylindrical_faces"]
+            == expected["cylindrical_faces"],
+            "paired_cylindrical_faces": candidate["paired_cylindrical_faces"]
+            == expected["paired_cylindrical_faces"],
+            "coaxial_radius_pairs": candidate["coaxial_radius_pairs"]
+            == expected["coaxial_radius_pairs"],
+            "parallel_plane_pairs": candidate["parallel_plane_pairs"]
+            == expected["parallel_plane_pairs"],
         }
         failed = [key for key, ok in checks.items() if not ok]
         if failed:
             raise AssertionError(
                 f"{name}: formed-sheet candidate {index} failed {failed}; observed={candidate}"
             )
-        expected_ratio = expected["paired_cylindrical_faces"] / expected["cylindrical_faces"]
+        expected_ratio = (
+            expected["paired_cylindrical_faces"] / expected["cylindrical_faces"]
+        )
         if not close(candidate["paired_cylinder_face_ratio"], expected_ratio, 1e-12):
             raise AssertionError(
                 f"{name}: formed-sheet candidate {index} paired ratio "
                 f"{candidate['paired_cylinder_face_ratio']} != {expected_ratio}"
             )
-        observed.append({
-            "solid_id": candidate["solid_id"],
-            "thickness_mm": candidate["thickness_mm"],
-            "paired_cylinder_face_ratio": candidate["paired_cylinder_face_ratio"],
-            "coaxial_radius_pairs": candidate["coaxial_radius_pairs"],
-            "parallel_plane_pairs": candidate["parallel_plane_pairs"],
-        })
+        observed.append(
+            {
+                "solid_id": candidate["solid_id"],
+                "thickness_mm": candidate["thickness_mm"],
+                "paired_cylinder_face_ratio": candidate["paired_cylinder_face_ratio"],
+                "coaxial_radius_pairs": candidate["coaxial_radius_pairs"],
+                "parallel_plane_pairs": candidate["parallel_plane_pairs"],
+            }
+        )
 
     return {"fixture": name, "candidates": observed}
 
 
-def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
+def validate_chain(
+    name: str, chains: list[dict[str, Any]], expected: dict[str, Any]
+) -> dict[str, Any]:
     candidates = [
-        chain for chain in chains
+        chain
+        for chain in chains
         if chain.get("sites") == expected["sites"]
         and close(chain.get("pitch_mm", float("nan")), expected["pitch_mm"])
     ]
@@ -209,12 +247,17 @@ def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
     chain = candidates[0]
     checks = {
         "read_only_proven": chain["read_only_proven"] == expected["read_only_proven"],
-        "complete_partition": chain["complete_partition"] == expected["complete_partition"],
-        "faces_without_geometry": chain["faces_without_geometry"] == expected["faces_without_geometry"],
-        "nonmanifold_edges": chain["nonmanifold_edges"] == expected["nonmanifold_edges"],
+        "complete_partition": chain["complete_partition"]
+        == expected["complete_partition"],
+        "faces_without_geometry": chain["faces_without_geometry"]
+        == expected["faces_without_geometry"],
+        "nonmanifold_edges": chain["nonmanifold_edges"]
+        == expected["nonmanifold_edges"],
         "cross_site_edges": chain["cross_site_edges"] == expected["cross_site_edges"],
-        "interior_site_face_count": chain["interior_site_face_count"] == expected["interior_site_face_count"],
-        "interior_gap_face_count": chain["interior_gap_face_count"] == expected["interior_gap_face_count"],
+        "interior_site_face_count": chain["interior_site_face_count"]
+        == expected["interior_site_face_count"],
+        "interior_gap_face_count": chain["interior_gap_face_count"]
+        == expected["interior_gap_face_count"],
         "stretch_faces": len(chain["stretch_face_ids"]) == expected["stretch_faces"],
     }
     failed = [key for key, ok in checks.items() if not ok]
@@ -223,7 +266,9 @@ def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
         details["stretch_faces"] = len(chain["stretch_face_ids"])
         details["fixed_negative_faces"] = len(chain["fixed_negative_face_ids"])
         details["fixed_positive_faces"] = len(chain["fixed_positive_face_ids"])
-        raise AssertionError(f"{name}: periodic-chain checks failed: {failed}; observed={details}")
+        raise AssertionError(
+            f"{name}: periodic-chain checks failed: {failed}; observed={details}"
+        )
 
     slope = chain["interior_site_face_count"] + chain["interior_gap_face_count"]
     return {
@@ -242,7 +287,7 @@ def validate_chain(name: str, chains: list[dict], expected: dict) -> dict:
     }
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", type=Path, required=True)
     ap.add_argument("--cache", type=Path, required=True)
@@ -273,7 +318,9 @@ def main():
         if chain_expected:
             chains = json.loads(prefix.with_suffix(".chains.json").read_text())
             result = validate_chain(name, chains, chain_expected)
-            fragments = json.loads(prefix.with_suffix(".cad-fragments.json").read_text())
+            fragments = json.loads(
+                prefix.with_suffix(".cad-fragments.json").read_text()
+            )
             result["cad_ir"] = validate_periodic_cad_fragment(
                 name, fragments, chain_expected, result
             )
@@ -298,7 +345,9 @@ def main():
             )
 
         if sheet_expected:
-            candidates = json.loads(prefix.with_suffix(".formed-sheet.json").read_text())
+            candidates = json.loads(
+                prefix.with_suffix(".formed-sheet.json").read_text()
+            )
             result = validate_formed_sheet(name, candidates, sheet_expected)
             sheet_results.append(result)
             first = result["candidates"][0]

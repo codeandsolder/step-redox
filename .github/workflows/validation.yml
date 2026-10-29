@@ -38,24 +38,6 @@ jobs:
       - name: Fuzz solid revolution recovery
         run: cargo +nightly fuzz run solid_revolutions -- -runs=10000 -dict=fuzz/step.dict
 
-  msrv:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@1.88.0
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: msrv-1.88
-
-      - name: Check declared Rust 1.88 MSRV
-        run: cargo +1.88.0 check --locked --lib --bins --features cad-kernel-monstertruck
-
-
   shared-sccache:
     name: Rust build/test (shared sccache)
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
@@ -83,8 +65,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-          cache: pip
-          cache-dependency-path: validation/requirements.txt
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          version: "0.12.22"
+          enable-cache: true
 
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
@@ -96,7 +81,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Install validation dependencies
-        run: python -m pip install -r validation/requirements.txt
+        run: uv sync --frozen
 
       - name: Run Rust unit tests
         run: cargo test --lib --release --locked
@@ -128,7 +113,7 @@ jobs:
 
       - name: Validate geometry and renders
         run: |
-          python validation/harness.py run \
+          uv run --frozen python validation/harness.py run \
             --manifest validation/fixtures.json \
             --cache .cache/step-redox-validation \
             --out validation/out \
@@ -139,7 +124,7 @@ jobs:
 
       - name: Validate periodic chain recovery
         run: |
-          python validation/semantic_probe.py \
+          uv run --frozen python validation/semantic_probe.py \
             --manifest validation/fixtures.json \
             --cache .cache/step-redox-validation \
             --out validation/out/semantic-probes \

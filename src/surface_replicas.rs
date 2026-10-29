@@ -45,11 +45,15 @@ struct SurfaceInfo {
 
 /// Factor translated analytic supports while leaving the fused B-rep topology
 /// untouched. The first occurrence remains explicit; later occurrences become
-/// SURFACE_REPLICA entities under translation-only operators.
+/// `SURFACE_REPLICA` entities under translation-only operators.
 ///
-/// Initial scope is intentionally narrow: PLANE/CYLINDRICAL_SURFACE only,
-/// explicit AXIS2_PLACEMENT_3D axis/ref-direction, identical parameterization,
+/// Initial scope is intentionally narrow: `PLANE/CYLINDRICAL_SURFACE` only,
+/// explicit `AXIS2_PLACEMENT_3D` axis/ref-direction, identical parameterization,
 /// and face-only consumers. Anything ambiguous fails closed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn instance_translated_analytic_surfaces(
     entities: &mut Vec<EntityInstance>,
 ) -> SurfaceReplicaStats {
@@ -64,7 +68,7 @@ pub fn instance_translated_analytic_surfaces(
     let mut groups = HashMap::<SurfaceKey, Vec<SurfaceInfo>>::new();
 
     for entity in entities.iter() {
-        let Some(info) = parse_surface(entity, entities, &index, &inbound) else {
+        let Some(info) = parse_surface(entity, entities, &index, inbound) else {
             continue;
         };
         groups.entry(info.key.clone()).or_default().push(info);
@@ -284,6 +288,10 @@ fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 { 0 } else { value.to_bits() }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "finite geometric values are intentionally quantized into stable integer identity keys"
+)]
 fn quant_transform(value: f64) -> i64 {
     (value / TRANSFORM_TOLERANCE_MM).round() as i64
 }
@@ -368,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn translated_cylinders_become_surface_replicas() {
+    fn translated_cylinders_become_surface_replicas() -> anyhow::Result<()> {
         let mut entities = vec![
             direction_entity(1, [0.0, 0.0, 1.0]),
             direction_entity(2, [1.0, 0.0, 0.0]),
@@ -387,12 +395,14 @@ mod tests {
         assert_eq!(stats.cylinder_replicas, 1);
         assert_eq!(stats.transforms, 1);
         let index = build_index(&entities);
-        let replica = simple_record(&entities[index[&8]]).expect("replica record");
+        let replica = simple_record(&entities[index[&8]])
+            .ok_or_else(|| anyhow::anyhow!("expected replica record"))?;
         assert_eq!(replica.name, "SURFACE_REPLICA");
         let Parameter::List(params) = &replica.parameter else {
-            panic!("replica params");
+            anyhow::bail!("expected replica params");
         };
         assert_eq!(entity_ref_value(&params[1]), Some(7));
+        Ok(())
     }
 
     #[test]

@@ -183,6 +183,14 @@ struct ChainStretchRewrite<'a> {
 }
 
 impl ChainStretchRewrite<'_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+    )]
     fn run(self, graph: &mut GraphEditor<'_>, prune_roots: &mut HashSet<u64>) -> Result<usize> {
         let target_faces_for_weld = self
             .target_nonstretch
@@ -322,6 +330,14 @@ impl ChainStretchRewrite<'_> {
 ///
 /// # Errors
 /// Returns an error if the periodic-chain proof is incomplete, the requested expansion is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub fn expand_periodic_chain_positive(
     entities: &mut Vec<EntityInstance>,
     chain: &PeriodicChainPattern,
@@ -545,6 +561,14 @@ pub fn expand_periodic_chain_positive(
 ///
 /// # Errors
 /// Returns an error if the periodic-chain proof is incomplete, the requested shrink is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub fn shrink_periodic_chain_positive(
     entities: &mut Vec<EntityInstance>,
     chain: &PeriodicChainPattern,

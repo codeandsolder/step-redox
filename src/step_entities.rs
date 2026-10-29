@@ -2,7 +2,7 @@ use crate::step_graph::{entity_ref_value, simple_record, simple_record_mut, visi
 use ruststep::ast::{EntityInstance, Name, Parameter, Record};
 use std::collections::{HashMap, HashSet};
 
-pub(super) fn cartesian_point(
+pub fn cartesian_point(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -28,7 +28,7 @@ pub(super) fn cartesian_point(
     ])
 }
 
-pub(super) fn number(param: &Parameter) -> Option<f64> {
+pub fn number(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Real(value) => Some(*value),
         Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
@@ -36,7 +36,7 @@ pub(super) fn number(param: &Parameter) -> Option<f64> {
     }
 }
 
-pub(super) fn direction_components(
+pub fn direction_components(
     id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -61,7 +61,7 @@ pub(super) fn direction_components(
     ])
 }
 
-pub(super) fn vertex_point(
+pub fn vertex_point(
     vertex_id: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -76,7 +76,7 @@ pub(super) fn vertex_point(
     cartesian_point(entity_ref_value(params.get(1)?)?, entities, index)
 }
 
-pub(super) fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
+pub fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
     match parameter {
         Parameter::Enumeration(value) if value == "T" => Some(true),
         Parameter::Enumeration(value) if value == "F" => Some(false),
@@ -84,14 +84,14 @@ pub(super) fn enumeration_bool(parameter: &Parameter) -> Option<bool> {
     }
 }
 
-pub(super) fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
+pub fn nth_entity_ref(parameter: &Parameter, idx: usize) -> Option<u64> {
     let Parameter::List(params) = parameter else {
         return None;
     };
     entity_ref_value(params.get(idx)?)
 }
 
-pub(super) fn closure_from(
+pub fn closure_from(
     root: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -114,7 +114,7 @@ pub(super) fn closure_from(
     seen
 }
 
-pub(super) fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
+pub fn representation_items_and_context(entity: &EntityInstance) -> Option<(Vec<u64>, u64)> {
     let record = simple_record(entity)?;
     let Parameter::List(params) = &record.parameter else {
         return None;
@@ -129,35 +129,35 @@ pub(super) fn representation_items_and_context(entity: &EntityInstance) -> Optio
     Some((item_ids?, entity_ref_value(&params[2])?))
 }
 
-pub(super) fn entity_ref_list(parameter: &Parameter) -> Option<Vec<u64>> {
+pub fn entity_ref_list(parameter: &Parameter) -> Option<Vec<u64>> {
     let Parameter::List(items) = parameter else {
         return None;
     };
     items.iter().map(entity_ref_value).collect()
 }
 
-pub(super) const fn integer_value(parameter: &Parameter) -> Option<i64> {
+pub const fn integer_value(parameter: &Parameter) -> Option<i64> {
     match parameter {
         Parameter::Integer(value) => Some(*value),
         _ => None,
     }
 }
 
-pub(super) fn integer_list(parameter: &Parameter) -> Option<Vec<i64>> {
+pub fn integer_list(parameter: &Parameter) -> Option<Vec<i64>> {
     let Parameter::List(items) = parameter else {
         return None;
     };
     items.iter().map(integer_value).collect()
 }
 
-pub(super) fn numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
+pub fn numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
     let Parameter::List(items) = parameter else {
         return None;
     };
     items.iter().map(number).collect()
 }
 
-pub(super) fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
+pub fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
     let Parameter::List(items) = parameter else {
         return None;
     };
@@ -167,14 +167,14 @@ pub(super) fn finite_numeric_list(parameter: &Parameter) -> Option<Vec<f64>> {
         .collect()
 }
 
-pub(super) fn parameter_number(parameter: &Parameter) -> Option<f64> {
+pub fn parameter_number(parameter: &Parameter) -> Option<f64> {
     match parameter {
         Parameter::Typed { parameter, .. } => parameter_number(parameter),
         _ => number(parameter),
     }
 }
 
-pub(super) fn edge_vertices(
+pub fn edge_vertices(
     edge: u64,
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
@@ -192,7 +192,7 @@ pub(super) fn edge_vertices(
     ])
 }
 
-pub(super) fn oriented_edge_element(record: &Record) -> Option<u64> {
+pub fn oriented_edge_element(record: &Record) -> Option<u64> {
     if record.name != "ORIENTED_EDGE" {
         return None;
     }
@@ -202,16 +202,14 @@ pub(super) fn oriented_edge_element(record: &Record) -> Option<u64> {
     entity_ref_value(params.get(3)?)
 }
 
-pub(super) fn oriented_edge_orientation(record: &Record) -> Option<bool> {
+pub fn oriented_edge_orientation(record: &Record) -> Option<bool> {
     let Parameter::List(params) = &record.parameter else {
         return None;
     };
     enumeration_bool(params.get(4)?)
 }
 
-pub(super) fn styled_items_by_target(
-    entities: &[EntityInstance],
-) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
+pub fn styled_items_by_target(entities: &[EntityInstance]) -> HashMap<u64, Vec<(u64, Vec<u64>)>> {
     let mut out: HashMap<u64, Vec<(u64, Vec<u64>)>> = HashMap::new();
     for entity in entities {
         let id = crate::step_graph::entity_id(entity);
@@ -238,7 +236,7 @@ pub(super) fn styled_items_by_target(
     out
 }
 
-pub(super) fn patch_presentation_lists(
+pub fn patch_presentation_lists(
     entities: &mut [EntityInstance],
     remove: &HashSet<u64>,
     add: &[u64],
@@ -270,11 +268,7 @@ pub(super) fn patch_presentation_lists(
     }
 }
 
-pub(super) fn push_point(
-    entities: &mut Vec<EntityInstance>,
-    next_id: &mut u64,
-    point: [f64; 3],
-) -> u64 {
+pub fn push_point(entities: &mut Vec<EntityInstance>, next_id: &mut u64, point: [f64; 3]) -> u64 {
     push_simple(
         entities,
         next_id,
@@ -286,7 +280,7 @@ pub(super) fn push_point(
     )
 }
 
-pub(super) fn push_simple(
+pub fn push_simple(
     entities: &mut Vec<EntityInstance>,
     next_id: &mut u64,
     name: &str,
@@ -304,6 +298,6 @@ pub(super) fn push_simple(
     id
 }
 
-pub(super) const fn entity_ref(id: u64) -> Parameter {
+pub const fn entity_ref(id: u64) -> Parameter {
     Parameter::Ref(Name::Entity(id))
 }

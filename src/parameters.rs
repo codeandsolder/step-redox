@@ -1,7 +1,7 @@
 use crate::math3::{canonical_direction, cross, norm, normalize as normalize3};
 use serde::Serialize;
 
-use crate::patterns::InstancePattern;
+use crate::patterns::{InstancePattern, linear_pattern_sites};
 use crate::periodic_bodies::PeriodicBodyPattern;
 
 const TOL_MM: f64 = 1.0e-5;
@@ -20,6 +20,10 @@ pub struct RecoveredCountParameter {
     pub max_residual_mm: f64,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 pub fn detect_count_parameters(
     patterns: &[InstancePattern],
     bodies: &[PeriodicBodyPattern],
@@ -53,10 +57,11 @@ pub fn detect_count_parameters(
         }
 
         let first = &patterns[indices[0]];
-        let total_instances = indices
-            .iter()
-            .map(|&index| patterns[index].item_ids.len())
-            .sum::<usize>();
+        let Some(total_instances) = indices.iter().try_fold(0usize, |total, &index| {
+            total.checked_add(linear_pattern_sites(&patterns[index])?)
+        }) else {
+            continue;
+        };
         let parent_representation = first.parent_representation;
         out.push(RecoveredCountParameter {
             sites: body.sites,
@@ -84,7 +89,9 @@ pub fn detect_count_parameters(
         let p = &patterns[index];
         let axis = canonical_direction(normalize3(p.basis[0], 1.0e-15).unwrap_or([1.0, 0.0, 0.0]));
         let pitch = norm(p.basis[0]);
-        let sites = p.item_ids.len();
+        let Some(sites) = linear_pattern_sites(p) else {
+            continue;
+        };
 
         let mut indices = Vec::new();
         for other in index..patterns.len() {
@@ -92,8 +99,9 @@ pub fn detect_count_parameters(
                 continue;
             }
             let q = &patterns[other];
+            let q_sites = linear_pattern_sites(q);
             if q.parent_representation != p.parent_representation
-                || q.item_ids.len() != sites
+                || q_sites != Some(sites)
                 || (norm(q.basis[0]) - pitch).abs() > TOL_MM
             {
                 continue;
@@ -111,10 +119,11 @@ pub fn detect_count_parameters(
         for &other in &indices {
             used[other] = true;
         }
-        let total_instances = indices
-            .iter()
-            .map(|&other| patterns[other].item_ids.len())
-            .sum::<usize>();
+        let Some(total_instances) = indices.iter().try_fold(0usize, |total, &other| {
+            total.checked_add(linear_pattern_sites(&patterns[other])?)
+        }) else {
+            continue;
+        };
         let max_residual_mm = indices
             .iter()
             .map(|&other| patterns[other].max_residual_mm)
@@ -143,12 +152,7 @@ pub fn detect_count_parameters(
 }
 
 fn eligible(pattern: &InstancePattern) -> bool {
-    pattern.dimension == 1
-        && pattern.item_ids.len() >= 2
-        && pattern.grid_shape.len() == 1
-        && pattern.grid_shape[0] == pattern.item_ids.len()
-        && pattern.basis.len() == 1
-        && (pattern.fill_ratio - 1.0).abs() <= 1.0e-12
+    linear_pattern_sites(pattern).is_some_and(|sites| sites >= 2)
 }
 
 #[cfg(test)]

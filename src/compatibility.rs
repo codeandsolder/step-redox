@@ -2,6 +2,10 @@ use ruststep::ast::EntityInstance;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "compatibility audit exposes independent boolean risk flags"
+)]
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CompatibilityAudit {
     /// Constructs intentionally avoided by the broad-compatibility profile.

@@ -37,6 +37,7 @@ pub mod periodic_resize;
 mod planar_features;
 pub use planar_features::{PlanarFeatureDiagnostics, PlanarHostDiagnostic};
 pub mod profile_curves;
+mod reduced_brep;
 mod shape_identity;
 pub mod solid_extrusions;
 pub mod solid_revolutions;
@@ -59,6 +60,10 @@ pub enum OutputProfile {
     Compact,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "public cleanup options are independent feature toggles"
+)]
 #[derive(Debug, Clone)]
 pub struct Options {
     pub intern_values: bool,
@@ -346,9 +351,12 @@ pub fn peel_boundary_features_for_analysis_bytes(
 /// Detect translation-periodic open boundary paths on planar carrier faces.
 ///
 /// This is read-only evidence for edge-entering slots/notches and other
-/// features whose interface is a repeated detour on a FACE_OUTER_BOUND rather
-/// than a complete inner FACE_BOUND. It does not yet heal or mutate those
+/// features whose interface is a repeated detour on a `FACE_OUTER_BOUND` rather
+/// than a complete inner `FACE_BOUND`. It does not yet heal or mutate those
 /// chains.
+///
+/// # Errors
+/// Returns an error if `input` is not valid STEP data.
 pub fn analyze_open_chain_patterns_bytes(
     input: &[u8],
 ) -> Result<planar_features::OpenChainDiagnostics> {
@@ -379,6 +387,10 @@ pub fn analyze_open_chain_patterns_bytes(
 /// The output STEP is an analysis artifact: generated tool solids may reuse
 /// source topology and are intentionally not inserted into product structure.
 /// Their IDs are returned explicitly for recursive recognition/rendering.
+///
+/// # Errors
+/// Returns an error for invalid STEP input, unsupported DATA-section structure,
+/// failed tool materialization, or STEP serialization failure.
 pub fn materialize_boundary_feature_tools_for_analysis_bytes(
     input: &[u8],
     min_instances: usize,
@@ -407,6 +419,9 @@ pub fn materialize_boundary_feature_tools_for_analysis_bytes(
 /// parallel hosts expose through-cuts/tunnels that cannot disconnect when only
 /// one host face is removed. Pattern fitting is applied to the resulting
 /// feature instances after topology/polarity proof.
+///
+/// # Errors
+/// Returns an error if `input` is not valid STEP data.
 pub fn analyze_boundary_features_bytes(
     input: &[u8],
 ) -> Result<planar_features::BoundaryFeatureDiagnostics> {
@@ -434,8 +449,12 @@ pub fn analyze_boundary_features_bytes(
 }
 
 /// Diagnose repeated planar attached-feature candidates without rewriting STEP.
+///
 /// This reports parser blind spots (negative recesses, host orientation, topology
 /// rejection reasons) so constructive recovery can be extended deliberately.
+///
+/// # Errors
+/// Returns an error if `input` is not valid STEP data.
 pub fn analyze_planar_feature_candidates_bytes(input: &[u8]) -> Result<PlanarFeatureDiagnostics> {
     let exchange = ParsedExchange::parse(input)?.exchange;
 
@@ -914,7 +933,7 @@ fn resize_periodic_chain_bytes_one_side(
     let detached_vertices = periodic_resize::prune_detached_vertex_points(&mut section.entities);
     resize.pruned_entities += detached_vertices;
     resize.added_entities = section.entities.len().saturating_sub(source_entity_count);
-    resize.entity_delta = section.entities.len() as isize - source_entity_count as isize;
+    resize.entity_delta = section.entities.len().cast_signed() - source_entity_count.cast_signed();
     for section in &mut exchange.data {
         dense_renumber(&mut section.entities);
     }
@@ -1095,6 +1114,10 @@ pub fn resize_count_parameter_bytes_with_anchor(
 }
 
 /// One-sided primitive used by all placement policies.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
 fn resize_count_parameter_bytes_one_side(
     input: &[u8],
     parameter_index: usize,
@@ -1399,8 +1422,10 @@ pub fn expand_periodic_body_bytes(
 }
 
 /// Resize one fully occupied 1-D regular `MAPPED_ITEM` pattern in an already
-/// normalized STEP file. This edits only the instance pattern; higher-level
-/// package/body resizing is intentionally a separate operation.
+/// normalized STEP file.
+///
+/// This edits only the instance pattern; higher-level package/body resizing is
+/// intentionally a separate operation.
 ///
 /// # Errors
 /// Returns an error if the STEP input is invalid or the selected linear pattern cannot be resized safely.

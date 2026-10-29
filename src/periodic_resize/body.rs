@@ -37,6 +37,14 @@ struct BodyResizeContext<'a> {
 }
 
 impl<'a> BodyResizeContext<'a> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+    )]
     fn new(entities: &'a mut Vec<EntityInstance>, body: &PeriodicBodyPattern) -> Result<Self> {
         let old_sites = body.sites;
         if body.repeat_face_families.is_empty()
@@ -181,6 +189,14 @@ struct BodyStretchRewrite<'a> {
 }
 
 impl BodyStretchRewrite<'_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+    )]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+    )]
     fn run(&self, graph: &mut GraphEditor<'_>) -> Result<usize> {
         let mut coord_vertices = HashMap::<[i64; 3], Vec<u64>>::new();
         for &face in self.target_patch_faces {
@@ -294,7 +310,7 @@ impl BodyStretchRewrite<'_> {
             pair.sort_unstable();
             let (center, span) = graph.edge_center_span(edge, self.axis)?;
             ss_pairs
-                .entry((pair[0], pair[1]))
+                .entry(pair.into())
                 .or_default()
                 .push(SsRow { center, span, edge });
         }
@@ -406,6 +422,14 @@ impl BodyStretchRewrite<'_> {
 ///
 /// # Errors
 /// Returns an error if the periodic-body proof is incomplete, the requested expansion is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::too_many_lines,
+    reason = "topology recovery keeps sequential fail-closed proof stages explicit for auditability"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub fn expand_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,
@@ -456,7 +480,7 @@ pub fn expand_periodic_body_positive(
     for site in old_sites..new_sites {
         let delta = scale(
             axis,
-            (site as isize - canonical_site as isize) as f64 * pitch,
+            (site.cast_signed() - canonical_site.cast_signed()) as f64 * pitch,
         );
         let mapping = graph.clone_descendants(&canonical_face_set, delta)?;
         let faces = canonical_faces
@@ -548,6 +572,10 @@ pub fn expand_periodic_body_positive(
 ///
 /// # Errors
 /// Returns an error if the periodic-body proof is incomplete, the requested shrink is invalid, or the STEP graph cannot be rewritten safely.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "entity counts and lattice indices are bounded by in-memory STEP data and stay below f64 exact-integer limits"
+)]
 pub fn shrink_periodic_body_positive(
     entities: &mut Vec<EntityInstance>,
     body: &PeriodicBodyPattern,
@@ -636,9 +664,7 @@ pub fn shrink_periodic_body_positive(
                     .copied()
                     .ok_or_else(|| anyhow!("cap clone missing shell face #{face}"))?,
             );
-        } else if removed_repeat_faces.contains(&face) {
-            continue;
-        } else {
+        } else if !removed_repeat_faces.contains(&face) {
             target_shell_faces.push(face);
         }
     }

@@ -60,7 +60,7 @@ fn visit_param_refs(param: &Parameter, f: &mut impl FnMut(u64)) {
     }
 }
 
-pub(super) fn rewrite_entity_refs(entity: &mut EntityInstance, aliases: &HashMap<u64, u64>) {
+pub fn rewrite_entity_refs(entity: &mut EntityInstance, aliases: &HashMap<u64, u64>) {
     fn rewrite_parameter(parameter: &mut Parameter, aliases: &HashMap<u64, u64>) {
         match parameter {
             Parameter::Ref(Name::Entity(id)) => {
@@ -95,7 +95,7 @@ pub(super) fn rewrite_entity_refs(entity: &mut EntityInstance, aliases: &HashMap
 /// multiple parents. Build both directions in one entity traversal when a pass
 /// needs reachability or garbage-collection information.
 #[derive(Debug, Default)]
-pub(super) struct ReferenceGraph {
+pub struct ReferenceGraph {
     forward: HashMap<u64, Vec<u64>>,
     inbound: HashMap<u64, Vec<u64>>,
 }

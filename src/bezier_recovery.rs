@@ -3,7 +3,7 @@ use crate::step_graph::{entity_id, visit_entity_refs};
 use ruststep::ast::{EntityInstance, Parameter, Record};
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct BezierRecoveryStats {
     pub curves_recovered: usize,
 }
@@ -56,6 +56,10 @@ pub fn recover_exact_bezier_curves(entities: &mut [EntityInstance]) -> BezierRec
     stats
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "STEP knot equality is an exact degeneracy predicate"
+)]
 fn is_single_span_bezier(record: &Record) -> bool {
     let Parameter::List(params) = &record.parameter else {
         return false;
@@ -80,7 +84,10 @@ fn is_single_span_bezier(record: &Record) -> bool {
     let Some(mult) = integer_list(&params[6]) else {
         return false;
     };
-    if mult != [(degree + 1) as i64, (degree + 1) as i64] {
+    let Ok(end_multiplicity) = i64::try_from(degree + 1) else {
+        return false;
+    };
+    if mult != [end_multiplicity, end_multiplicity] {
         return false;
     }
 
