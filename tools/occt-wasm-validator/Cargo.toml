@@ -5,5 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-occt-wasm = "=5.1.0"
+occt-wasm = "=6.0.0"
 sha2 = "0.11"
