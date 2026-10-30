@@ -307,7 +307,7 @@ fn neighbor_shared_edges(
     neighbors
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "proof helpers keep carrier evidence explicit"
 )]
@@ -399,7 +399,7 @@ fn prove_cylindrical_fillet(
     ))
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "proof helpers keep carrier evidence explicit"
 )]
@@ -486,7 +486,7 @@ fn prove_planar_chamfer(
     Some(result)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "proof helpers keep carrier evidence explicit"
 )]
@@ -558,7 +558,7 @@ fn prove_toroidal_fillet(
     ))
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "proof helpers keep carrier evidence explicit"
 )]
@@ -624,7 +624,7 @@ fn prove_conical_chamfer(
     ))
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "proof helpers keep carrier evidence explicit"
 )]
