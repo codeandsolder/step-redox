@@ -6,14 +6,14 @@ use std::collections::HashMap;
 /// The current frontend is `step-p21`, but consumers of this module do not see
 /// its AST types. This is the migration seam for replacing or reshaping the
 /// parser later without dragging semantic-recovery code through that change.
-pub(crate) struct StepSection<'a> {
+pub struct StepSection<'a> {
     data_section: Option<usize>,
     entities: &'a [EntityInstance],
     index: &'a HashMap<u64, usize>,
 }
 
 impl<'a> StepSection<'a> {
-    pub(crate) const fn new(
+    pub const fn new(
         data_section: usize,
         entities: &'a [EntityInstance],
         index: &'a HashMap<u64, usize>,
@@ -25,10 +25,7 @@ impl<'a> StepSection<'a> {
         }
     }
 
-    pub(crate) const fn unlocated(
-        entities: &'a [EntityInstance],
-        index: &'a HashMap<u64, usize>,
-    ) -> Self {
+    pub const fn unlocated(entities: &'a [EntityInstance], index: &'a HashMap<u64, usize>) -> Self {
         Self {
             data_section: None,
             entities,
@@ -36,7 +33,7 @@ impl<'a> StepSection<'a> {
         }
     }
 
-    pub(crate) fn entity(&self, id: u64) -> Option<StepEntity<'a>> {
+    pub fn entity(&self, id: u64) -> Option<StepEntity<'a>> {
         let ordinal = *self.index.get(&id)?;
         let entity = self.entities.get(ordinal)?;
         Some(StepEntity {
@@ -52,24 +49,24 @@ impl<'a> StepSection<'a> {
 
 /// Stable source identity for provenance journals built above the parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SourceEntity {
-    pub(crate) data_section: Option<usize>,
-    pub(crate) ordinal: usize,
-    pub(crate) id: u64,
+pub struct SourceEntity {
+    pub data_section: Option<usize>,
+    pub ordinal: usize,
+    pub id: u64,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StepEntity<'a> {
+pub struct StepEntity<'a> {
     source: SourceEntity,
     entity: &'a EntityInstance,
 }
 
 impl<'a> StepEntity<'a> {
-    pub(crate) const fn source(self) -> SourceEntity {
+    pub const fn source(self) -> SourceEntity {
         self.source
     }
 
-    pub(crate) fn record_named(self, name: &str) -> Option<StepRecord<'a>> {
+    pub fn record_named(self, name: &str) -> Option<StepRecord<'a>> {
         match self.entity {
             EntityInstance::Simple { record, .. } => {
                 (record.name == name).then_some(StepRecord(record))
@@ -84,56 +81,54 @@ impl<'a> StepEntity<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StepRecord<'a>(&'a Record);
+pub struct StepRecord<'a>(&'a Record);
 
 impl<'a> StepRecord<'a> {
-    pub(crate) fn value(self) -> StepValue<'a> {
+    pub const fn value(self) -> StepValue<'a> {
         StepValue(&self.0.parameter)
     }
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StepValue<'a>(&'a Parameter);
+pub struct StepValue<'a>(&'a Parameter);
 
 impl<'a> StepValue<'a> {
-    pub(crate) fn list(self) -> Option<StepList<'a>> {
+    pub fn list(self) -> Option<StepList<'a>> {
         match self.0 {
             Parameter::List(items) => Some(StepList(items)),
             _ => None,
         }
     }
 
-    pub(crate) fn string(self) -> Option<&'a str> {
+    pub fn string(self) -> Option<&'a str> {
         match self.0 {
             Parameter::String(value) => Some(value),
             _ => None,
         }
     }
 
-    pub(crate) fn enumeration(self) -> Option<&'a str> {
+    pub fn enumeration(self) -> Option<&'a str> {
         match self.0 {
             Parameter::Enumeration(value) => Some(value),
             _ => None,
         }
     }
 
-    pub(crate) fn entity_ref(self) -> Option<u64> {
+    pub const fn entity_ref(self) -> Option<u64> {
         match self.0 {
             Parameter::Ref(ruststep::ast::Name::Entity(id)) => Some(*id),
             _ => None,
         }
     }
 
-    pub(crate) fn typed(self) -> Option<(&'a str, StepValue<'a>)> {
+    pub fn typed(self) -> Option<(&'a str, Self)> {
         match self.0 {
-            Parameter::Typed { keyword, parameter } => {
-                Some((keyword, StepValue(parameter.as_ref())))
-            }
+            Parameter::Typed { keyword, parameter } => Some((keyword, Self(parameter.as_ref()))),
             _ => None,
         }
     }
 
-    pub(crate) fn number(self) -> Option<f64> {
+    pub fn number(self) -> Option<f64> {
         match self.0 {
             Parameter::Real(value) => Some(*value),
             Parameter::Integer(value) => crate::numeric::exact_i64_to_f64(*value),
@@ -141,24 +136,24 @@ impl<'a> StepValue<'a> {
         }
     }
 
-    pub(crate) const fn is_not_provided(self) -> bool {
+    pub const fn is_not_provided(self) -> bool {
         matches!(self.0, Parameter::NotProvided)
     }
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StepList<'a>(&'a [Parameter]);
+pub struct StepList<'a>(&'a [Parameter]);
 
 impl<'a> StepList<'a> {
-    pub(crate) const fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.0.len()
     }
 
-    pub(crate) fn get(self, index: usize) -> Option<StepValue<'a>> {
+    pub fn get(self, index: usize) -> Option<StepValue<'a>> {
         self.0.get(index).map(StepValue)
     }
 
-    pub(crate) fn iter(self) -> impl Iterator<Item = StepValue<'a>> {
+    pub fn iter(self) -> impl Iterator<Item = StepValue<'a>> {
         self.0.iter().map(StepValue)
     }
 }

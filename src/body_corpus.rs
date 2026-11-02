@@ -1,9 +1,12 @@
 use crate::{
-    shape_identity, step_document::StepSection, step_entities, step_graph, step_io::ParsedExchange,
+    shape_identity,
+    step_document::{StepEntity, StepSection, StepValue},
+    step_entities, step_graph,
+    step_io::ParsedExchange,
     units,
 };
 use anyhow::{Context, Result, bail};
-use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter, Record};
+use ruststep::ast::{DataSection, EntityInstance, Exchange, Parameter};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -163,15 +166,6 @@ fn shape_definition_root_for_representation(
     })
 }
 
-fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<&'a Record> {
-    match entity {
-        EntityInstance::Simple { record, .. } => (record.name == name).then_some(record),
-        EntityInstance::Complex { subsuper, .. } => {
-            subsuper.0.iter().find(|record| record.name == name)
-        }
-    }
-}
-
 fn representation_length_scale_mm(context_id: u64, section: &StepSection<'_>) -> Option<f64> {
     let params = section
         .entity(context_id)?
@@ -184,7 +178,7 @@ fn representation_length_scale_mm(context_id: u64, section: &StepSection<'_>) ->
     let unit_values = params.get(0)?.list()?;
     let mut scales = unit_values
         .iter()
-        .filter_map(|value| value.entity_ref())
+        .filter_map(StepValue::entity_ref)
         .filter_map(|unit_id| units::length_unit_scale_mm(unit_id, section));
     let scale = scales.next()?;
     scales.next().is_none().then_some(scale)
@@ -253,10 +247,7 @@ fn scan(path: &Path) -> Result<ScanReport> {
             }
             manifold_solids += 1;
             let solid_id = step_graph::entity_id(entity);
-            let Some(source) = document_section
-                .entity(solid_id)
-                .map(|entity| entity.source())
-            else {
+            let Some(source) = document_section.entity(solid_id).map(StepEntity::source) else {
                 continue;
             };
             debug_assert_eq!(source.data_section, Some(data_section));
