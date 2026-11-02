@@ -23,6 +23,7 @@ mod face_coalesce;
 pub mod formed_sheet;
 mod geometric_intern;
 mod instances;
+pub mod kernel_source_load;
 mod line_recovery;
 mod math2;
 mod math3;

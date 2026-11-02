@@ -1,4 +1,5 @@
 use ruststep::ast::{EntityInstance, Parameter, Record};
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// Parser-neutral read-only view over one STEP DATA section.
@@ -6,6 +7,7 @@ use std::collections::HashMap;
 /// The current frontend is `step-p21`, but consumers of this module do not see
 /// its AST types. This is the migration seam for replacing or reshaping the
 /// parser later without dragging semantic-recovery code through that change.
+#[derive(Clone, Copy)]
 pub struct StepSection<'a> {
     data_section: Option<usize>,
     entities: &'a [EntityInstance],
@@ -45,10 +47,25 @@ impl<'a> StepSection<'a> {
             entity,
         })
     }
+
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    pub fn iter(&self) -> impl Iterator<Item = StepEntity<'a>> + '_ {
+        self.entities
+            .iter()
+            .enumerate()
+            .map(|(ordinal, entity)| StepEntity {
+                source: SourceEntity {
+                    data_section: self.data_section,
+                    ordinal,
+                    id: crate::step_graph::entity_id(entity),
+                },
+                entity,
+            })
+    }
 }
 
 /// Stable source identity for provenance journals built above the parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct SourceEntity {
     pub data_section: Option<usize>,
     pub ordinal: usize,

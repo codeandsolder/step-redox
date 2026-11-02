@@ -10,6 +10,7 @@ use crate::cad_recovery::{
     recover_revolved_round_tail_fragments, recover_solid_extrusion_fragment,
     recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
 };
+use crate::kernel_source_load::{KernelSourceLoadEvidence, SourceStepLoadInspector};
 use crate::patterns::InstancePattern;
 use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
 use crate::solid_revolutions::SolidSurfaceSignature;
@@ -20,7 +21,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v8";
-pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v10";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -81,6 +82,8 @@ pub struct CompleteIr {
     pub extrusion_core_unions: Vec<CadFragment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kernel_recovery_failures: Vec<KernelRecoveryFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_source_load: Option<KernelSourceLoadEvidence>,
     pub unrecovered_solids: Vec<SourceSolidSummary>,
     pub body_scan: BodyScanSummary,
     pub body_count: usize,
@@ -326,6 +329,7 @@ impl CompleteIrBuildState {
         self,
         schema: &'static str,
         kernel_recovery_failures: Vec<KernelRecoveryFailure>,
+        kernel_source_load: Option<KernelSourceLoadEvidence>,
     ) -> CompleteIr {
         let selected = self.recovery.selected_fragments();
         let recovered_ids = selected.keys().copied().collect::<BTreeSet<_>>();
@@ -372,6 +376,7 @@ impl CompleteIrBuildState {
                 matches!(source, CadFragmentSource::ExtrusionCoreUnion { .. })
             }),
             kernel_recovery_failures,
+            kernel_source_load,
             unrecovered_solid_count: unrecovered_solids.len(),
             body_count: self.body_scan.len(),
             constructively_recovered_solid_count,
@@ -416,23 +421,25 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 /// through a supplied CAD kernel plus the independent analytic boundary proof.
 ///
 /// The parser-only [`recover_complete_ir_bytes`] path remains schema v8 and never
-/// invokes a CAD backend. This explicit kernel-backed path reports schema v9,
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v10,
+/// includes parser-neutral source-load evidence,
 /// records admitted extrusion-core unions separately, and leaves any unsupported
 /// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per
 /// solid rather than aborting the rest of the report.
 ///
 /// # Errors
-/// Returns an error if the parser-only Complete IR pass itself fails.
-pub fn recover_complete_ir_with_kernel_bytes<K: CadKernel>(
+/// Returns an error if STEP parsing/Complete IR construction fails or if the selected kernel cannot inspect the original STEP source.
+pub fn recover_complete_ir_with_kernel_bytes<K: CadKernel + SourceStepLoadInspector>(
     input: &[u8],
     kernel: &K,
 ) -> Result<CompleteIr> {
     let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
     let mut build = recover_complete_ir_build_state(&exchange, input)?;
+    let source_load = kernel.inspect_source_step(input)?;
     let failures = apply_kernel_recovery(&mut build.recovery, |solid_id| {
         recover_auto_proven_extrusion_core_union_fragment(input, solid_id, kernel)
     });
-    Ok(build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures))
+    Ok(build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, Some(source_load)))
 }
 
 fn apply_kernel_recovery<F>(
@@ -474,7 +481,11 @@ pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],
 ) -> Result<CompleteIr> {
-    Ok(recover_complete_ir_build_state(exchange, input)?.finish(COMPLETE_IR_SCHEMA, Vec::new()))
+    Ok(recover_complete_ir_build_state(exchange, input)?.finish(
+        COMPLETE_IR_SCHEMA,
+        Vec::new(),
+        None,
+    ))
 }
 
 fn recover_complete_ir_build_state(
@@ -1519,6 +1530,7 @@ mod tests {
             boundary_feature_composites: Vec::new(),
             extrusion_core_unions: Vec::new(),
             kernel_recovery_failures: Vec::new(),
+            kernel_source_load: None,
             unrecovered_solids: solids.clone(),
             body_scan: BodyScanSummary { solids },
             body_count: solid_ids.len(),
@@ -1548,7 +1560,7 @@ mod tests {
     {
         let mut build = build_state_with_unrecovered(solid_ids);
         let failures = apply_kernel_recovery(&mut build.recovery, recover);
-        build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures)
+        build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, None)
     }
 
     fn constructive_fragment(solid_id: u64, boxes: usize) -> Result<CadFragment> {
@@ -1703,6 +1715,46 @@ mod tests {
             bail!("unknown source solid unexpectedly succeeded");
         };
         assert!(error.to_string().contains("missing solid #8"));
+        Ok(())
+    }
+
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    #[test]
+    fn kernel_complete_ir_v10_attaches_parser_neutral_source_load_evidence() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/production_radial_slot.step");
+        let parser_only = recover_complete_ir_bytes(input)?;
+        assert_eq!(parser_only.schema, COMPLETE_IR_SCHEMA);
+        assert!(parser_only.kernel_source_load.is_none());
+        assert!(
+            serde_json::to_value(&parser_only)?
+                .get("kernel_source_load")
+                .is_none()
+        );
+
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
+        let kernel_report = recover_complete_ir_with_kernel_bytes(input, &kernel)?;
+        assert_eq!(kernel_report.schema, KERNEL_COMPLETE_IR_SCHEMA);
+        let evidence = kernel_report
+            .kernel_source_load
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("kernel v10 omitted source-load evidence"))?;
+        assert_eq!(evidence.sections.len(), 1);
+        let solid = evidence
+            .solids
+            .iter()
+            .find(|solid| solid.source.id == 15_385)
+            .ok_or_else(|| anyhow::anyhow!("missing source-load evidence for solid #15385"))?;
+        assert_eq!(solid.source.data_section, Some(0));
+        assert!(solid.failure.is_none());
+        assert_eq!(
+            solid.boundaries.first().map(|boundary| boundary.role),
+            Some(crate::kernel_source_load::KernelBoundaryRole::Outer)
+        );
+        assert!(
+            serde_json::to_value(&kernel_report)?
+                .get("kernel_source_load")
+                .is_some()
+        );
         Ok(())
     }
 
