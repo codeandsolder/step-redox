@@ -196,7 +196,7 @@ pub mod monstertruck {
         let mut shell: Shell = builder::try_skin_wires(&wires)?;
         shell.push(start_cap.inverse());
         shell.push(end_cap);
-        Ok(Solid::try_new(vec![shell])?)
+        Ok(Solid::new(vec![shell])?)
     }
 
     fn revolve_profile_transformed(
@@ -289,8 +289,8 @@ pub mod monstertruck {
             }
 
             let shell =
-                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 2);
-            return Ok(Solid::try_new(vec![shell])?);
+                builder::revolve_wire(&wire, origin, direction, builder::SweepAngle::Closed, 2)?;
+            return Ok(Solid::new(vec![shell])?);
         }
 
         let face = profile::attach_plane_normalized(wires)?;
@@ -300,7 +300,7 @@ pub mod monstertruck {
             direction,
             sweep,
             if closed { 4 } else { 1 },
-        ))
+        )?)
     }
 
     const fn rigid_matrix(transform: &RigidTransform) -> Matrix4 {
@@ -411,7 +411,7 @@ pub mod monstertruck {
                         &vertices[index],
                         &vertices[next],
                         transit,
-                    ));
+                    )?);
                 }
                 Curve2d::Bezier { control_points_mm } => {
                     if control_points_mm.len() < 2 {
@@ -479,7 +479,7 @@ pub mod monstertruck {
                         .iter()
                         .map(|[x, y]| Point3::new(*x, *y, 0.0))
                         .collect::<Vec<_>>();
-                    let curve = BsplineCurve::new(KnotVector::from(knots.clone()), control_points);
+                    let curve = BsplineCurve::new(KnotVector::from(knots.clone()), control_points)?;
                     let geometry = if let Some(weights) = weights {
                         Curve::NurbsCurve(NurbsCurve::try_from_bspline_and_weights(
                             curve,
@@ -488,7 +488,7 @@ pub mod monstertruck {
                     } else {
                         Curve::BsplineCurve(curve)
                     };
-                    edges.push(Edge::new(&vertices[index], &vertices[next], geometry));
+                    edges.push(Edge::new(&vertices[index], &vertices[next], geometry)?);
                 }
             }
         }
@@ -610,7 +610,7 @@ pub mod monstertruck {
                     Vector3::unit_y(),
                     builder::SweepAngle::Closed,
                     2,
-                );
+                )?;
                 let disk = profile::attach_plane_normalized(vec![circle])?;
                 Ok(builder::extrude(&disk, Vector3::new(0.0, *height_mm, 0.0)))
             }
@@ -658,7 +658,7 @@ pub mod monstertruck {
             };
             let fraction = f64::from(index) / 16.0;
             let parameter = f64::mul_add(end - start, fraction, start);
-            circle_point_matches(curve.subs(parameter), center, normal, radius_mm)
+            circle_point_matches(curve.evaluate(parameter), center, normal, radius_mm)
         })
     }
 
@@ -812,7 +812,7 @@ pub mod monstertruck {
             ..FilletOptions::default()
         };
         fillet_edges_generic(shell, &selected, Some(&options))?;
-        Ok(Solid::try_new(boundaries)?)
+        Ok(Solid::new(boundaries)?)
     }
 
     fn evaluate_node(model: &CadModel, root: NodeId, policy: GeometryPolicy) -> Result<Solid> {
