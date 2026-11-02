@@ -46,7 +46,7 @@ fn main() -> Result<()> {
     let fragment = fragments
         .pop()
         .context("selected fragment disappeared after cardinality check")?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent {

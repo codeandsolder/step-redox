@@ -37,7 +37,7 @@ fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     let source = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let fragment = step_redox::cad_recovery::recover_proven_extrusion_core_union_fragment(
         &source, solid_id, &cap_pairs, &kernel,
     )?

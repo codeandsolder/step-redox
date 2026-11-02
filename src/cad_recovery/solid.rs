@@ -1568,7 +1568,7 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&evaluated).geometrically_consistent);
             ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
@@ -1592,7 +1592,7 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&evaluated).geometrically_consistent);
             ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
@@ -1657,7 +1657,7 @@ mod tests {
         #[cfg(feature = "cad-kernel-monstertruck")]
         {
             use crate::cad_kernel::CadKernel;
-            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+            let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
             assert!(kernel.summarize(&evaluated).geometrically_consistent);
             ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;

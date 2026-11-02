@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     })?;
     let fragment = step_redox::cad_recovery::recover_solid_extrusion_fragment(&candidate.core)?;
 
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent || summary.shells != 1 {

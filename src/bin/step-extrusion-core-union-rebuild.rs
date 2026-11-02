@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     }
 
     let (model, root) = step_redox::cad_recovery::compose_union_model(&fragments)?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let evaluated = kernel.evaluate(&model, root)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent {

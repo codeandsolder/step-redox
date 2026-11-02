@@ -306,7 +306,8 @@ fn uncertainty_measure_mm(
     }
     let value = parameter_number(parameter)?;
     let unit_id = entity_ref_value(unit)?;
-    let scale_mm = crate::units::length_unit_scale_mm(unit_id, entities, index)?;
+    let section = crate::step_document::StepSection::unlocated(entities, index);
+    let scale_mm = crate::units::length_unit_scale_mm(unit_id, &section)?;
     let result = value * scale_mm;
     result.is_finite().then_some(result)
 }

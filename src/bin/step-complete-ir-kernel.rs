@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let bytes = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
     let report = step_redox::complete_ir::recover_complete_ir_with_kernel_bytes(
         &bytes,
-        &MonstertruckKernel,
+        &MonstertruckKernel::project_standard(),
     )?;
     let data = serde_json::to_vec_pretty(&report)?;
     std::fs::write(&output, data).with_context(|| format!("write {}", output.display()))?;

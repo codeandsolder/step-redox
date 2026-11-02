@@ -21,7 +21,7 @@ fn main() -> Result<()> {
     }
 
     let source = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let Some(fragment) =
         step_redox::cad_recovery::recover_auto_proven_extrusion_core_union_fragment(
             &source, solid_id, &kernel,

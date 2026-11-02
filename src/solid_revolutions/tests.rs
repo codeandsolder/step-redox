@@ -761,7 +761,7 @@ fn recovers_split_hemispherical_end_topology() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered)?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
@@ -1442,7 +1442,7 @@ fn recovers_native_conical_frustum_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
@@ -1467,7 +1467,7 @@ fn recovers_native_hollow_conical_frustum_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
@@ -1500,7 +1500,7 @@ fn recovers_native_line_surface_of_revolution_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
     }
@@ -1548,7 +1548,7 @@ fn recovers_native_spherical_cap_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
@@ -1591,7 +1591,7 @@ fn recovers_positive_spherical_cap_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;
@@ -1630,7 +1630,7 @@ fn recovers_native_ring_torus_fixture() -> anyhow::Result<()> {
     {
         use crate::cad_kernel::CadKernel;
         let fragment = crate::cad_recovery::recover_solid_revolution_fragment(&recovered[0])?;
-        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel;
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
         let rebuilt = kernel.evaluate(&fragment.model, fragment.root)?;
         assert!(kernel.summarize(&rebuilt).geometrically_consistent);
         ruststep::parser::parse(&kernel.to_step(&rebuilt)?)?;

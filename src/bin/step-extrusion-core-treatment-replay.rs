@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     }
 
     let fragment = step_redox::cad_recovery::recover_solid_extrusion_fragment(&candidate.core)?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let variants = 1_usize
         .checked_shl(u32::try_from(treatments.len()).context("too many treatment variants")?)
         .context("treatment variant count overflow")?;

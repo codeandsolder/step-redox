@@ -1,6 +1,34 @@
 use crate::cad_ir::{CadModel, NodeId};
 use anyhow::Result;
 
+/// User-facing geometry accuracy contract at the unit-aware Step Redox boundary.
+///
+/// Step Redox CAD IR stores physical lengths in millimetres, so Standard policy
+/// is expressed in millimetres here and translated to the unitless kernel's
+/// current model units only inside a backend adapter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GeometryPolicy {
+    /// Geometry-changing operations must establish equivalence or refuse.
+    Equivalent,
+    /// Bounded geometric change under an explicit millimetre budget.
+    Standard { tolerance_mm: f64 },
+}
+
+impl GeometryPolicy {
+    /// Project-wide Standard preset: 0.01 mm.
+    pub const PROJECT_STANDARD_TOLERANCE_MM: f64 = 0.01;
+
+    #[must_use]
+    pub const fn standard_mm(tolerance_mm: f64) -> Self {
+        Self::Standard { tolerance_mm }
+    }
+
+    #[must_use]
+    pub const fn project_standard() -> Self {
+        Self::standard_mm(Self::PROJECT_STANDARD_TOLERANCE_MM)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelSummary {
     pub geometrically_consistent: bool,
@@ -33,7 +61,7 @@ pub trait CadKernel {
 
 #[cfg(feature = "cad-kernel-monstertruck")]
 pub mod monstertruck {
-    use super::{CadKernel, KernelSummary};
+    use super::{CadKernel, GeometryPolicy, KernelSummary};
     use crate::cad_ir::{
         Axis3, BooleanOp, CadModel, CadNode, Curve2d, EdgeSelector, EdgeTreatmentEdge,
         EdgeTreatmentProfile, LoftSection, NodeId, Primitive, Profile2d, RigidTransform,
@@ -48,8 +76,32 @@ pub mod monstertruck {
         primitive, profile,
     };
 
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct MonstertruckKernel;
+    #[derive(Debug, Clone, Copy)]
+    pub struct MonstertruckKernel {
+        policy: GeometryPolicy,
+    }
+
+    impl MonstertruckKernel {
+        #[must_use]
+        pub const fn new(policy: GeometryPolicy) -> Self {
+            Self { policy }
+        }
+
+        #[must_use]
+        pub const fn equivalent() -> Self {
+            Self::new(GeometryPolicy::Equivalent)
+        }
+
+        #[must_use]
+        pub const fn standard_mm(tolerance_mm: f64) -> Self {
+            Self::new(GeometryPolicy::standard_mm(tolerance_mm))
+        }
+
+        #[must_use]
+        pub const fn project_standard() -> Self {
+            Self::new(GeometryPolicy::project_standard())
+        }
+    }
 
     /// Opaque wrapper: Monstertruck topology does not escape the backend module.
     pub struct EvaluatedShape {
@@ -492,38 +544,33 @@ pub mod monstertruck {
         (a[0] - b[0]).hypot(a[1] - b[1])
     }
 
-    const BOOLEAN_TOLERANCE_MM: f64 = 1.0e-6;
+    const fn monstertruck_policy(policy: GeometryPolicy) -> monstertruck_solid::GeometryPolicy {
+        match policy {
+            GeometryPolicy::Equivalent => monstertruck_solid::GeometryPolicy::Equivalent,
+            GeometryPolicy::Standard { tolerance_mm } => {
+                monstertruck_solid::GeometryPolicy::standard(tolerance_mm)
+            }
+        }
+    }
 
-    fn evaluate_boolean(model: &CadModel, op: BooleanOp, children: &[NodeId]) -> Result<Solid> {
+    fn evaluate_boolean(
+        model: &CadModel,
+        op: BooleanOp,
+        children: &[NodeId],
+        policy: GeometryPolicy,
+    ) -> Result<Solid> {
         let Some((&first, rest)) = children.split_first() else {
             bail!("boolean node needs at least one child");
         };
-        let mut result = evaluate_node(model, first)?;
+        let mut result = evaluate_node(model, first, policy)?;
         for &child in rest {
-            let rhs = evaluate_node(model, child)?;
+            let rhs = evaluate_node(model, child, policy)?;
+            let kernel_policy = monstertruck_policy(policy);
             result = match op {
-                BooleanOp::Union => monstertruck_solid::or(&result, &rhs, BOOLEAN_TOLERANCE_MM)?,
-                BooleanOp::Intersection => {
-                    monstertruck_solid::and(&result, &rhs, BOOLEAN_TOLERANCE_MM)?
-                }
+                BooleanOp::Union => monstertruck_solid::or(&result, &rhs, kernel_policy)?,
+                BooleanOp::Intersection => monstertruck_solid::and(&result, &rhs, kernel_policy)?,
                 BooleanOp::Difference => {
-                    match monstertruck_solid::difference(&result, &rhs, BOOLEAN_TOLERANCE_MM) {
-                        Ok(solid) => solid,
-                        Err(error) => {
-                            #[cfg(test)]
-                            for tolerance in [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 5.0e-2] {
-                                match monstertruck_solid::difference(&result, &rhs, tolerance) {
-                                    Ok(_) => eprintln!(
-                                        "Monstertruck difference succeeds at tolerance {tolerance:.1e}"
-                                    ),
-                                    Err(retry_error) => eprintln!(
-                                        "Monstertruck difference still fails at tolerance {tolerance:.1e}: {retry_error}"
-                                    ),
-                                }
-                            }
-                            return Err(error.into());
-                        }
-                    }
+                    monstertruck_solid::difference(&result, &rhs, kernel_policy)?
                 }
             };
         }
@@ -730,8 +777,9 @@ pub mod monstertruck {
         child: NodeId,
         profile: EdgeTreatmentProfile,
         edges: &[EdgeTreatmentEdge],
+        policy: GeometryPolicy,
     ) -> Result<Solid> {
-        let child = evaluate_node(model, child)?;
+        let child = evaluate_node(model, child, policy)?;
         let mut boundaries = child.into_boundaries();
         let [shell] = boundaries.as_mut_slice() else {
             bail!("edge treatment currently requires exactly one boundary shell");
@@ -767,7 +815,7 @@ pub mod monstertruck {
         Ok(Solid::try_new(boundaries)?)
     }
 
-    fn evaluate_node(model: &CadModel, root: NodeId) -> Result<Solid> {
+    fn evaluate_node(model: &CadModel, root: NodeId, policy: GeometryPolicy) -> Result<Solid> {
         match model.node(root)? {
             CadNode::Primitive(primitive) => primitive_solid(primitive),
             CadNode::Extrude { profile, vector_mm } => {
@@ -783,12 +831,12 @@ pub mod monstertruck {
             } => revolve_profile(profile, *axis, *angle_rad),
             CadNode::Sweep { profile, path } => sweep_profile(profile, path),
             CadNode::Loft { sections } => loft_sections(sections),
-            CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children),
+            CadNode::Boolean { op, children } => evaluate_boolean(model, *op, children, policy),
             CadNode::EdgeTreatment {
                 child,
                 profile,
                 edges,
-            } => evaluate_edge_treatment(model, *child, *profile, edges),
+            } => evaluate_edge_treatment(model, *child, *profile, edges, policy),
             CadNode::Transform { transform, child } => {
                 if let CadNode::Revolve {
                     profile,
@@ -798,7 +846,7 @@ pub mod monstertruck {
                 {
                     return revolve_profile_transformed(profile, *axis, *angle_rad, transform);
                 }
-                let child = evaluate_node(model, *child)?;
+                let child = evaluate_node(model, *child, policy)?;
                 Ok(builder::transformed(&child, rigid_matrix(transform)))
             }
             unsupported => {
@@ -813,7 +861,7 @@ pub mod monstertruck {
         fn evaluate(&self, model: &CadModel, root: NodeId) -> Result<Self::Evaluated> {
             model.validate()?;
             Ok(EvaluatedShape {
-                solid: evaluate_node(model, root)?,
+                solid: evaluate_node(model, root, self.policy)?,
             })
         }
 
@@ -882,7 +930,7 @@ pub mod monstertruck {
                 ],
             });
             model.add_root(root)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -918,7 +966,7 @@ pub mod monstertruck {
             expected_step_fragment: &str,
         ) -> Result<()> {
             let (model, root) = curved_profile_model(curve)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -964,7 +1012,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -993,7 +1041,7 @@ pub mod monstertruck {
                 }],
             });
             model.add_root(root)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1041,13 +1089,51 @@ pub mod monstertruck {
                 }],
             });
             model.add_root(root)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
             assert_eq!(summary.shells, 1);
             assert!(summary.faces > 3);
             ruststep::parser::parse(&kernel.to_step(&evaluated)?)?;
+            Ok(())
+        }
+
+        #[test]
+        fn project_standard_maps_exactly_to_point_zero_one_mm() {
+            assert_eq!(
+                monstertruck_policy(GeometryPolicy::project_standard()).tolerance(),
+                Some(0.01)
+            );
+        }
+
+        #[test]
+        fn equivalent_refuses_approximate_boolean_backend() -> Result<()> {
+            let mut model = CadModel::new();
+            let first = model.add_node(CadNode::Primitive(Primitive::Box {
+                size_mm: [2.0, 2.0, 2.0],
+            }));
+            let second_body = model.add_node(CadNode::Primitive(Primitive::Box {
+                size_mm: [2.0, 2.0, 2.0],
+            }));
+            let second = model.add_node(CadNode::Transform {
+                transform: RigidTransform::translation_mm([1.0, 0.0, 0.0]),
+                child: second_body,
+            });
+            let root = model.add_node(CadNode::Boolean {
+                op: BooleanOp::Union,
+                children: vec![first, second],
+            });
+            model.add_root(root)?;
+
+            let error = match MonstertruckKernel::equivalent().evaluate(&model, root) {
+                Ok(_) => bail!("Equivalent unexpectedly admitted the approximate Boolean backend"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("no equivalence-proving backend"),
+                "unexpected refusal: {error:#}"
+            );
             Ok(())
         }
 
@@ -1071,7 +1157,7 @@ pub mod monstertruck {
                 children: vec![first, second],
             });
             model.add_root(root)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1107,7 +1193,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1131,7 +1217,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1161,7 +1247,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1186,7 +1272,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1216,7 +1302,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             assert!(kernel.summarize(&evaluated).geometrically_consistent);
             let step = kernel.to_step(&evaluated)?;
@@ -1254,7 +1340,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1340,7 +1426,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1390,7 +1476,7 @@ pub mod monstertruck {
                 knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
                 weights: Some(vec![1.0, 0.75, 1.0]),
             })?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let step = kernel.to_step(&evaluated)?;
             let recovered = crate::detect_solid_extrusions_bytes(step.as_bytes())?;
@@ -1434,7 +1520,7 @@ pub mod monstertruck {
                 vector_mm: [0.0, 0.0, 1.0],
             });
             model.add_root(root)?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             assert!(kernel.evaluate(&model, root).is_err());
             Ok(())
         }
@@ -1464,7 +1550,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1493,7 +1579,7 @@ pub mod monstertruck {
             });
             model.add_root(root)?;
 
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
@@ -1519,7 +1605,7 @@ pub mod monstertruck {
             });
             model.add_root(patterned)?;
 
-            let error = match MonstertruckKernel.evaluate(&model, patterned) {
+            let error = match MonstertruckKernel::project_standard().evaluate(&model, patterned) {
                 Ok(_) => bail!("unimplemented pattern unexpectedly evaluated"),
                 Err(error) => error,
             };
@@ -1530,7 +1616,7 @@ pub mod monstertruck {
         #[test]
         fn evaluates_box_without_exposing_monstertruck_topology() -> Result<()> {
             let (model, root) = box_model()?;
-            let kernel = MonstertruckKernel;
+            let kernel = MonstertruckKernel::project_standard();
             let evaluated = kernel.evaluate(&model, root)?;
             let summary = kernel.summarize(&evaluated);
             assert!(summary.geometrically_consistent);
