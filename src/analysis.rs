@@ -94,8 +94,7 @@ impl<'a> AnalysisSession<'a> {
     /// Build the compact complete semantic IR without reparsing this exchange.
     ///
     /// # Errors
-    /// Returns an error if detector output cannot be converted into exact CAD
-    /// IR or solid ownership is ambiguous.
+    /// Returns an error if detector output cannot be converted into exact CAD IR.
     pub fn complete_ir(&self) -> Result<complete_ir::CompleteIr> {
         complete_ir::recover_complete_ir_exchange(&self.exchange, self.input)
     }

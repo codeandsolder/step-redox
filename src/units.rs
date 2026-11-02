@@ -1,4 +1,4 @@
-use crate::step_document::{StepRecord, StepSection, StepValue};
+use crate::step_document::{StepRecord, StepSectionView, StepValue};
 
 const MAX_UNIT_RECURSION: usize = 8;
 
@@ -6,13 +6,13 @@ const MAX_UNIT_RECURSION: usize = 8;
 ///
 /// Supports direct SI length units and `CONVERSION_BASED_UNIT` chains whose
 /// conversion factor is a `LENGTH_MEASURE_WITH_UNIT` / `MEASURE_WITH_UNIT`.
-pub fn length_unit_scale_mm(unit_id: u64, section: &StepSection<'_>) -> Option<f64> {
+pub fn length_unit_scale_mm(unit_id: u64, section: &StepSectionView<'_>) -> Option<f64> {
     length_unit_scale_mm_inner(unit_id, section, 0)
 }
 
 fn length_unit_scale_mm_inner(
     unit_id: u64,
-    section: &StepSection<'_>,
+    section: &StepSectionView<'_>,
     depth: usize,
 ) -> Option<f64> {
     if depth > MAX_UNIT_RECURSION {
@@ -39,7 +39,7 @@ fn length_unit_scale_mm_inner(
 
 fn conversion_factor_scale_mm(
     factor_id: u64,
-    section: &StepSection<'_>,
+    section: &StepSectionView<'_>,
     depth: usize,
 ) -> Option<f64> {
     let entity = section.entity(factor_id)?;
@@ -131,7 +131,7 @@ mod tests {
             .first()
             .ok_or_else(|| anyhow::anyhow!("parsed exchange contains no DATA section"))?;
         let index = build_index(&data.entities);
-        let section = StepSection::new(0, &data.entities, &index);
+        let section = StepSectionView::new(&data.entities, &index);
 
         assert_eq!(length_unit_scale_mm(2, &section), Some(1.0));
         assert_eq!(length_unit_scale_mm(4, &section), Some(1.0));

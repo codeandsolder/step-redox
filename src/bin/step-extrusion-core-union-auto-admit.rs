@@ -7,9 +7,14 @@ use std::path::PathBuf;
 fn main() -> Result<()> {
     use step_redox::cad_kernel::{CadKernel, monstertruck::MonstertruckKernel};
 
-    let usage = "usage: step-extrusion-core-union-auto-admit INPUT.step SOLID_ID OUTPUT.step";
+    let usage = "usage: step-extrusion-core-union-auto-admit INPUT.step DATA_SECTION_INDEX SOLID_ID OUTPUT.step";
     let mut args = std::env::args().skip(1);
     let input = PathBuf::from(args.next().context(usage)?);
+    let data_section = args
+        .next()
+        .context(usage)?
+        .parse::<usize>()
+        .context("parse zero-based DATA_SECTION_INDEX")?;
     let solid_id = args
         .next()
         .context(usage)?
@@ -24,7 +29,10 @@ fn main() -> Result<()> {
     let kernel = MonstertruckKernel::project_standard();
     let Some(fragment) =
         step_redox::cad_recovery::recover_auto_proven_extrusion_core_union_fragment(
-            &source, solid_id, &kernel,
+            &source,
+            data_section,
+            solid_id,
+            &kernel,
         )?
     else {
         anyhow::bail!("no unique bounded exact extrusion-core union was admitted");

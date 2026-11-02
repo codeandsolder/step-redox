@@ -2,16 +2,15 @@ use ruststep::ast::{EntityInstance, Parameter, Record};
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// Parser-neutral read-only view over one STEP DATA section.
+/// Parser-neutral read-only view over one located STEP DATA section.
 ///
 /// The current frontend is `step-p21`, but consumers of this module do not see
 /// its AST types. This is the migration seam for replacing or reshaping the
 /// parser later without dragging semantic-recovery code through that change.
 #[derive(Clone, Copy)]
 pub struct StepSection<'a> {
-    data_section: Option<usize>,
-    entities: &'a [EntityInstance],
-    index: &'a HashMap<u64, usize>,
+    data_section: usize,
+    view: StepSectionView<'a>,
 }
 
 impl<'a> StepSection<'a> {
@@ -21,23 +20,18 @@ impl<'a> StepSection<'a> {
         index: &'a HashMap<u64, usize>,
     ) -> Self {
         Self {
-            data_section: Some(data_section),
-            entities,
-            index,
+            data_section,
+            view: StepSectionView::new(entities, index),
         }
     }
 
-    pub const fn unlocated(entities: &'a [EntityInstance], index: &'a HashMap<u64, usize>) -> Self {
-        Self {
-            data_section: None,
-            entities,
-            index,
-        }
+    pub const fn view(self) -> StepSectionView<'a> {
+        self.view
     }
 
     pub fn entity(&self, id: u64) -> Option<StepEntity<'a>> {
-        let ordinal = *self.index.get(&id)?;
-        let entity = self.entities.get(ordinal)?;
+        let ordinal = *self.view.index.get(&id)?;
+        let entity = self.view.entities.get(ordinal)?;
         Some(StepEntity {
             source: SourceEntity {
                 data_section: self.data_section,
@@ -50,7 +44,8 @@ impl<'a> StepSection<'a> {
 
     #[cfg(feature = "cad-kernel-monstertruck")]
     pub fn iter(&self) -> impl Iterator<Item = StepEntity<'a>> + '_ {
-        self.entities
+        self.view
+            .entities
             .iter()
             .enumerate()
             .map(|(ordinal, entity)| StepEntity {
@@ -64,10 +59,32 @@ impl<'a> StepSection<'a> {
     }
 }
 
-/// Stable source identity for provenance journals built above the parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+/// Parser-neutral entity lookup for callers that have one DATA section's
+/// contents but no document-level section index. This view deliberately cannot
+/// manufacture [`SourceEntity`] provenance.
+#[derive(Clone, Copy)]
+pub struct StepSectionView<'a> {
+    entities: &'a [EntityInstance],
+    index: &'a HashMap<u64, usize>,
+}
+
+impl<'a> StepSectionView<'a> {
+    pub const fn new(entities: &'a [EntityInstance], index: &'a HashMap<u64, usize>) -> Self {
+        Self { entities, index }
+    }
+
+    pub fn entity(&self, id: u64) -> Option<StepEntityView<'a>> {
+        let ordinal = *self.index.get(&id)?;
+        Some(StepEntityView {
+            entity: self.entities.get(ordinal)?,
+        })
+    }
+}
+
+/// Stable document-global source identity for provenance journals built above the parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SourceEntity {
-    pub data_section: Option<usize>,
+    pub data_section: usize,
     pub ordinal: usize,
     pub id: u64,
 }
@@ -84,16 +101,31 @@ impl<'a> StepEntity<'a> {
     }
 
     pub fn record_named(self, name: &str) -> Option<StepRecord<'a>> {
-        match self.entity {
-            EntityInstance::Simple { record, .. } => {
-                (record.name == name).then_some(StepRecord(record))
-            }
-            EntityInstance::Complex { subsuper, .. } => subsuper
-                .0
-                .iter()
-                .find(|record| record.name == name)
-                .map(StepRecord),
+        entity_record_named(self.entity, name)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct StepEntityView<'a> {
+    entity: &'a EntityInstance,
+}
+
+impl<'a> StepEntityView<'a> {
+    pub fn record_named(self, name: &str) -> Option<StepRecord<'a>> {
+        entity_record_named(self.entity, name)
+    }
+}
+
+fn entity_record_named<'a>(entity: &'a EntityInstance, name: &str) -> Option<StepRecord<'a>> {
+    match entity {
+        EntityInstance::Simple { record, .. } => {
+            (record.name == name).then_some(StepRecord(record))
         }
+        EntityInstance::Complex { subsuper, .. } => subsuper
+            .0
+            .iter()
+            .find(|record| record.name == name)
+            .map(StepRecord),
     }
 }
 
@@ -198,7 +230,7 @@ mod tests {
         assert_eq!(
             entity.source(),
             SourceEntity {
-                data_section: Some(3),
+                data_section: 3,
                 ordinal: 0,
                 id: 10,
             }

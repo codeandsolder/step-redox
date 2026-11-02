@@ -179,7 +179,7 @@ fn representation_length_scale_mm(context_id: u64, section: &StepSection<'_>) ->
     let mut scales = unit_values
         .iter()
         .filter_map(StepValue::entity_ref)
-        .filter_map(|unit_id| units::length_unit_scale_mm(unit_id, section));
+        .filter_map(|unit_id| units::length_unit_scale_mm(unit_id, &section.view()));
     let scale = scales.next()?;
     scales.next().is_none().then_some(scale)
 }
@@ -250,7 +250,7 @@ fn scan(path: &Path) -> Result<ScanReport> {
             let Some(source) = document_section.entity(solid_id).map(StepEntity::source) else {
                 continue;
             };
-            debug_assert_eq!(source.data_section, Some(data_section));
+            debug_assert_eq!(source.data_section, data_section);
             debug_assert_eq!(Some(source.ordinal), index.get(&solid_id).copied());
             let owning = ownership.get(&solid_id).copied();
             let has_shape_representation = owning.is_some();
@@ -294,7 +294,7 @@ fn scan(path: &Path) -> Result<ScanReport> {
             };
 
             solids.push(SolidScan {
-                data_section: source.data_section.unwrap_or(data_section),
+                data_section: source.data_section,
                 solid_id: source.id,
                 geometry_fingerprint,
                 identity_kind,

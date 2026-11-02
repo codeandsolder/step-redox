@@ -1,4 +1,4 @@
-pub use crate::step_document::SourceEntity;
+use crate::SourceEntity;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -333,9 +333,7 @@ mod monstertruck_adapter {
             assert_eq!(loss.tally.count, 1);
             assert_eq!(loss.tally.first_source.map(|source| source.id), Some(11));
             assert_eq!(
-                loss.tally
-                    .first_source
-                    .and_then(|source| source.data_section),
+                loss.tally.first_source.map(|source| source.data_section),
                 Some(0)
             );
             Ok(())

@@ -45,6 +45,7 @@ pub mod solid_revolutions;
 pub mod solid_sweeps;
 mod spherical_caps;
 mod step_document;
+pub use step_document::SourceEntity;
 mod step_entities;
 mod step_graph;
 mod step_identity;

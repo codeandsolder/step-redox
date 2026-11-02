@@ -36,6 +36,7 @@ fn main() -> Result<()> {
         .chain(report.radial_slot_revolutions)
         .chain(report.solid_sweeps)
         .chain(report.boundary_feature_composites)
+        .map(|recovered| recovered.fragment)
         .collect::<Vec<_>>();
     if fragments.len() != 1 {
         bail!(

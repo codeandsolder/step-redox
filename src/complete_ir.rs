@@ -1,3 +1,4 @@
+use crate::SourceEntity;
 use crate::cad_ir::{
     BooleanOp, CadModel, CadNode, EdgeSelector, EdgeTreatmentEdge, EdgeTreatmentProfile, NodeId,
     ProofStatus, Provenance, RigidTransform,
@@ -20,12 +21,12 @@ use ruststep::ast::{EntityInstance, Exchange};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v8";
-pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v10";
+pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v11";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
-    pub solid_id: u64,
+    pub source: SourceEntity,
     pub face_count: usize,
     pub support_counts: BTreeMap<String, usize>,
     pub unique_edge_count: usize,
@@ -33,10 +34,10 @@ pub struct SurfaceSignatureSummary {
     pub closed_two_manifold: bool,
 }
 
-impl From<&SolidSurfaceSignature> for SurfaceSignatureSummary {
-    fn from(value: &SolidSurfaceSignature) -> Self {
+impl SurfaceSignatureSummary {
+    fn from_source(source: SourceEntity, value: &SolidSurfaceSignature) -> Self {
         Self {
-            solid_id: value.solid_id,
+            source,
             face_count: value.face_count,
             support_counts: value.support_counts.clone(),
             unique_edge_count: value.unique_edge_count,
@@ -48,7 +49,7 @@ impl From<&SolidSurfaceSignature> for SurfaceSignatureSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceSolidSummary {
-    pub solid_id: u64,
+    pub source: SourceEntity,
     pub faces: usize,
     pub edges: usize,
     pub closure_entities: usize,
@@ -59,9 +60,26 @@ pub struct BodyScanSummary {
     pub solids: Vec<SourceSolidSummary>,
 }
 
+/// One recovered CAD fragment qualified by its document-global source solid.
+///
+/// Raw STEP entity IDs inside `fragment.source` and node provenance are local to
+/// `source_solid.data_section`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceCadFragment {
+    pub source_solid: SourceEntity,
+    pub fragment: CadFragment,
+}
+
+/// Instance-pattern diagnostics qualified by the DATA section owning their raw STEP IDs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceInstancePattern {
+    pub data_section: usize,
+    pub pattern: InstancePattern,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KernelRecoveryFailure {
-    pub solid_id: u64,
+    pub source: SourceEntity,
     pub error: String,
 }
 
@@ -71,15 +89,15 @@ pub struct CompleteIr {
     pub idempotent_compact_rewrite: bool,
     pub compact_second_pass_stats: Stats,
     pub surface_signature_summaries: Vec<SurfaceSignatureSummary>,
-    pub instance_pattern_diagnostics: Vec<InstancePattern>,
-    pub solid_extrusions: Vec<CadFragment>,
-    pub solid_revolutions: Vec<CadFragment>,
-    pub radial_slot_revolutions: Vec<CadFragment>,
-    pub solid_sweeps: Vec<CadFragment>,
-    pub periodic_chains: Vec<CadFragment>,
-    pub boundary_feature_composites: Vec<CadFragment>,
+    pub instance_pattern_diagnostics: Vec<SourceInstancePattern>,
+    pub solid_extrusions: Vec<SourceCadFragment>,
+    pub solid_revolutions: Vec<SourceCadFragment>,
+    pub radial_slot_revolutions: Vec<SourceCadFragment>,
+    pub solid_sweeps: Vec<SourceCadFragment>,
+    pub periodic_chains: Vec<SourceCadFragment>,
+    pub boundary_feature_composites: Vec<SourceCadFragment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub extrusion_core_unions: Vec<CadFragment>,
+    pub extrusion_core_unions: Vec<SourceCadFragment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kernel_recovery_failures: Vec<KernelRecoveryFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,8 +121,49 @@ struct RecoveredBoundaryFeatureFamily {
 
 #[derive(Debug)]
 struct RecoverySection<'a> {
+    data_section: usize,
     entities: &'a [EntityInstance],
     index: HashMap<u64, usize>,
+}
+
+impl RecoverySection<'_> {
+    fn source_entity(&self, id: u64) -> Option<SourceEntity> {
+        crate::step_document::StepSection::new(self.data_section, self.entities, &self.index)
+            .entity(id)
+            .map(crate::step_document::StepEntity::source)
+    }
+
+    fn local_target_ids(&self, targets: &BTreeSet<SourceEntity>) -> BTreeSet<u64> {
+        targets
+            .iter()
+            .filter(|source| source.data_section == self.data_section)
+            .map(|source| source.id)
+            .collect()
+    }
+
+    fn qualify_fragment(&self, fragment: CadFragment) -> Result<SourceCadFragment> {
+        let solid_id = source_solid_id(&fragment.source);
+        let source = self.source_entity(solid_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "recovered CAD fragment refers to missing solid #{solid_id} in DATA section {}",
+                self.data_section
+            )
+        })?;
+        Ok(SourceCadFragment {
+            source_solid: source,
+            fragment,
+        })
+    }
+
+    fn qualify_fragments<I>(&self, fragments: I) -> Result<Vec<SourceCadFragment>>
+    where
+        I: IntoIterator<Item = CadFragment>,
+    {
+        fragments
+            .into_iter()
+            .map(|fragment| self.qualify_fragment(fragment))
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -238,15 +297,15 @@ struct SelectedWholeSolid {
 
 #[derive(Debug)]
 struct WholeSolidRecoveryState {
-    source_solid_ids: BTreeSet<u64>,
-    selected: BTreeMap<u64, SelectedWholeSolid>,
+    source_solids: BTreeSet<SourceEntity>,
+    selected: BTreeMap<SourceEntity, SelectedWholeSolid>,
     revision: u64,
 }
 
 impl WholeSolidRecoveryState {
     fn new(body_scan: &[SourceSolidSummary]) -> Self {
         Self {
-            source_solid_ids: body_scan.iter().map(|solid| solid.solid_id).collect(),
+            source_solids: body_scan.iter().map(|solid| solid.source).collect(),
             selected: BTreeMap::new(),
             revision: 0,
         }
@@ -254,16 +313,31 @@ impl WholeSolidRecoveryState {
 
     fn add_candidates<I>(&mut self, candidates: I) -> Result<usize>
     where
-        I: IntoIterator<Item = CadFragment>,
+        I: IntoIterator<Item = SourceCadFragment>,
     {
         let mut changes = 0;
-        for fragment in candidates {
-            let solid_id = source_solid_id(&fragment.source);
-            if !self.source_solid_ids.contains(&solid_id) {
-                bail!("recovered CAD fragment refers to missing solid #{solid_id}");
+        for candidate in candidates {
+            let SourceCadFragment {
+                source_solid: source,
+                fragment,
+            } = candidate;
+            let local_solid_id = source_solid_id(&fragment.source);
+            if local_solid_id != source.id {
+                bail!(
+                    "recovered CAD fragment for DATA section {} solid #{} carries local solid #{local_solid_id}",
+                    source.data_section,
+                    source.id,
+                );
+            }
+            if !self.source_solids.contains(&source) {
+                bail!(
+                    "recovered CAD fragment refers to missing source solid {:?} #{}",
+                    source.data_section,
+                    source.id
+                );
             }
             let complexity = fragment.model.complexity_score(fragment.root)?;
-            let replace = self.selected.get(&solid_id).is_none_or(|existing| {
+            let replace = self.selected.get(&source).is_none_or(|existing| {
                 whole_solid_candidate_is_preferred(
                     &existing.fragment.source,
                     existing.complexity,
@@ -273,7 +347,7 @@ impl WholeSolidRecoveryState {
             });
             if replace {
                 self.selected.insert(
-                    solid_id,
+                    source,
                     SelectedWholeSolid {
                         fragment,
                         complexity,
@@ -286,30 +360,30 @@ impl WholeSolidRecoveryState {
         Ok(changes)
     }
 
-    fn constructively_unresolved_ids(&self) -> BTreeSet<u64> {
-        self.source_solid_ids
+    fn constructively_unresolved_sources(&self) -> BTreeSet<SourceEntity> {
+        self.source_solids
             .iter()
             .copied()
-            .filter(|solid_id| {
+            .filter(|source| {
                 self.selected
-                    .get(solid_id)
+                    .get(source)
                     .is_none_or(|selected| !is_constructive_source(&selected.fragment.source))
             })
             .collect()
     }
 
-    fn semantically_unrecovered_ids(&self) -> BTreeSet<u64> {
-        self.source_solid_ids
+    fn semantically_unrecovered_sources(&self) -> BTreeSet<SourceEntity> {
+        self.source_solids
             .iter()
             .copied()
-            .filter(|solid_id| !self.selected.contains_key(solid_id))
+            .filter(|source| !self.selected.contains_key(source))
             .collect()
     }
 
-    fn selected_fragments(&self) -> BTreeMap<u64, &CadFragment> {
+    fn selected_fragments(&self) -> BTreeMap<SourceEntity, &CadFragment> {
         self.selected
             .iter()
-            .map(|(&solid_id, selected)| (solid_id, &selected.fragment))
+            .map(|(&source, selected)| (source, &selected.fragment))
             .collect()
     }
 }
@@ -319,7 +393,7 @@ struct CompleteIrBuildState {
     idempotent_compact_rewrite: bool,
     compact_second_pass_stats: Stats,
     surface_signature_summaries: Vec<SurfaceSignatureSummary>,
-    instance_pattern_diagnostics: Vec<InstancePattern>,
+    instance_pattern_diagnostics: Vec<SourceInstancePattern>,
     body_scan: Vec<SourceSolidSummary>,
     recovery: WholeSolidRecoveryState,
 }
@@ -336,7 +410,7 @@ impl CompleteIrBuildState {
         let unrecovered_solids = self
             .body_scan
             .iter()
-            .filter(|solid| !recovered_ids.contains(&solid.solid_id))
+            .filter(|solid| !recovered_ids.contains(&solid.source))
             .cloned()
             .collect::<Vec<_>>();
         let constructively_recovered_solid_count = selected
@@ -390,7 +464,7 @@ impl CompleteIrBuildState {
 }
 
 type WholeSolidCandidateProvider =
-    for<'a> fn(&[RecoverySection<'a>], &BTreeSet<u64>) -> Result<Vec<CadFragment>>;
+    for<'a> fn(&[RecoverySection<'a>], &BTreeSet<SourceEntity>) -> Result<Vec<SourceCadFragment>>;
 
 const WHOLE_SOLID_CANDIDATE_PROVIDERS: [WholeSolidCandidateProvider; 2] = [
     recover_boundary_feature_candidates,
@@ -410,8 +484,7 @@ const MAX_LOCAL_REDUCTION_ROUNDS: usize = 32;
 /// evidence remains diagnostic until its repeated child can be linked to proven CAD IR.
 ///
 /// # Errors
-/// Returns an error if STEP parsing fails, duplicate solid IDs make body ownership
-/// ambiguous, or a detector's proven result cannot be converted into valid CAD IR.
+/// Returns an error if STEP parsing fails or a detector's proven result cannot be converted into valid CAD IR.
 pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
     let session = crate::AnalysisSession::from_bytes(input)?;
     session.complete_ir()
@@ -420,8 +493,8 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 /// Build Complete IR and opportunistically recover otherwise-unrecovered solids
 /// through a supplied CAD kernel plus the independent analytic boundary proof.
 ///
-/// The parser-only [`recover_complete_ir_bytes`] path remains schema v8 and never
-/// invokes a CAD backend. This explicit kernel-backed path reports schema v10,
+/// The parser-only [`recover_complete_ir_bytes`] path reports schema v9 and never
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v11,
 /// includes parser-neutral source-load evidence,
 /// records admitted extrusion-core unions separately, and leaves any unsupported
 /// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per
@@ -436,8 +509,13 @@ pub fn recover_complete_ir_with_kernel_bytes<K: CadKernel + SourceStepLoadInspec
     let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
     let mut build = recover_complete_ir_build_state(&exchange, input)?;
     let source_load = kernel.inspect_source_step(input)?;
-    let failures = apply_kernel_recovery(&mut build.recovery, |solid_id| {
-        recover_auto_proven_extrusion_core_union_fragment(input, solid_id, kernel)
+    let failures = apply_kernel_recovery(&mut build.recovery, |source| {
+        recover_auto_proven_extrusion_core_union_fragment(
+            input,
+            source.data_section,
+            source.id,
+            kernel,
+        )
     });
     Ok(build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, Some(source_load)))
 }
@@ -447,29 +525,34 @@ fn apply_kernel_recovery<F>(
     mut recover: F,
 ) -> Vec<KernelRecoveryFailure>
 where
-    F: FnMut(u64) -> Result<Option<CadFragment>>,
+    F: FnMut(SourceEntity) -> Result<Option<CadFragment>>,
 {
     let mut failures = Vec::new();
-    for solid_id in recovery.semantically_unrecovered_ids() {
-        match recover(solid_id) {
-            Ok(Some(fragment)) if source_solid_id(&fragment.source) == solid_id => {
-                if let Err(error) = recovery.add_candidates([fragment]) {
+    for source in recovery.semantically_unrecovered_sources() {
+        match recover(source) {
+            Ok(Some(fragment)) if source_solid_id(&fragment.source) == source.id => {
+                if let Err(error) = recovery.add_candidates([SourceCadFragment {
+                    source_solid: source,
+                    fragment,
+                }]) {
                     failures.push(KernelRecoveryFailure {
-                        solid_id,
+                        source,
                         error: error.to_string(),
                     });
                 }
             }
             Ok(Some(fragment)) => failures.push(KernelRecoveryFailure {
-                solid_id,
+                source,
                 error: format!(
-                    "kernel recovery returned solid #{} while recovering #{solid_id}",
-                    source_solid_id(&fragment.source)
+                    "kernel recovery returned local solid #{} while recovering DATA section {:?} solid #{}",
+                    source_solid_id(&fragment.source),
+                    source.data_section,
+                    source.id
                 ),
             }),
             Ok(None) => {}
             Err(error) => failures.push(KernelRecoveryFailure {
-                solid_id,
+                source,
                 error: error.to_string(),
             }),
         }
@@ -498,50 +581,59 @@ fn recover_complete_ir_build_state(
     let mut direct_candidates = Vec::new();
     let mut recovery_sections = Vec::with_capacity(exchange.data.len());
 
-    for section in &exchange.data {
+    for (data_section, section) in exchange.data.iter().enumerate() {
         let index = crate::step_graph::build_index(&section.entities);
-        let section_signatures =
-            crate::solid_revolutions::detect_solid_surface_signatures_with_index(
-                &section.entities,
-                &index,
-            );
-        signatures.extend(section_signatures);
-        direct_candidates.extend(recover_constructive_fragments_from_entities_with_index(
-            &section.entities,
-            &index,
-        )?);
-        let periodic_chains =
-            crate::periodic_chains::detect_periodic_chains_with_index(&section.entities, &index);
-        direct_candidates.extend(recover_periodic_chain_fragments(&periodic_chains)?);
-        patterns.extend(crate::patterns::detect_instance_patterns_with_index(
-            &section.entities,
-            &index,
-            1.0e-7,
-            4,
-        ));
-        body_scan.extend(scan_source_solids(&section.entities, &index));
-        recovery_sections.push(RecoverySection {
+        let recovery_section = RecoverySection {
+            data_section,
             entities: &section.entities,
             index,
-        });
-    }
+        };
 
-    body_scan.sort_by_key(|solid| solid.solid_id);
-    for pair in body_scan.windows(2) {
-        if pair[0].solid_id == pair[1].solid_id {
-            bail!(
-                "complete IR cannot disambiguate duplicate solid id #{} across DATA sections",
-                pair[0].solid_id
-            );
+        for signature in crate::solid_revolutions::detect_solid_surface_signatures_with_index(
+            recovery_section.entities,
+            &recovery_section.index,
+        ) {
+            let source = recovery_section.source_entity(signature.solid_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "surface signature refers to missing solid #{} in DATA section {data_section}",
+                    signature.solid_id
+                )
+            })?;
+            signatures.push(SurfaceSignatureSummary::from_source(source, &signature));
         }
+
+        let mut section_candidates = recover_constructive_fragments_from_entities_with_index(
+            recovery_section.entities,
+            &recovery_section.index,
+        )?;
+        let periodic_chains = crate::periodic_chains::detect_periodic_chains_with_index(
+            recovery_section.entities,
+            &recovery_section.index,
+        );
+        section_candidates.extend(recover_periodic_chain_fragments(&periodic_chains)?);
+        direct_candidates.extend(recovery_section.qualify_fragments(section_candidates)?);
+
+        patterns.extend(
+            crate::patterns::detect_instance_patterns_with_index(
+                recovery_section.entities,
+                &recovery_section.index,
+                1.0e-7,
+                4,
+            )
+            .into_iter()
+            .map(|pattern| SourceInstancePattern {
+                data_section,
+                pattern,
+            }),
+        );
+        body_scan.extend(scan_source_solids(&recovery_section));
+        recovery_sections.push(recovery_section);
     }
 
-    signatures.sort_by_key(|signature| signature.solid_id);
-    let surface_signature_summaries = signatures
-        .iter()
-        .map(SurfaceSignatureSummary::from)
-        .collect::<Vec<_>>();
+    body_scan.sort_by_key(|solid| solid.source);
+    signatures.sort_by_key(|signature| signature.source);
 
+    let surface_signature_summaries = signatures;
     let instance_pattern_diagnostics = patterns;
     let recovery = recover_whole_solids(&recovery_sections, &body_scan, direct_candidates)?;
 
@@ -559,13 +651,13 @@ fn recover_complete_ir_build_state(
 fn recover_whole_solids(
     sections: &[RecoverySection<'_>],
     body_scan: &[SourceSolidSummary],
-    direct_candidates: Vec<CadFragment>,
+    direct_candidates: Vec<SourceCadFragment>,
 ) -> Result<WholeSolidRecoveryState> {
     let mut recovery = WholeSolidRecoveryState::new(body_scan);
     recovery.add_candidates(direct_candidates)?;
 
     for provider in WHOLE_SOLID_CANDIDATE_PROVIDERS {
-        let targets = recovery.constructively_unresolved_ids();
+        let targets = recovery.constructively_unresolved_sources();
         if targets.is_empty() {
             break;
         }
@@ -576,12 +668,16 @@ fn recover_whole_solids(
 
 fn recover_boundary_feature_candidates(
     sections: &[RecoverySection<'_>],
-    targets: &BTreeSet<u64>,
-) -> Result<Vec<CadFragment>> {
+    targets: &BTreeSet<SourceEntity>,
+) -> Result<Vec<SourceCadFragment>> {
     let mut candidates = Vec::new();
     for section in sections {
-        candidates.extend(recover_boundary_feature_composites_for_section(
-            section, targets,
+        let local_targets = section.local_target_ids(targets);
+        if local_targets.is_empty() {
+            continue;
+        }
+        candidates.extend(section.qualify_fragments(
+            recover_boundary_feature_composites_for_section(section, &local_targets)?,
         )?);
     }
     Ok(candidates)
@@ -589,15 +685,19 @@ fn recover_boundary_feature_candidates(
 
 fn recover_reduced_brep_candidates(
     sections: &[RecoverySection<'_>],
-    targets: &BTreeSet<u64>,
-) -> Result<Vec<CadFragment>> {
+    targets: &BTreeSet<SourceEntity>,
+) -> Result<Vec<SourceCadFragment>> {
     let mut candidates = Vec::new();
     for section in sections {
-        candidates.extend(recover_reduced_brep_fragments(
+        let local_targets = section.local_target_ids(targets);
+        if local_targets.is_empty() {
+            continue;
+        }
+        candidates.extend(section.qualify_fragments(recover_reduced_brep_fragments(
             section.entities,
             &section.index,
-            Some(targets),
-        )?);
+            Some(&local_targets),
+        )?)?);
     }
     Ok(candidates)
 }
@@ -1389,12 +1489,9 @@ fn quarter_turn_transform(quarter: u8, translation: [f64; 3]) -> RigidTransform 
     }
 }
 
-fn scan_source_solids(
-    entities: &[EntityInstance],
-    index: &HashMap<u64, usize>,
-) -> Vec<SourceSolidSummary> {
+fn scan_source_solids(section: &RecoverySection<'_>) -> Vec<SourceSolidSummary> {
     let mut out = Vec::new();
-    for entity in entities {
+    for entity in section.entities {
         let Some(record) = crate::step_graph::simple_record(entity) else {
             continue;
         };
@@ -1402,15 +1499,25 @@ fn scan_source_solids(
             continue;
         }
         let solid_id = crate::step_graph::entity_id(entity);
-        let closure = crate::shape_identity::semantic_solid_closure(solid_id, entities, index)
-            .unwrap_or_else(|| crate::step_entities::closure_from(solid_id, entities, index));
+        let Some(source) = section.source_entity(solid_id) else {
+            continue;
+        };
+        let closure = crate::shape_identity::semantic_solid_closure(
+            solid_id,
+            section.entities,
+            &section.index,
+        )
+        .unwrap_or_else(|| {
+            crate::step_entities::closure_from(solid_id, section.entities, &section.index)
+        });
         let mut faces = 0usize;
         let mut edges = 0usize;
         for id in &closure {
-            let Some(&entity_index) = index.get(id) else {
+            let Some(&entity_index) = section.index.get(id) else {
                 continue;
             };
-            let Some(child) = crate::step_graph::simple_record(&entities[entity_index]) else {
+            let Some(child) = crate::step_graph::simple_record(&section.entities[entity_index])
+            else {
                 continue;
             };
             match child.name.as_str() {
@@ -1420,7 +1527,7 @@ fn scan_source_solids(
             }
         }
         out.push(SourceSolidSummary {
-            solid_id,
+            source,
             faces,
             edges,
             closure_entities: closure.len(),
@@ -1490,14 +1597,20 @@ fn select_cheapest_whole_solid_fragments<'a>(
         .collect())
 }
 
-fn selected_category<F>(selected: &BTreeMap<u64, &CadFragment>, predicate: F) -> Vec<CadFragment>
+fn selected_category<F>(
+    selected: &BTreeMap<SourceEntity, &CadFragment>,
+    predicate: F,
+) -> Vec<SourceCadFragment>
 where
     F: Fn(&CadFragmentSource) -> bool,
 {
     selected
-        .values()
-        .filter(|fragment| predicate(&fragment.source))
-        .map(|fragment| (*fragment).clone())
+        .iter()
+        .filter(|(_, fragment)| predicate(&fragment.source))
+        .map(|(&source, fragment)| SourceCadFragment {
+            source_solid: source,
+            fragment: (*fragment).clone(),
+        })
         .collect()
 }
 
@@ -1506,11 +1619,34 @@ mod tests {
     use super::*;
     use crate::cad_ir::{CadModel, CadNode, Primitive};
 
+    const fn test_source_in(data_section: usize, solid_id: u64) -> SourceEntity {
+        SourceEntity {
+            data_section,
+            ordinal: 0,
+            id: solid_id,
+        }
+    }
+
+    const fn test_source(solid_id: u64) -> SourceEntity {
+        test_source_in(0, solid_id)
+    }
+
+    fn qualified_fragment_in(data_section: usize, fragment: CadFragment) -> SourceCadFragment {
+        SourceCadFragment {
+            source_solid: test_source_in(data_section, source_solid_id(&fragment.source)),
+            fragment,
+        }
+    }
+
+    fn qualified_fragment(fragment: CadFragment) -> SourceCadFragment {
+        qualified_fragment_in(0, fragment)
+    }
+
     fn report_with_unrecovered(solid_ids: &[u64]) -> CompleteIr {
         let solids = solid_ids
             .iter()
             .map(|&solid_id| SourceSolidSummary {
-                solid_id,
+                source: test_source(solid_id),
                 faces: 0,
                 edges: 0,
                 closure_entities: 0,
@@ -1554,12 +1690,12 @@ mod tests {
         }
     }
 
-    fn apply_test_kernel_recovery<F>(solid_ids: &[u64], recover: F) -> CompleteIr
+    fn apply_test_kernel_recovery<F>(solid_ids: &[u64], mut recover: F) -> CompleteIr
     where
         F: FnMut(u64) -> Result<Option<CadFragment>>,
     {
         let mut build = build_state_with_unrecovered(solid_ids);
-        let failures = apply_kernel_recovery(&mut build.recovery, recover);
+        let failures = apply_kernel_recovery(&mut build.recovery, |source| recover(source.id));
         build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, None)
     }
 
@@ -1678,30 +1814,87 @@ mod tests {
         let report = report_with_unrecovered(&[7, 8]);
         let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
         assert_eq!(
-            state.constructively_unresolved_ids(),
-            BTreeSet::from([7, 8])
+            state.constructively_unresolved_sources(),
+            BTreeSet::from([test_source(7), test_source(8)])
         );
 
-        assert_eq!(state.add_candidates([descriptive_fragment(7, 1)?])?, 1);
         assert_eq!(
-            state.constructively_unresolved_ids(),
-            BTreeSet::from([7, 8])
+            state.add_candidates([qualified_fragment(descriptive_fragment(7, 1)?)])?,
+            1
         );
-        assert_eq!(state.semantically_unrecovered_ids(), BTreeSet::from([8]));
+        assert_eq!(
+            state.constructively_unresolved_sources(),
+            BTreeSet::from([test_source(7), test_source(8)])
+        );
+        assert_eq!(
+            state.semantically_unrecovered_sources(),
+            BTreeSet::from([test_source(8)])
+        );
 
-        assert_eq!(state.add_candidates([constructive_fragment(7, 4)?])?, 1);
-        assert_eq!(state.constructively_unresolved_ids(), BTreeSet::from([8]));
+        assert_eq!(
+            state.add_candidates([qualified_fragment(constructive_fragment(7, 4)?)])?,
+            1
+        );
+        assert_eq!(
+            state.constructively_unresolved_sources(),
+            BTreeSet::from([test_source(8)])
+        );
         let revision = state.revision;
 
-        assert_eq!(state.add_candidates([constructive_fragment(7, 6)?])?, 0);
+        assert_eq!(
+            state.add_candidates([qualified_fragment(constructive_fragment(7, 6)?)])?,
+            0
+        );
         assert_eq!(state.revision, revision);
-        assert_eq!(state.add_candidates([constructive_fragment(7, 1)?])?, 1);
+        assert_eq!(
+            state.add_candidates([qualified_fragment(constructive_fragment(7, 1)?)])?,
+            1
+        );
         assert!(state.revision > revision);
         assert_eq!(
-            state.selected_fragments()[&7]
+            state.selected_fragments()[&test_source(7)]
                 .model
-                .complexity_score(state.selected_fragments()[&7].root)?,
+                .complexity_score(state.selected_fragments()[&test_source(7)].root)?,
             1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_state_keeps_same_local_id_from_distinct_data_sections() -> Result<()> {
+        let body_scan = vec![
+            SourceSolidSummary {
+                source: test_source_in(0, 7),
+                faces: 0,
+                edges: 0,
+                closure_entities: 0,
+            },
+            SourceSolidSummary {
+                source: test_source_in(1, 7),
+                faces: 0,
+                edges: 0,
+                closure_entities: 0,
+            },
+        ];
+        let mut state = WholeSolidRecoveryState::new(&body_scan);
+        assert_eq!(
+            state.add_candidates([
+                qualified_fragment_in(0, constructive_fragment(7, 1)?),
+                qualified_fragment_in(1, constructive_fragment(7, 1)?),
+            ])?,
+            2
+        );
+        assert_eq!(state.selected_fragments().len(), 2);
+        assert!(state.semantically_unrecovered_sources().is_empty());
+        assert!(
+            state
+                .selected_fragments()
+                .contains_key(&test_source_in(0, 7))
+        );
+        assert!(
+            state
+                .selected_fragments()
+                .contains_key(&test_source_in(1, 7))
         );
         Ok(())
     }
@@ -1710,17 +1903,97 @@ mod tests {
     fn recovery_state_rejects_candidate_for_unknown_solid() -> Result<()> {
         let report = report_with_unrecovered(&[7]);
         let mut state = WholeSolidRecoveryState::new(&report.body_scan.solids);
-        let result = state.add_candidates([constructive_fragment(8, 1)?]);
+        let result = state.add_candidates([qualified_fragment(constructive_fragment(8, 1)?)]);
         let Err(error) = result else {
             bail!("unknown source solid unexpectedly succeeded");
         };
-        assert!(error.to_string().contains("missing solid #8"));
+        assert!(error.to_string().contains("missing source solid"));
+        Ok(())
+    }
+
+    const DUPLICATE_SOLID_ID_MULTI_DATA: &[u8] = br"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('duplicate-id regression'),'1');
+FILE_NAME('duplicate.step','2026-11-02T00:00:00',(''),(''),'step-redox','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=MANIFOLD_SOLID_BREP('',#2);
+#2=CLOSED_SHELL('',());
+ENDSEC;
+DATA;
+#1=MANIFOLD_SOLID_BREP('',#2);
+#2=CLOSED_SHELL('',());
+ENDSEC;
+END-ISO-10303-21;
+";
+
+    #[test]
+    fn duplicate_solid_ids_in_distinct_data_sections_remain_distinct_sources() -> Result<()> {
+        let report = recover_complete_ir_bytes(DUPLICATE_SOLID_ID_MULTI_DATA)?;
+        assert_eq!(report.schema, COMPLETE_IR_SCHEMA);
+        assert_eq!(report.body_count, 2);
+        assert_eq!(report.unrecovered_solid_count, 2);
+        let sources = report
+            .body_scan
+            .solids
+            .iter()
+            .map(|solid| solid.source)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec![
+                SourceEntity {
+                    data_section: 0,
+                    ordinal: 0,
+                    id: 1,
+                },
+                SourceEntity {
+                    data_section: 1,
+                    ordinal: 0,
+                    id: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            report
+                .unrecovered_solids
+                .iter()
+                .map(|solid| solid.source)
+                .collect::<Vec<_>>(),
+            sources
+        );
         Ok(())
     }
 
     #[cfg(feature = "cad-kernel-monstertruck")]
     #[test]
-    fn kernel_complete_ir_v10_attaches_parser_neutral_source_load_evidence() -> Result<()> {
+    fn kernel_complete_ir_handles_duplicate_solid_ids_across_data_sections() -> Result<()> {
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
+        let report = recover_complete_ir_with_kernel_bytes(DUPLICATE_SOLID_ID_MULTI_DATA, &kernel)?;
+        assert_eq!(report.schema, KERNEL_COMPLETE_IR_SCHEMA);
+        assert_eq!(report.body_count, 2);
+        assert_eq!(report.unrecovered_solid_count, 2);
+        let evidence = report
+            .kernel_source_load
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("kernel v11 omitted source-load evidence"))?;
+        assert_eq!(evidence.sections.len(), 2);
+        assert_eq!(evidence.solids.len(), 2);
+        assert_eq!(
+            evidence
+                .solids
+                .iter()
+                .map(|solid| (solid.source.data_section, solid.source.id))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (1, 1)]
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    #[test]
+    fn kernel_complete_ir_v11_attaches_parser_neutral_source_load_evidence() -> Result<()> {
         let input = include_bytes!("../validation/fixtures/production_radial_slot.step");
         let parser_only = recover_complete_ir_bytes(input)?;
         assert_eq!(parser_only.schema, COMPLETE_IR_SCHEMA);
@@ -1737,14 +2010,14 @@ mod tests {
         let evidence = kernel_report
             .kernel_source_load
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v10 omitted source-load evidence"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v11 omitted source-load evidence"))?;
         assert_eq!(evidence.sections.len(), 1);
         let solid = evidence
             .solids
             .iter()
             .find(|solid| solid.source.id == 15_385)
             .ok_or_else(|| anyhow::anyhow!("missing source-load evidence for solid #15385"))?;
-        assert_eq!(solid.source.data_section, Some(0));
+        assert_eq!(solid.source.data_section, 0);
         assert!(solid.failure.is_none());
         assert_eq!(
             solid.boundaries.first().map(|boundary| boundary.role),
@@ -1778,7 +2051,7 @@ mod tests {
         assert_eq!(report.semantically_recovered_solid_count, 0);
         assert_eq!(report.extrusion_core_unions, Vec::new());
         assert_eq!(report.kernel_recovery_failures.len(), 1);
-        assert_eq!(report.kernel_recovery_failures[0].solid_id, 7);
+        assert_eq!(report.kernel_recovery_failures[0].source.id, 7);
         Ok(())
     }
 
@@ -1790,7 +2063,7 @@ mod tests {
         assert_eq!(report.unrecovered_solid_count, 1);
         assert_eq!(report.semantically_recovered_solid_count, 0);
         assert_eq!(report.kernel_recovery_failures.len(), 1);
-        assert_eq!(report.kernel_recovery_failures[0].solid_id, 7);
+        assert_eq!(report.kernel_recovery_failures[0].source.id, 7);
     }
 
     #[test]

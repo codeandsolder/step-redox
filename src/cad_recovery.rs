@@ -191,11 +191,14 @@ fn compose_extrusion_core_union_model(
 /// carriers, unproven edge loci, disconnected kernel results, or any signature
 /// mismatch return `Ok(None)` rather than manufacturing semantic IR.
 ///
+/// `data_section` is the zero-based DATA-section index in `source_step`.
+///
 /// # Errors
-/// Returns an error for malformed API input, STEP parsing failures, invalid CAD IR,
-/// or a backend evaluation/serialization failure.
+/// Returns an error for malformed API input, a missing DATA section, STEP parsing failures,
+/// invalid CAD IR, or a backend evaluation/serialization failure.
 pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
     source_step: &[u8],
+    data_section: usize,
     solid_id: u64,
     cap_face_ids: &[[u64; 2]],
     kernel: &K,
@@ -224,10 +227,10 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
     }
 
     let source = ParsedExchange::parse(source_step)?.exchange;
-    if source.data.len() != 1 {
-        bail!("extrusion-core union admission currently requires exactly one DATA section");
-    }
-    let entities = &source.data[0].entities;
+    let Some(section) = source.data.get(data_section) else {
+        bail!("extrusion-core union DATA section {data_section} does not exist");
+    };
+    let entities = &section.entities;
     let index = build_index(entities);
     let Some(source_face_ids) = crate::brep::solid_face_ids(solid_id, entities, &index) else {
         return Ok(None);
@@ -317,23 +320,26 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
 /// [`recover_proven_extrusion_core_union_fragment`] and its complete analytic
 /// source/rebuild boundary proof.
 ///
+/// `data_section` is the zero-based DATA-section index in `source_step`.
+///
 /// # Errors
-/// Returns an error for malformed STEP input or when the canonical full-set
-/// backend evaluation fails and no exact single-omission alternative succeeds.
-/// Failures from exploratory omission attempts do not turn an otherwise clean
-/// semantic refusal into an error.
+/// Returns an error for malformed STEP input, a missing DATA section, or when the canonical
+/// full-set backend evaluation fails and no exact single-omission alternative succeeds.
+/// Failures from exploratory omission attempts do not turn an otherwise clean semantic refusal
+/// into an error.
 pub fn recover_auto_proven_extrusion_core_union_fragment<K: CadKernel>(
     source_step: &[u8],
+    data_section: usize,
     solid_id: u64,
     kernel: &K,
 ) -> Result<Option<CadFragment>> {
     const MAX_SINGLE_OMISSION_CANDIDATES: usize = 8;
 
     let source = ParsedExchange::parse(source_step)?.exchange;
-    if source.data.len() != 1 {
-        bail!("automatic extrusion-core union recovery requires exactly one DATA section");
-    }
-    let entities = &source.data[0].entities;
+    let Some(section) = source.data.get(data_section) else {
+        bail!("automatic extrusion-core union DATA section {data_section} does not exist");
+    };
+    let entities = &section.entities;
     let index = build_index(entities);
     let mut cap_pairs =
         crate::solid_extrusions::detect_extrusion_core_candidates_with_index(entities, &index)
@@ -353,6 +359,7 @@ pub fn recover_auto_proven_extrusion_core_union_fragment<K: CadKernel>(
 
     let remembered_error = match recover_proven_extrusion_core_union_fragment(
         source_step,
+        data_section,
         solid_id,
         &cap_pairs,
         kernel,
@@ -374,7 +381,13 @@ pub fn recover_auto_proven_extrusion_core_union_fragment<K: CadKernel>(
             .filter(|(index, _)| *index != omitted)
             .map(|(_, pair)| *pair)
             .collect::<Vec<_>>();
-        match recover_proven_extrusion_core_union_fragment(source_step, solid_id, &subset, kernel) {
+        match recover_proven_extrusion_core_union_fragment(
+            source_step,
+            data_section,
+            solid_id,
+            &subset,
+            kernel,
+        ) {
             Ok(Some(fragment)) => {
                 if admitted.is_some() {
                     // Multiple exact constructions are semantically valid but this
