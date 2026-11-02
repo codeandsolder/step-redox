@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     model.add_root(body)?;
 
     let kcl_text = validate_kcl(&emit_kcl(&model)?)?;
-    let kernel = MonstertruckKernel;
+    let kernel = MonstertruckKernel::project_standard();
     let evaluated = kernel.evaluate(&model, body)?;
     let summary = kernel.summarize(&evaluated);
     if !summary.geometrically_consistent {
