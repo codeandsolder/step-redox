@@ -240,6 +240,15 @@ fn boundary_feature_peel_patch(
     peel: &crate::planar_features::BoundaryFeaturePeelPlan,
     provenance: &crate::kernel_source_load::KernelTopologyProvenance,
 ) -> Result<KernelTopologyPatch> {
+    let source_shell = crate::brep::manifold_shell(source.id, entities, index)
+        .with_context(|| format!("source solid #{} has no readable shell", source.id))?;
+    if peel
+        .shell_face_removals
+        .iter()
+        .any(|removal| removal.shell_id != source_shell)
+    {
+        bail!("boundary peel contains removals from a different source shell");
+    }
     let source_faces = crate::brep::solid_face_ids(source.id, entities, index)
         .with_context(|| {
             format!(
@@ -335,6 +344,12 @@ fn boundary_feature_peel_patch(
             .iter()
             .filter(|loop_| remove_bounds.contains(&loop_.bound_id))
         {
+            if loop_.outer {
+                bail!(
+                    "boundary peel cannot retire outer bound #{}",
+                    loop_.bound_id
+                );
+            }
             for edge in &loop_.edges {
                 let Some(users) = edge_faces.get(&edge.edge_id) else {
                     bail!("interface edge #{} has no source-face users", edge.edge_id);

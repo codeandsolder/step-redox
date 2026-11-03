@@ -1030,7 +1030,19 @@ pub fn plan_boundary_feature_family_peel(
     let mut stats = BoundaryFeaturePeelStats::default();
 
     for family in selected {
+        let shell_faces = ref_list_param(family.shell_id, 1, entities, index)
+            .ok_or_else(|| {
+                anyhow::anyhow!("feature shell #{} has no readable faces", family.shell_id)
+            })?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         for &host in &family.host_face_ids {
+            if !shell_faces.contains(&host) {
+                bail!(
+                    "feature host face #{host} does not belong to shell #{}",
+                    family.shell_id
+                );
+            }
             let Some(bounds) = ref_list_param(host, 1, entities, index) else {
                 bail!("feature host face #{host} has no readable bounds");
             };
@@ -1052,6 +1064,12 @@ pub fn plan_boundary_feature_family_peel(
 
         for member in &family.members {
             for &face in &member.face_ids {
+                if !shell_faces.contains(&face) {
+                    bail!(
+                        "feature face #{face} does not belong to shell #{}",
+                        family.shell_id
+                    );
+                }
                 if !seen_faces.insert(face) {
                     bail!("feature peel candidates overlap at face #{face}");
                 }
@@ -2003,7 +2021,19 @@ mod tests {
             }
         }
 
-        let entities = vec![host_face(10, &[100, 101, 102])];
+        let entities = vec![
+            host_face(10, &[100, 101, 102]),
+            EntityInstance::Simple {
+                id: 1,
+                record: Record {
+                    name: "CLOSED_SHELL".to_owned(),
+                    parameter: Parameter::List(vec![
+                        Parameter::String(String::new()),
+                        Parameter::List([10, 20, 30].into_iter().map(entity_ref).collect()),
+                    ]),
+                },
+            },
+        ];
         let index = build_index(&entities);
         let family = |face_id: u64, bound_id: u64| BoundaryFeatureFamilyEvidence {
             shell_id: 1,
@@ -2029,6 +2059,11 @@ mod tests {
         let before = entities.clone();
         let plan = plan_boundary_feature_family_peel(&entities, &index, &report, &[0, 1])?;
         assert_eq!(entities, before);
+        let invalid = BoundaryFeatureDiagnostics {
+            families: vec![family(999, 102)],
+            ..BoundaryFeatureDiagnostics::default()
+        };
+        assert!(plan_boundary_feature_family_peel(&entities, &index, &invalid, &[0]).is_err());
         assert_eq!(
             plan.shell_face_removals,
             vec![BoundaryFeatureShellFaceRemoval {
