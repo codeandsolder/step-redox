@@ -2457,6 +2457,107 @@ END-ISO-10303-21;
 
     #[cfg(feature = "cad-kernel-monstertruck")]
     #[test]
+    fn kernel_v15_square_boss_peel_has_complete_source_and_kernel_proofs() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
+        let source_load = kernel.inspect_source_step(input)?;
+        let [loaded] = source_load.solids.as_slice() else {
+            bail!("single-boss fixture must import as exactly one source solid");
+        };
+        let provenance = loaded
+            .topology_provenance
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("boss fixture did not retain kernel StableIds"))?;
+        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+        let section = &exchange.data[loaded.source.data_section];
+        let index = crate::step_graph::build_index(&section.entities);
+        let shell = crate::brep::manifold_shell(loaded.source.id, &section.entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("boss fixture has no solid shell"))?;
+        let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
+            &section.entities,
+            &index,
+            &HashSet::from([shell]),
+        );
+        let selected = crate::planar_features::leaf_feature_family_indices(&report.families);
+        assert_eq!(
+            report
+                .families
+                .iter()
+                .filter(|family| {
+                    family.polarity == FeaturePolarity::Additive && family.faces_per_instance == 5
+                })
+                .count(),
+            1,
+            "unexpected boss families: {report:?}"
+        );
+        let targets = LocalRecoveryTargets::from_solids(
+            &BTreeSet::from([loaded.source.id]),
+            &section.entities,
+            &index,
+        )?;
+        let reduction = SectionReductionState::new(&section.entities, &index);
+        let prepared = prepare_boundary_feature_reduction(
+            &reduction,
+            &targets,
+            &HashSet::from([shell]),
+            &report,
+            &selected,
+            0,
+        )?;
+        assert_eq!(
+            prepared.family_indices.len(),
+            1,
+            "boss evidence did not produce exactly one constructive tool: {report:?}"
+        );
+        let patch = plan_source_boundary_feature_peel_patch(
+            input,
+            loaded.source,
+            &report,
+            &prepared.family_indices,
+            provenance,
+        )?;
+        assert_eq!(patch.remove_faces.len(), 5);
+        assert_eq!(patch.face_boundary_replacements.len(), 1);
+        assert_eq!(patch.require_unused_edges.len(), 4);
+        let healed = kernel.edit_source_topology(input, loaded.source, &[patch])?;
+        let healed_report = kernel.inspect_source_step(healed.as_bytes())?;
+        assert_eq!(healed_report.solids.len(), 1);
+        let host = recognize_single_healed_host(&healed)?
+            .ok_or_else(|| anyhow::anyhow!("boss peel did not expose an analytic box host"))?;
+        assert!(matches!(
+            host.source,
+            CadFragmentSource::SolidExtrusion { .. }
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    #[test]
+    fn kernel_v15_replays_square_boss_through_complete_ir() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let kernel = crate::cad_kernel::monstertruck::MonstertruckKernel::project_standard();
+        let report = recover_complete_ir_with_kernel_bytes(input, &kernel)?;
+        assert_eq!(report.schema, KERNEL_COMPLETE_IR_SCHEMA);
+        assert_eq!(
+            report.kernel_recovery_failures,
+            Vec::<KernelRecoveryFailure>::new()
+        );
+        assert_eq!(report.unrecovered_solid_count, 0);
+        assert_eq!(report.boundary_feature_composites.len(), 1);
+        assert!(matches!(
+            report.boundary_feature_composites[0].fragment.source,
+            CadFragmentSource::BoundaryFeatureComposite {
+                passes: 1,
+                feature_families: 1,
+                feature_instances: 1,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    #[test]
     fn kernel_v14_owns_coplanar_normalization_without_parser_topology_mutation() -> Result<()> {
         let input = include_bytes!("../validation/fixtures/coplanar_partitioned_extrusion.step");
         let parser = recover_complete_ir_bytes(input)?;
