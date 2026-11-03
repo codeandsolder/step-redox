@@ -57,6 +57,16 @@ pub struct ReducedSolid {
     next_virtual_id: u64,
 }
 
+/// Pure proof result for one representation-only coplanar face merge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoplanarFaceMergePlan {
+    pub canonical_face_id: u64,
+    pub remove_face_ids: Vec<u64>,
+    pub boundary: Vec<OrientedEdgeUse>,
+    pub internal_edge_ids: Vec<u64>,
+    pub max_residual_mm: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct VirtualSegmentIds {
     start_vertex: u64,
@@ -132,7 +142,12 @@ impl ReducedSolid {
         true
     }
 
-    fn coalesce_coplanar_faces_inner(&mut self) -> bool {
+    /// Prove every representation-only coplanar face merge available in this solid.
+    ///
+    /// The returned plans are read-only: they describe the canonical retained face, the complete
+    /// merged boundary, redundant faces, and internal shared seams. Mutation is deliberately left
+    /// to the caller so kernel-backed recovery can execute the same proof on authoritative topology.
+    pub fn plan_coplanar_face_merges(&self) -> Vec<CoplanarFaceMergePlan> {
         let mut edge_faces = HashMap::<u64, BTreeSet<u64>>::new();
         for face in self.faces.values() {
             for edge in face.loop_edges() {
@@ -160,12 +175,9 @@ impl ReducedSolid {
             adjacency.entry(first_id).or_default().insert(second_id);
             adjacency.entry(second_id).or_default().insert(first_id);
         }
-        if adjacency.is_empty() {
-            return false;
-        }
 
         let mut seen = BTreeSet::new();
-        let mut components = Vec::<BTreeSet<u64>>::new();
+        let mut merge_plans = Vec::new();
         for &root in adjacency.keys() {
             if seen.contains(&root) {
                 continue;
@@ -181,21 +193,22 @@ impl ReducedSolid {
                     stack.extend(neighbors.iter().copied());
                 }
             }
-            if component.len() > 1 {
-                components.push(component);
+            if component.len() <= 1 {
+                continue;
             }
-        }
-
-        let mut changed = false;
-        for component in components {
-            let Some((canonical_id, boundary)) =
+            let Some((canonical_face_id, boundary)) =
                 coplanar_component_boundary(&component, &self.faces, &edge_faces)
             else {
                 continue;
             };
-            let Some((bound_id, loop_id)) = self.allocate_loop_ids() else {
-                continue;
-            };
+            let mut internal_edge_ids = edge_faces
+                .iter()
+                .filter_map(|(&edge_id, users)| {
+                    (users.len() == 2 && users.iter().all(|user| component.contains(user)))
+                        .then_some(edge_id)
+                })
+                .collect::<Vec<_>>();
+            internal_edge_ids.sort_unstable();
             let max_residual_mm = component
                 .iter()
                 .filter_map(|face_id| match self.faces.get(face_id)?.surface {
@@ -203,23 +216,43 @@ impl ReducedSolid {
                     _ => None,
                 })
                 .fold(0.0_f64, f64::max);
-            let Some(canonical) = self.faces.get_mut(&canonical_id) else {
+            merge_plans.push(CoplanarFaceMergePlan {
+                canonical_face_id,
+                remove_face_ids: component
+                    .iter()
+                    .copied()
+                    .filter(|&face_id| face_id != canonical_face_id)
+                    .collect(),
+                boundary,
+                internal_edge_ids,
+                max_residual_mm,
+            });
+        }
+        merge_plans
+    }
+
+    fn coalesce_coplanar_faces_inner(&mut self) -> bool {
+        let plans = self.plan_coplanar_face_merges();
+        let mut changed = false;
+        for plan in plans {
+            let Some((bound_id, loop_id)) = self.allocate_loop_ids() else {
+                continue;
+            };
+            let Some(canonical) = self.faces.get_mut(&plan.canonical_face_id) else {
                 continue;
             };
             if let SurfaceSupport::Plane(ref mut plane) = canonical.surface {
-                plane.max_residual_mm = plane.max_residual_mm.max(max_residual_mm);
+                plane.max_residual_mm = plane.max_residual_mm.max(plan.max_residual_mm);
             }
             canonical.loops = vec![FaceLoop {
                 bound_id,
                 loop_id,
                 outer: true,
                 orientation: true,
-                edges: boundary,
+                edges: plan.boundary,
             }];
-            for face_id in component {
-                if face_id != canonical_id {
-                    self.faces.remove(&face_id);
-                }
+            for face_id in plan.remove_face_ids {
+                self.faces.remove(&face_id);
             }
             changed = true;
         }

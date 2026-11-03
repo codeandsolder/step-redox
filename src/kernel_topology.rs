@@ -94,6 +94,13 @@ pub struct KernelFaceSplice {
     pub replacement: Vec<KernelPatchEdgeUse>,
 }
 
+/// Replace the complete boundary-wire set of one retained face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelFaceBoundaryReplacement {
+    pub face: KernelTopologyId,
+    pub boundaries: Vec<Vec<KernelPatchEdgeUse>>,
+}
+
 /// Fully normalized topology edit for one imported source-solid boundary shell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KernelTopologyPatch {
@@ -102,6 +109,7 @@ pub struct KernelTopologyPatch {
     pub new_edges: Vec<KernelNewEdge>,
     pub rewrite_edges: Vec<KernelRetainedEdge>,
     pub face_splices: Vec<KernelFaceSplice>,
+    pub face_boundary_replacements: Vec<KernelFaceBoundaryReplacement>,
     pub require_unused_edges: Vec<KernelTopologyId>,
 }
 
@@ -163,6 +171,101 @@ pub fn plan_source_edge_treatment_patches(
     merge_topology_patches(patches)
 }
 
+/// Normalize representation-only coplanar partitions into one authoritative kernel topology edit.
+///
+/// The parser-side reduced B-rep is used only as a read-only proof view. Each proven component
+/// retains its lowest source face, replaces that face's complete boundary decomposition with the
+/// traced merged outer wire, removes the redundant coplanar faces, and requires every internal seam
+/// edge to become unused before canonical compaction.
+///
+/// # Errors
+/// Returns an error when source identity cannot be resolved or any proven source face/edge lacks a
+/// unique retained kernel topology identity.
+pub fn plan_source_coplanar_normalization_patch(
+    input: &[u8],
+    source: SourceEntity,
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+) -> Result<Option<KernelTopologyPatch>> {
+    let solid = source_reduced_solid(input, source)?;
+    plan_coplanar_normalization_patch(&solid, source.data_section, provenance)
+}
+
+fn plan_coplanar_normalization_patch(
+    solid: &crate::reduced_brep::ReducedSolid,
+    data_section: usize,
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+) -> Result<Option<KernelTopologyPatch>> {
+    let plans = solid.plan_coplanar_face_merges();
+    if plans.is_empty() {
+        return Ok(None);
+    }
+
+    let mut patch = KernelTopologyPatch {
+        remove_faces: Vec::new(),
+        new_vertices: Vec::new(),
+        new_edges: Vec::new(),
+        rewrite_edges: Vec::new(),
+        face_splices: Vec::new(),
+        face_boundary_replacements: Vec::new(),
+        require_unused_edges: Vec::new(),
+    };
+    for plan in plans {
+        patch.remove_faces.extend(
+            plan.remove_face_ids
+                .into_iter()
+                .map(|face_id| topology_face(provenance, data_section, face_id))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        let boundary = plan
+            .boundary
+            .iter()
+            .map(|edge| {
+                Ok(KernelPatchEdgeUse {
+                    edge: KernelPatchEdgeRef::Existing(topology_edge(
+                        provenance,
+                        data_section,
+                        edge.edge_id,
+                    )?),
+                    orientation: edge.parameter_forward == edge.curve_same_sense,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        patch
+            .face_boundary_replacements
+            .push(KernelFaceBoundaryReplacement {
+                face: topology_face(provenance, data_section, plan.canonical_face_id)?,
+                boundaries: vec![boundary],
+            });
+        patch.require_unused_edges.extend(
+            plan.internal_edge_ids
+                .into_iter()
+                .map(|edge_id| topology_edge(provenance, data_section, edge_id))
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+    Ok(Some(patch))
+}
+
+fn topology_edge(
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+    data_section: usize,
+    source_id: u64,
+) -> Result<KernelTopologyId> {
+    provenance
+        .edge_for_source_id(data_section, source_id)
+        .with_context(|| format!("source edge #{source_id} has no unique kernel StableId"))
+}
+
+fn topology_face(
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+    data_section: usize,
+    source_id: u64,
+) -> Result<KernelTopologyId> {
+    provenance
+        .face_for_source_id(data_section, source_id)
+        .with_context(|| format!("source face #{source_id} has no unique kernel StableId"))
+}
+
 fn source_reduced_solid(
     input: &[u8],
     source: SourceEntity,
@@ -192,6 +295,7 @@ fn merge_topology_patches(patches: Vec<KernelTopologyPatch>) -> Result<KernelTop
         new_edges: Vec::new(),
         rewrite_edges: Vec::new(),
         face_splices: Vec::new(),
+        face_boundary_replacements: Vec::new(),
         require_unused_edges: Vec::new(),
     };
     let mut removed_faces = BTreeSet::new();
@@ -236,6 +340,23 @@ fn merge_topology_patches(patches: Vec<KernelTopologyPatch>) -> Result<KernelTop
                 }
                 splice
             }));
+        merged
+            .face_boundary_replacements
+            .extend(
+                patch
+                    .face_boundary_replacements
+                    .into_iter()
+                    .map(|mut replacement| {
+                        for wire in &mut replacement.boundaries {
+                            for edge_use in wire {
+                                if let KernelPatchEdgeRef::New(index) = edge_use.edge {
+                                    edge_use.edge = KernelPatchEdgeRef::New(edge_offset + index);
+                                }
+                            }
+                        }
+                        replacement
+                    }),
+            );
         for edge in patch.require_unused_edges {
             if required_unused.insert(edge) {
                 merged.require_unused_edges.push(edge);
@@ -374,6 +495,7 @@ mod tests {
             new_edges: Vec::new(),
             rewrite_edges: Vec::new(),
             face_splices: Vec::new(),
+            face_boundary_replacements: Vec::new(),
             require_unused_edges: Vec::new(),
         }
     }
@@ -470,6 +592,149 @@ mod tests {
         assert_eq!(
             merged.face_splices[0].replacement[0].edge,
             KernelPatchEdgeRef::New(1)
+        );
+        Ok(())
+    }
+    fn source_entity(id: u64) -> SourceEntity {
+        SourceEntity {
+            data_section: 0,
+            ordinal: usize::try_from(id).unwrap_or(0),
+            id,
+        }
+    }
+
+    fn planar_edge(
+        id: u64,
+        vertices: (u64, u64),
+        points: ([f64; 3], [f64; 3]),
+        forward: bool,
+    ) -> crate::brep::OrientedEdgeUse {
+        let (start_vertex, end_vertex, start_mm, end_mm) = if forward {
+            (vertices.0, vertices.1, points.0, points.1)
+        } else {
+            (vertices.1, vertices.0, points.1, points.0)
+        };
+        crate::brep::OrientedEdgeUse {
+            oriented_edge_id: id + 10_000,
+            edge_id: id,
+            curve_id: id + 20_000,
+            curve_same_sense: true,
+            parameter_forward: forward,
+            start_vertex,
+            end_vertex,
+            start_mm,
+            end_mm,
+            support: crate::brep::CurveSupport::Line(crate::brep::LineSupport {
+                origin_mm: points.0,
+                direction: [
+                    points.1[0] - points.0[0],
+                    points.1[1] - points.0[1],
+                    points.1[2] - points.0[2],
+                ],
+            }),
+        }
+    }
+
+    fn planar_face(
+        id: u64,
+        edges: Vec<crate::brep::OrientedEdgeUse>,
+    ) -> crate::reduced_brep::ReducedFace {
+        crate::reduced_brep::ReducedFace {
+            id,
+            surface: crate::brep::SurfaceSupport::Plane(crate::brep::PlaneSupport {
+                origin_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                max_residual_mm: 0.0,
+            }),
+            surface_forward: true,
+            loops: vec![crate::brep::FaceLoop {
+                bound_id: id + 30_000,
+                loop_id: id + 40_000,
+                outer: true,
+                orientation: true,
+                edges,
+            }],
+        }
+    }
+
+    #[test]
+    fn coplanar_plan_replaces_complete_canonical_boundary_and_retires_seam() -> Result<()> {
+        let p0 = [0.0, 0.0, 0.0];
+        let p1 = [1.0, 0.0, 0.0];
+        let p2 = [1.0, 1.0, 0.0];
+        let p3 = [0.0, 1.0, 0.0];
+        let p4 = [2.0, 0.0, 0.0];
+        let p5 = [2.0, 1.0, 0.0];
+        let first = planar_face(
+            10,
+            vec![
+                planar_edge(100, (1, 2), (p0, p1), true),
+                planar_edge(102, (2, 3), (p1, p2), true),
+                planar_edge(101, (3, 4), (p2, p3), true),
+                planar_edge(103, (4, 1), (p3, p0), true),
+            ],
+        );
+        let second = planar_face(
+            11,
+            vec![
+                planar_edge(104, (2, 5), (p1, p4), true),
+                planar_edge(105, (5, 6), (p4, p5), true),
+                planar_edge(106, (6, 3), (p5, p2), true),
+                planar_edge(102, (2, 3), (p1, p2), false),
+            ],
+        );
+        let solid = crate::reduced_brep::ReducedSolid::from_test_faces(500, vec![first, second]);
+        let provenance = crate::kernel_source_load::KernelTopologyProvenance {
+            vertices: Vec::new(),
+            edges: (100..=106)
+                .map(
+                    |source_id| crate::kernel_source_load::KernelTopologyEntityProvenance {
+                        source: source_entity(source_id),
+                        topology_id: id(source_id + 1_000),
+                    },
+                )
+                .collect(),
+            faces: [10, 11]
+                .into_iter()
+                .map(
+                    |source_id| crate::kernel_source_load::KernelFaceTopologyProvenance {
+                        source: None,
+                        shell_member: Some(source_entity(source_id)),
+                        topology_id: id(source_id + 2_000),
+                    },
+                )
+                .collect(),
+        };
+
+        let patch = plan_coplanar_normalization_patch(&solid, 0, &provenance)?
+            .ok_or_else(|| anyhow::anyhow!("coplanar component was not planned"))?;
+        assert_eq!(patch.remove_faces, vec![id(2_011)]);
+        assert_eq!(patch.require_unused_edges, vec![id(1_102)]);
+        assert_eq!(patch.face_boundary_replacements.len(), 1);
+        let replacement = &patch.face_boundary_replacements[0];
+        assert_eq!(replacement.face, id(2_010));
+        let edge_ids = replacement.boundaries[0]
+            .iter()
+            .map(|edge_use| match edge_use.edge {
+                KernelPatchEdgeRef::Existing(id) => id,
+                KernelPatchEdgeRef::New(_) => KernelTopologyId::from_raw(0),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edge_ids,
+            vec![
+                id(1_100),
+                id(1_104),
+                id(1_105),
+                id(1_106),
+                id(1_101),
+                id(1_103)
+            ]
+        );
+        assert!(
+            replacement.boundaries[0]
+                .iter()
+                .all(|edge_use| edge_use.orientation)
         );
         Ok(())
     }

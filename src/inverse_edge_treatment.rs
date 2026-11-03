@@ -142,6 +142,7 @@ fn plan_segment_patch(
         }],
         rewrite_edges,
         face_splices,
+        face_boundary_replacements: Vec::new(),
         require_unused_edges: topology_edges(
             provenance,
             data_section,
@@ -495,6 +496,7 @@ fn plan_circle_patch(
         new_edges,
         rewrite_edges: Vec::new(),
         face_splices,
+        face_boundary_replacements: Vec::new(),
         require_unused_edges: topology_edges(
             provenance,
             data_section,

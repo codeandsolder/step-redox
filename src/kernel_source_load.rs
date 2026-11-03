@@ -254,8 +254,8 @@ mod monstertruck_adapter {
     };
     use crate::cad_kernel::monstertruck::MonstertruckKernel;
     use crate::kernel_topology::{
-        KernelFaceSplice, KernelPatchCurve, KernelPatchEdgeRef, KernelPatchVertexRef,
-        KernelTopologyPatch, SourceTopologyEditor,
+        KernelFaceBoundaryReplacement, KernelFaceSplice, KernelPatchCurve, KernelPatchEdgeRef,
+        KernelPatchVertexRef, KernelTopologyPatch, SourceTopologyEditor,
     };
     use crate::step_document::StepSection;
     use crate::{step_graph, step_io::ParsedExchange};
@@ -270,8 +270,8 @@ mod monstertruck_adapter {
     use monstertruck_io::step::save::{self, CompleteStepDisplay};
     use monstertruck_topology::StableId;
     use monstertruck_topology::compressed_surgery::{
-        CompressedFaceSplice, CompressedTrimmedTopologyPatch, NewCompressedEdge, PatchEdgeRef,
-        PatchEdgeUse, PatchVertexRef, RetainedCompressedEdge,
+        CompressedFaceBoundaryReplacement, CompressedFaceSplice, CompressedTrimmedTopologyPatch,
+        NewCompressedEdge, PatchEdgeRef, PatchEdgeUse, PatchVertexRef, RetainedCompressedEdge,
     };
 
     impl SourceStepLoadInspector for MonstertruckKernel {
@@ -501,6 +501,11 @@ mod monstertruck_adapter {
                 .iter()
                 .map(translate_face_splice)
                 .collect(),
+            face_boundary_replacements: patch
+                .face_boundary_replacements
+                .iter()
+                .map(translate_face_boundary_replacement)
+                .collect(),
             require_unused_edges: patch
                 .require_unused_edges
                 .iter()
@@ -520,6 +525,26 @@ mod monstertruck_adapter {
         match reference {
             KernelPatchEdgeRef::Existing(id) => PatchEdgeRef::Existing(StableId::new(id.raw())),
             KernelPatchEdgeRef::New(index) => PatchEdgeRef::New(index),
+        }
+    }
+
+    fn translate_face_boundary_replacement(
+        replacement: &KernelFaceBoundaryReplacement,
+    ) -> CompressedFaceBoundaryReplacement {
+        CompressedFaceBoundaryReplacement {
+            face: StableId::new(replacement.face.raw()),
+            boundaries: replacement
+                .boundaries
+                .iter()
+                .map(|wire| {
+                    wire.iter()
+                        .map(|edge_use| PatchEdgeUse {
+                            edge: translate_edge_ref(edge_use.edge),
+                            orientation: edge_use.orientation,
+                        })
+                        .collect()
+                })
+                .collect(),
         }
     }
 

@@ -71,6 +71,9 @@ pub enum CadFragmentSource {
         solid_id: u64,
         treatment_face_ids: Vec<u64>,
     },
+    CoplanarNormalized {
+        solid_id: u64,
+    },
 }
 
 /// Compose two or more already-recovered CAD fragments into a union model.
