@@ -2348,8 +2348,8 @@ mod tests {
                 .commit(vec![boundary_reduction_step(7)?], invalid, entities, &index)
                 .is_err()
         );
-        assert!(journal.plans.is_empty());
-        assert!(journal.replay.is_empty());
+        assert_eq!(journal.plans.len(), 0);
+        assert_eq!(journal.replay.len(), 0);
 
         assert!(journal.commit(
             vec![boundary_reduction_step(7)?],

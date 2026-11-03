@@ -1121,7 +1121,7 @@ pub fn plan_boundary_feature_family_peel(
 ///
 /// # Errors
 /// Returns an error if any planned face or bound removal cannot be applied.
-pub(crate) fn materialize_boundary_feature_peel_plans(
+pub fn materialize_boundary_feature_peel_plans(
     source: &[EntityInstance],
     index: &HashMap<u64, usize>,
     plans: &[BoundaryFeaturePeelPlan],
