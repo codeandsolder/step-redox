@@ -505,15 +505,6 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
@@ -557,15 +548,15 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "lock_api"
-version = "0.4.14"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+checksum = "65d91b22da179613dcf4d6ec8349563f52a363f6849e03b00dd0a185ec4a59af"
 dependencies = [
  "scopeguard",
 ]
@@ -596,7 +587,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "monstertruck-assembly"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "monstertruck-core",
  "rayon",
@@ -605,7 +596,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-core"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "cgmath",
  "matext4cgmath",
@@ -617,24 +608,24 @@ dependencies = [
 [[package]]
 name = "monstertruck-derive"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "proc-macro-crate",
  "proc-macro-error",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "monstertruck-fillet"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "ahash",
  "derive_more",
  "getrandom 0.3.4",
- "itertools 0.14.0",
+ "itertools",
  "monstertruck-core",
  "monstertruck-geometry",
  "monstertruck-topology",
@@ -646,7 +637,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-geometry"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -660,7 +651,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-io"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "chrono",
  "derive_more",
@@ -681,11 +672,11 @@ dependencies = [
 [[package]]
 name = "monstertruck-mesh"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "array-macro",
  "bytemuck",
- "itertools 0.14.0",
+ "itertools",
  "monstertruck-core",
  "monstertruck-traits",
  "num-traits",
@@ -698,11 +689,11 @@ dependencies = [
 [[package]]
 name = "monstertruck-meshing"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "array-macro",
  "derive_more",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "monstertruck-core",
  "monstertruck-geometry",
@@ -717,10 +708,10 @@ dependencies = [
 [[package]]
 name = "monstertruck-modeling"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "derive_more",
- "itertools 0.14.0",
+ "itertools",
  "monstertruck-core",
  "monstertruck-fillet",
  "monstertruck-geometry",
@@ -739,10 +730,10 @@ dependencies = [
 [[package]]
 name = "monstertruck-solid"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "derive_more",
- "itertools 0.14.0",
+ "itertools",
  "monstertruck-core",
  "monstertruck-geometry",
  "monstertruck-meshing",
@@ -758,7 +749,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-topology"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -773,7 +764,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-traits"
 version = "0.4.1"
-source = "git+https://github.com/codeandsolder/monstertruck.git?rev=b3e28ce5ac1ca0b985f72d25f1586ea75e604df4#b3e28ce5ac1ca0b985f72d25f1586ea75e604df4"
+source = "git+https://github.com/codeandsolder/monstertruck.git?rev=9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e#9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e"
 dependencies = [
  "getrandom 0.4.3",
  "monstertruck-core",
@@ -839,9 +830,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "parking_lot"
-version = "0.12.5"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+checksum = "a9cf937ca4e1d0b7578784559063422fc39ae7c5a00f02471f2614d5486fd226"
 dependencies = [
  "lock_api",
  "parking_lot_core",
@@ -849,11 +840,10 @@ dependencies = [
 
 [[package]]
 name = "parking_lot_core"
-version = "0.9.12"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+checksum = "9cfff060068cc18aa7815010fcaf80c68c7fb9e85fc7f5c0f9bf142c21d19826"
 dependencies = [
- "cfg-if",
  "libc",
  "redox_syscall",
  "smallvec",
@@ -999,9 +989,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.18"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
 dependencies = [
  "bitflags",
 ]
@@ -1162,7 +1152,7 @@ dependencies = [
  "Inflector",
  "derive-new",
  "derive_more",
- "itertools 0.15.0",
+ "itertools",
  "nom",
  "nom-language",
  "serde",

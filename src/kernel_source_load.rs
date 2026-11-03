@@ -49,7 +49,52 @@ pub struct KernelSourceSolidLoadEvidence {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub boundaries: Vec<KernelBoundaryLoadEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_provenance: Option<KernelTopologyProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<KernelSourceSolidLoadFailure>,
+}
+
+/// Opaque kernel topology identity scoped to one imported solid.
+///
+/// This is deliberately a distinct namespace from STEP entity IDs. Values are
+/// only comparable within the [`KernelSourceSolidLoadEvidence`] that owns them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct KernelTopologyId(u64);
+
+impl KernelTopologyId {
+    #[cfg(feature = "cad-kernel-monstertruck")]
+    const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KernelTopologyEntityProvenance {
+    pub source: SourceEntity,
+    pub topology_id: KernelTopologyId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KernelFaceTopologyProvenance {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceEntity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_member: Option<SourceEntity>,
+    pub topology_id: KernelTopologyId,
+}
+
+/// Source-to-kernel identity journal for topology retained during STEP import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KernelTopologyProvenance {
+    pub vertices: Vec<KernelTopologyEntityProvenance>,
+    pub edges: Vec<KernelTopologyEntityProvenance>,
+    pub faces: Vec<KernelFaceTopologyProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,17 +179,19 @@ pub struct KernelLoadTally {
 mod monstertruck_adapter {
     use super::{
         KernelBoundaryLoadEvidence, KernelBoundaryRole, KernelEntityLoadLoss,
-        KernelEntityLoadLossKind, KernelLoadCategory, KernelLoadCategoryCount, KernelLoadLoss,
-        KernelLoadLossReason, KernelLoadTally, KernelSourceLoadEvidence,
-        KernelSourceSectionLoadEvidence, KernelSourceSolidLoadEvidence,
-        KernelSourceSolidLoadFailure, SourceStepLoadInspector,
+        KernelEntityLoadLossKind, KernelFaceTopologyProvenance, KernelLoadCategory,
+        KernelLoadCategoryCount, KernelLoadLoss, KernelLoadLossReason, KernelLoadTally,
+        KernelSourceLoadEvidence, KernelSourceSectionLoadEvidence, KernelSourceSolidLoadEvidence,
+        KernelSourceSolidLoadFailure, KernelTopologyEntityProvenance, KernelTopologyId,
+        KernelTopologyProvenance, SourceEntity, SourceStepLoadInspector,
     };
     use crate::cad_kernel::monstertruck::MonstertruckKernel;
     use crate::step_document::StepSection;
     use crate::{step_graph, step_io::ParsedExchange};
     use anyhow::Result;
     use monstertruck_io::step::load::{
-        EntityLoadReport, LossCategory, LossReason, LossTally, ShellLoadReport, Table,
+        EntityLoadReport, LossCategory, LossReason, LossTally, ShellLoadReport,
+        StepTopologyProvenance, Table,
     };
 
     impl SourceStepLoadInspector for MonstertruckKernel {
@@ -174,15 +221,17 @@ mod monstertruck_adapter {
                         evidence.solids.push(KernelSourceSolidLoadEvidence {
                             source: source_entity,
                             boundaries: Vec::new(),
+                            topology_provenance: None,
                             failure: Some(KernelSourceSolidLoadFailure::TableEntryUnavailable),
                         });
                         continue;
                     };
 
-                    match table.to_compressed_trimmed_solid_reported(solid) {
-                        Ok((_, reports)) => evidence.solids.push(KernelSourceSolidLoadEvidence {
+                    match table.to_compressed_trimmed_solid_import(solid) {
+                        Ok(import) => evidence.solids.push(KernelSourceSolidLoadEvidence {
                             source: source_entity,
-                            boundaries: reports
+                            boundaries: import
+                                .shell_reports
                                 .iter()
                                 .enumerate()
                                 .map(|(boundary_index, report)| KernelBoundaryLoadEvidence {
@@ -196,11 +245,16 @@ mod monstertruck_adapter {
                                     losses: shell_losses(report, source),
                                 })
                                 .collect(),
+                            topology_provenance: Some(map_topology_provenance(
+                                &import.provenance,
+                                source,
+                            )?),
                             failure: None,
                         }),
                         Err(error) => evidence.solids.push(KernelSourceSolidLoadEvidence {
                             source: source_entity,
                             boundaries: Vec::new(),
+                            topology_provenance: None,
                             failure: Some(KernelSourceSolidLoadFailure::ConversionFailed {
                                 detail: error.to_string(),
                             }),
@@ -218,6 +272,67 @@ mod monstertruck_adapter {
             });
             Ok(evidence)
         }
+    }
+
+    fn map_topology_provenance(
+        provenance: &StepTopologyProvenance,
+        source: StepSection<'_>,
+    ) -> Result<KernelTopologyProvenance> {
+        let map_entity = |entry: &monstertruck_io::step::load::StepEntityProvenance| -> Result<KernelTopologyEntityProvenance> {
+            let source_id = entry.source_id;
+            let stable_id = entry.stable_id;
+            let source = source
+                .entity(source_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("STEP provenance references missing entity #{source_id}")
+                })?
+                .source();
+            Ok(KernelTopologyEntityProvenance {
+                source,
+                topology_id: KernelTopologyId::from_raw(stable_id.raw()),
+            })
+        };
+
+        let vertices = provenance
+            .vertices
+            .iter()
+            .map(&map_entity)
+            .collect::<Result<Vec<_>>>()?;
+        let edges = provenance
+            .edges
+            .iter()
+            .map(&map_entity)
+            .collect::<Result<Vec<_>>>()?;
+        let faces = provenance
+            .faces
+            .iter()
+            .map(|entry| {
+                let map_optional = |id: Option<u64>| -> Result<Option<SourceEntity>> {
+                    id.map(|source_id| {
+                        source
+                            .entity(source_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "STEP face provenance references missing entity #{source_id}"
+                                )
+                            })
+                            .map(crate::step_document::StepEntity::source)
+                    })
+                    .transpose()
+                };
+                Ok(KernelFaceTopologyProvenance {
+                    source: map_optional(entry.source.face_surface_id)?,
+                    shell_member: map_optional(entry.source.shell_member_id)?,
+                    topology_id: KernelTopologyId::from_raw(entry.stable_id.raw()),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(KernelTopologyProvenance {
+            vertices,
+            edges,
+            faces,
+        })
     }
 
     fn entity_losses(
@@ -349,6 +464,7 @@ mod monstertruck_adapter {
                 evidence.solids[0].failure,
                 Some(KernelSourceSolidLoadFailure::TableEntryUnavailable)
             );
+            assert!(evidence.solids[0].topology_provenance.is_none());
 
             let conversion_failure = b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('x'),'1');\nFILE_NAME('a','b',(''),(''),'x','y','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#11=MANIFOLD_SOLID_BREP('bad',#12);\nENDSEC;\nEND-ISO-10303-21;\n";
             let evidence =
@@ -360,6 +476,7 @@ mod monstertruck_adapter {
                 anyhow::bail!("source solid conversion failure was not typed separately");
             };
             assert_ne!(detail, "");
+            assert!(evidence.solids[0].topology_provenance.is_none());
             Ok(())
         }
 
@@ -373,6 +490,30 @@ mod monstertruck_adapter {
                 assert_ne!(solid.boundaries.len(), 0);
                 assert_eq!(solid.boundaries[0].boundary_index, 0);
                 assert_eq!(solid.boundaries[0].role, KernelBoundaryRole::Outer);
+                let provenance = solid
+                    .topology_provenance
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("successful source solid omitted provenance"))?;
+                assert_ne!(provenance.vertices.len(), 0);
+                assert_ne!(provenance.edges.len(), 0);
+                assert_ne!(provenance.faces.len(), 0);
+                assert!(provenance.vertices.iter().all(|entry| {
+                    entry.source.data_section == solid.source.data_section
+                        && entry.topology_id.raw() != 0
+                }));
+                assert!(provenance.edges.iter().all(|entry| {
+                    entry.source.data_section == solid.source.data_section
+                        && entry.topology_id.raw() != 0
+                }));
+                assert!(provenance.faces.iter().all(|entry| {
+                    entry.topology_id.raw() != 0
+                        && entry
+                            .source
+                            .is_none_or(|source| source.data_section == solid.source.data_section)
+                        && entry
+                            .shell_member
+                            .is_none_or(|source| source.data_section == solid.source.data_section)
+                }));
             }
             Ok(())
         }

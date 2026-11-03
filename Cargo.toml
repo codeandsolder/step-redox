@@ -16,10 +16,10 @@ encoding_rs = "0.8.41"
 ruststep = { package = "step-p21", version = "0.1.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "b3e28ce5ac1ca0b985f72d25f1586ea75e604df4", features = ["fillet"], optional = true }
-monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "b3e28ce5ac1ca0b985f72d25f1586ea75e604df4", optional = true }
-monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "b3e28ce5ac1ca0b985f72d25f1586ea75e604df4", optional = true }
-monstertruck-fillet = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "b3e28ce5ac1ca0b985f72d25f1586ea75e604df4", optional = true }
+monstertruck-modeling = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e", features = ["fillet"], optional = true }
+monstertruck-io = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e", optional = true }
+monstertruck-solid = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e", optional = true }
+monstertruck-fillet = { version = "0.4.1", git = "https://github.com/codeandsolder/monstertruck.git", rev = "9df1c23fe3a79ce3b828af43d4cbc8f5f5dff24e", optional = true }
 num-traits = "0.2.19"
 
 [lints.rust]

@@ -22,7 +22,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
-pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v11";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v12";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -1977,7 +1977,7 @@ END-ISO-10303-21;
         let evidence = report
             .kernel_source_load
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v11 omitted source-load evidence"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted source-load evidence"))?;
         assert_eq!(evidence.sections.len(), 2);
         assert_eq!(evidence.solids.len(), 2);
         assert_eq!(
@@ -1993,7 +1993,7 @@ END-ISO-10303-21;
 
     #[cfg(feature = "cad-kernel-monstertruck")]
     #[test]
-    fn kernel_complete_ir_v11_attaches_parser_neutral_source_load_evidence() -> Result<()> {
+    fn kernel_complete_ir_v12_attaches_parser_neutral_topology_provenance() -> Result<()> {
         let input = include_bytes!("../validation/fixtures/production_radial_slot.step");
         let parser_only = recover_complete_ir_bytes(input)?;
         assert_eq!(parser_only.schema, COMPLETE_IR_SCHEMA);
@@ -2010,7 +2010,7 @@ END-ISO-10303-21;
         let evidence = kernel_report
             .kernel_source_load
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v11 omitted source-load evidence"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted source-load evidence"))?;
         assert_eq!(evidence.sections.len(), 1);
         let solid = evidence
             .solids
@@ -2023,6 +2023,32 @@ END-ISO-10303-21;
             solid.boundaries.first().map(|boundary| boundary.role),
             Some(crate::kernel_source_load::KernelBoundaryRole::Outer)
         );
+        let provenance = solid
+            .topology_provenance
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted topology provenance"))?;
+        assert_ne!(provenance.vertices.len(), 0);
+        assert_ne!(provenance.edges.len(), 0);
+        assert_ne!(provenance.faces.len(), 0);
+        assert!(
+            provenance
+                .vertices
+                .iter()
+                .all(|entry| { entry.source.data_section == 0 && entry.topology_id.raw() != 0 })
+        );
+        assert!(
+            provenance
+                .edges
+                .iter()
+                .all(|entry| { entry.source.data_section == 0 && entry.topology_id.raw() != 0 })
+        );
+        assert!(provenance.faces.iter().all(|entry| {
+            entry.topology_id.raw() != 0
+                && entry.source.is_none_or(|source| source.data_section == 0)
+                && entry
+                    .shell_member
+                    .is_none_or(|source| source.data_section == 0)
+        }));
         assert!(
             serde_json::to_value(&kernel_report)?
                 .get("kernel_source_load")
