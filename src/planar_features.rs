@@ -2106,6 +2106,61 @@ mod tests {
     }
 
     #[test]
+    fn boss_fixture_candidate_proves_manifold_interface_and_3d_support() -> anyhow::Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+        let entities = &exchange.data[0].entities;
+        let index = build_index(entities);
+        let contexts = collect_shell_contexts(entities, &index);
+        let [context] = contexts.as_slice() else {
+            bail!("expected exactly one analytic boss source shell");
+        };
+        let topology = ShellTopology::new(context.shell_id, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("missing boss shell topology"))?;
+        let host_face = 53;
+        let frame = plane_frame(host_face, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("missing boss host plane"))?;
+        assert_eq!(frame.outward, [0.0, 0.0, 1.0]);
+        let bounds = ref_list_param(host_face, 1, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("missing boss host bounds"))?;
+        let lookup = host_bound_lookup(&bounds, entities, &index);
+        let hosts = HashSet::from([host_face]);
+        let components = topology.components_without_hosts(&hosts);
+        assert_eq!(components.len(), 2);
+        let mut boss_candidates = 0;
+        for component in components {
+            assert!(topology.component_is_two_manifold_with_hosts(&component, &hosts));
+            let is_boss = component.contains(&94);
+            let interface_edges = topology.interface_edges(&component, host_face);
+            let matching = lookup.get(&edge_set_key(&interface_edges));
+            assert_eq!(matching.map(Vec::len), is_boss.then_some(1));
+            if is_boss {
+                let vertices =
+                    component_vertex_points(&component, &topology.face_edges, entities, &index)
+                        .ok_or_else(|| anyhow::anyhow!("boss vertices missing"))?;
+                assert_eq!(plane_side(&vertices, &frame), PlaneSide::Positive);
+                let center =
+                    bbox_center(&vertices).ok_or_else(|| anyhow::anyhow!("boss center missing"))?;
+                assert!(component_signature(&component, center, entities, &index).is_some());
+            }
+            let candidate = boundary_feature_candidate(
+                context,
+                component,
+                &hosts,
+                &HashMap::from([(host_face, frame.clone())]),
+                &HashMap::from([(host_face, lookup.clone())]),
+                &topology,
+                entities,
+                &index,
+            );
+            assert_eq!(candidate.is_some(), is_boss);
+            boss_candidates += usize::from(candidate.is_some());
+        }
+        assert_eq!(boss_candidates, 1);
+        Ok(())
+    }
+
+    #[test]
     fn plane_side_classifies_protrusions_and_recesses() {
         let frame = PlaneFrame {
             surface_id: 1,

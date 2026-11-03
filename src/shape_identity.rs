@@ -452,6 +452,28 @@ pub fn support_entity_signature(
                 let q = transform_direction(d, quarter);
                 Some(format!("DIR({},{},{})", q[0], q[1], q[2]))
             }
+            // SURFACE_CURVE carries a geometric 3-D curve plus associated
+            // parameter-space PCURVEs. The latter encode exporter-specific
+            // representations of the same locus; their local 2-D frames and
+            // trimming parametrization are not intrinsic 3-D curve geometry.
+            // The face boundary and its traversal already track topology,
+            // so key this support by its defining curve_3d exactly as we key
+            // a direct EDGE_CURVE -> LINE/CIRCLE reference.
+            "SURFACE_CURVE" => {
+                let Parameter::List(params) = &record.parameter else {
+                    return None;
+                };
+                let curve_id = entity_ref_value(params.get(1)?)?;
+                support_entity_signature(
+                    curve_id,
+                    entities,
+                    index,
+                    center,
+                    quarter,
+                    visiting,
+                    depth + 1,
+                )
+            }
             "LINE" => line_support_signature(record, entities, index, center, quarter),
             "CIRCLE" => circle_support_signature(record, entities, index, center, quarter),
             "PLANE" => plane_support_signature(record, entities, index, center, quarter),
@@ -1052,6 +1074,28 @@ pub fn normalized_points(points: &[[f64; 3]], center: [f64; 3], quarter: u8) -> 
         .collect();
     candidate.sort_unstable();
     candidate
+}
+
+#[cfg(test)]
+mod surface_curve_tests {
+    use super::*;
+
+    #[test]
+    fn surface_curve_signs_its_3d_locus_not_the_exporters_pcurves() -> anyhow::Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+        let entities = &exchange.data[0].entities;
+        let index = crate::step_graph::build_index(entities);
+        let signature = |id| {
+            support_entity_signature(id, entities, &index, [0.0; 3], 0, &mut HashSet::new(), 0)
+                .ok_or_else(|| anyhow::anyhow!("missing support signature for #{id}"))
+        };
+        // The exporter emits SURFACE_CURVE #196 around LINE #197, with
+        // PCURVEs in unrelated local 2-D face parametrizations.
+        assert_eq!(signature(196)?, signature(197)?);
+        assert_ne!(signature(196)?, signature(225)?);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
