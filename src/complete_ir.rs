@@ -2206,6 +2206,7 @@ mod tests {
                 tool: constructive_fragment(99, 1)?,
                 source_member: member.clone(),
                 members: vec![member],
+                original_source_ids: true,
             }),
         ))
     }
