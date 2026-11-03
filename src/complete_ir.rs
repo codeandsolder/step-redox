@@ -494,7 +494,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 /// through a supplied CAD kernel plus the independent analytic boundary proof.
 ///
 /// The parser-only [`recover_complete_ir_bytes`] path reports schema v9 and never
-/// invokes a CAD backend. This explicit kernel-backed path reports schema v11,
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v12,
 /// includes parser-neutral source-load evidence,
 /// records admitted extrusion-core unions separately, and leaves any unsupported
 /// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per

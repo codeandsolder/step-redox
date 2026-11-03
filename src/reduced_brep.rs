@@ -102,6 +102,15 @@ impl ReducedSolid {
         self.solid_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_test_faces(solid_id: u64, faces: Vec<ReducedFace>) -> Self {
+        Self {
+            solid_id,
+            faces: faces.into_iter().map(|face| (face.id, face)).collect(),
+            next_virtual_id: 1,
+        }
+    }
+
     pub fn faces(&self) -> impl Iterator<Item = &ReducedFace> {
         self.faces.values()
     }

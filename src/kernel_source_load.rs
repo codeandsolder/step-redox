@@ -63,8 +63,8 @@ pub struct KernelSourceSolidLoadEvidence {
 pub struct KernelTopologyId(u64);
 
 impl KernelTopologyId {
-    #[cfg(feature = "cad-kernel-monstertruck")]
-    const fn from_raw(raw: u64) -> Self {
+    #[cfg(any(test, feature = "cad-kernel-monstertruck"))]
+    pub(crate) const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
@@ -95,6 +95,73 @@ pub struct KernelTopologyProvenance {
     pub vertices: Vec<KernelTopologyEntityProvenance>,
     pub edges: Vec<KernelTopologyEntityProvenance>,
     pub faces: Vec<KernelFaceTopologyProvenance>,
+}
+
+impl KernelTopologyProvenance {
+    fn unique_id(ids: impl Iterator<Item = KernelTopologyId>) -> Option<KernelTopologyId> {
+        let mut ids = ids.collect::<std::collections::BTreeSet<_>>().into_iter();
+        let first = ids.next()?;
+        ids.next().is_none().then_some(first)
+    }
+
+    pub(crate) fn vertex_for_source_id(
+        &self,
+        data_section: usize,
+        source_id: u64,
+    ) -> Option<KernelTopologyId> {
+        Self::unique_id(
+            self.vertices
+                .iter()
+                .filter(|entry| {
+                    entry.source.data_section == data_section && entry.source.id == source_id
+                })
+                .map(|entry| entry.topology_id),
+        )
+    }
+
+    pub(crate) fn edge_for_source_id(
+        &self,
+        data_section: usize,
+        source_id: u64,
+    ) -> Option<KernelTopologyId> {
+        Self::unique_id(
+            self.edges
+                .iter()
+                .filter(|entry| {
+                    entry.source.data_section == data_section && entry.source.id == source_id
+                })
+                .map(|entry| entry.topology_id),
+        )
+    }
+
+    pub(crate) fn face_for_source_id(
+        &self,
+        data_section: usize,
+        source_id: u64,
+    ) -> Option<KernelTopologyId> {
+        let shell_member = Self::unique_id(
+            self.faces
+                .iter()
+                .filter(|entry| {
+                    entry.shell_member.is_some_and(|source| {
+                        source.data_section == data_section && source.id == source_id
+                    })
+                })
+                .map(|entry| entry.topology_id),
+        );
+        shell_member.or_else(|| {
+            Self::unique_id(
+                self.faces
+                    .iter()
+                    .filter(|entry| {
+                        entry.source.is_some_and(|source| {
+                            source.data_section == data_section && source.id == source_id
+                        })
+                    })
+                    .map(|entry| entry.topology_id),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,12 +253,25 @@ mod monstertruck_adapter {
         KernelTopologyProvenance, SourceEntity, SourceStepLoadInspector,
     };
     use crate::cad_kernel::monstertruck::MonstertruckKernel;
+    use crate::kernel_topology::{
+        KernelFaceSplice, KernelPatchCurve, KernelPatchEdgeRef, KernelPatchVertexRef,
+        KernelTopologyPatch, SourceTopologyEditor,
+    };
     use crate::step_document::StepSection;
     use crate::{step_graph, step_io::ParsedExchange};
     use anyhow::Result;
+    use monstertruck_io::step::load::step_geometry::{
+        Conic3D, Curve3D, Line, Matrix4, Point3, Processor, TrimmedCurve, UnitCircle, Vector4,
+    };
     use monstertruck_io::step::load::{
         EntityLoadReport, LossCategory, LossReason, LossTally, ShellLoadReport,
         StepTopologyProvenance, Table,
+    };
+    use monstertruck_io::step::save::{self, CompleteStepDisplay};
+    use monstertruck_topology::StableId;
+    use monstertruck_topology::compressed_surgery::{
+        CompressedFaceSplice, CompressedTrimmedTopologyPatch, NewCompressedEdge, PatchEdgeRef,
+        PatchEdgeUse, PatchVertexRef, RetainedCompressedEdge,
     };
 
     impl SourceStepLoadInspector for MonstertruckKernel {
@@ -333,6 +413,182 @@ mod monstertruck_adapter {
             edges,
             faces,
         })
+    }
+
+    impl SourceTopologyEditor for MonstertruckKernel {
+        fn edit_source_topology(
+            &self,
+            input: &[u8],
+            source: SourceEntity,
+            patches: &[KernelTopologyPatch],
+        ) -> Result<String> {
+            let exchange = ParsedExchange::parse(input)?.exchange;
+            let section = exchange.data.get(source.data_section).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source solid references missing DATA section {}",
+                    source.data_section
+                )
+            })?;
+            let index = step_graph::build_index(&section.entities);
+            let section_source = StepSection::new(source.data_section, &section.entities, &index);
+            let actual_source = section_source
+                .entity(source.id)
+                .ok_or_else(|| anyhow::anyhow!("source solid #{} is missing", source.id))?
+                .source();
+            if actual_source != source {
+                anyhow::bail!(
+                    "source solid identity changed: requested {source:?}, found {actual_source:?}"
+                );
+            }
+
+            let table = Table::from_data_section(section);
+            let solid = table.manifold_solid_brep.get(&source.id).ok_or_else(|| {
+                anyhow::anyhow!("source solid #{} is unavailable to Monstertruck", source.id)
+            })?;
+            let mut imported = table.to_compressed_trimmed_solid_import(solid)?;
+            for patch in patches {
+                imported
+                    .solid
+                    .apply_topology_patch(&translate_patch(patch))?;
+            }
+
+            Ok(CompleteStepDisplay::new(
+                save::StepModel::from(&imported.solid),
+                save::StepHeaderDescriptor {
+                    organization_system: "step-redox Monstertruck source-topology surgery".into(),
+                    ..Default::default()
+                },
+            )
+            .to_string())
+        }
+    }
+
+    fn translate_patch(
+        patch: &KernelTopologyPatch,
+    ) -> CompressedTrimmedTopologyPatch<Point3, Curve3D> {
+        CompressedTrimmedTopologyPatch {
+            remove_faces: patch
+                .remove_faces
+                .iter()
+                .map(|id| StableId::new(id.raw()))
+                .collect(),
+            new_vertices: patch.new_vertices.iter().copied().map(point3).collect(),
+            new_edges: patch
+                .new_edges
+                .iter()
+                .map(|edge| NewCompressedEdge {
+                    vertices: (
+                        translate_vertex_ref(edge.vertices.0),
+                        translate_vertex_ref(edge.vertices.1),
+                    ),
+                    curve: translate_curve(&edge.curve),
+                })
+                .collect(),
+            rewrite_edges: patch
+                .rewrite_edges
+                .iter()
+                .map(|edge| RetainedCompressedEdge {
+                    edge: StableId::new(edge.edge.raw()),
+                    vertices: (
+                        translate_vertex_ref(edge.vertices.0),
+                        translate_vertex_ref(edge.vertices.1),
+                    ),
+                    curve: translate_curve(&edge.curve),
+                })
+                .collect(),
+            face_splices: patch
+                .face_splices
+                .iter()
+                .map(translate_face_splice)
+                .collect(),
+            require_unused_edges: patch
+                .require_unused_edges
+                .iter()
+                .map(|id| StableId::new(id.raw()))
+                .collect(),
+        }
+    }
+
+    const fn translate_vertex_ref(reference: KernelPatchVertexRef) -> PatchVertexRef {
+        match reference {
+            KernelPatchVertexRef::Existing(id) => PatchVertexRef::Existing(StableId::new(id.raw())),
+            KernelPatchVertexRef::New(index) => PatchVertexRef::New(index),
+        }
+    }
+
+    const fn translate_edge_ref(reference: KernelPatchEdgeRef) -> PatchEdgeRef {
+        match reference {
+            KernelPatchEdgeRef::Existing(id) => PatchEdgeRef::Existing(StableId::new(id.raw())),
+            KernelPatchEdgeRef::New(index) => PatchEdgeRef::New(index),
+        }
+    }
+
+    fn translate_face_splice(splice: &KernelFaceSplice) -> CompressedFaceSplice {
+        CompressedFaceSplice {
+            face: StableId::new(splice.face.raw()),
+            remove_edges: splice
+                .remove_edges
+                .iter()
+                .map(|id| StableId::new(id.raw()))
+                .collect(),
+            replacement: splice
+                .replacement
+                .iter()
+                .map(|edge_use| PatchEdgeUse {
+                    edge: translate_edge_ref(edge_use.edge),
+                    orientation: edge_use.orientation,
+                })
+                .collect(),
+        }
+    }
+
+    fn translate_curve(curve: &KernelPatchCurve) -> Curve3D {
+        match *curve {
+            KernelPatchCurve::Line { start_mm, end_mm } => {
+                Curve3D::Line(Line(point3(start_mm), point3(end_mm)))
+            }
+            KernelPatchCurve::CircleArc {
+                center_mm,
+                normal,
+                x_direction,
+                radius_mm,
+                start_angle_rad,
+                end_angle_rad,
+            } => {
+                let y_direction = [
+                    normal[1].mul_add(x_direction[2], -normal[2] * x_direction[1]),
+                    normal[2].mul_add(x_direction[0], -normal[0] * x_direction[2]),
+                    normal[0].mul_add(x_direction[1], -normal[1] * x_direction[0]),
+                ];
+                let transform = Matrix4::from_cols(
+                    Vector4::new(
+                        x_direction[0] * radius_mm,
+                        x_direction[1] * radius_mm,
+                        x_direction[2] * radius_mm,
+                        0.0,
+                    ),
+                    Vector4::new(
+                        y_direction[0] * radius_mm,
+                        y_direction[1] * radius_mm,
+                        y_direction[2] * radius_mm,
+                        0.0,
+                    ),
+                    Vector4::new(normal[0], normal[1], normal[2], 0.0),
+                    Vector4::new(center_mm[0], center_mm[1], center_mm[2], 1.0),
+                );
+                Curve3D::Conic(Conic3D::Ellipse(Processor::with_transform(
+                    TrimmedCurve::new(
+                        UnitCircle::<Point3>::new(),
+                        (start_angle_rad, end_angle_rad),
+                    ),
+                    transform,
+                )))
+            }
+        }
+    }
+
+    const fn point3(point: [f64; 3]) -> Point3 {
+        Point3::new(point[0], point[1], point[2])
     }
 
     fn entity_losses(
@@ -477,6 +733,28 @@ mod monstertruck_adapter {
             };
             assert_ne!(detail, "");
             assert!(evidence.solids[0].topology_provenance.is_none());
+            Ok(())
+        }
+
+        #[test]
+        fn topology_editor_roundtrips_exact_selected_source_solid() -> Result<()> {
+            let input = include_bytes!("../validation/fixtures/production_radial_slot.step");
+            let kernel = MonstertruckKernel::project_standard();
+            let evidence = kernel.inspect_source_step(input)?;
+            let source = evidence
+                .solids
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("fixture has no source solid"))?
+                .source;
+            let edited = kernel.edit_source_topology(input, source, &[])?;
+            let exchange = ParsedExchange::parse(edited.as_bytes())?.exchange;
+            assert_eq!(exchange.data.len(), 1);
+            let section = exchange
+                .data
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("edited STEP omitted DATA section"))?;
+            let table = Table::from_data_section(section);
+            assert_ne!(table.manifold_solid_brep.len(), 0);
             Ok(())
         }
 
