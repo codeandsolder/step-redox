@@ -15,8 +15,8 @@ use crate::kernel_source_load::{
     KernelSourceLoadEvidence, KernelTopologyProvenance, SourceStepLoadInspector,
 };
 use crate::kernel_topology::{
-    SourceTopologyEditor, plan_source_coplanar_normalization_patch,
-    plan_source_edge_treatment_patches,
+    SourceTopologyEditor, plan_source_boundary_feature_peel_patch,
+    plan_source_coplanar_normalization_patch, plan_source_edge_treatment_patches,
 };
 use crate::patterns::InstancePattern;
 use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
@@ -28,7 +28,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v10";
-pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v14";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v15";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReducedBrepMutationMode {
@@ -133,6 +133,8 @@ struct RecoveredBoundaryFeatureFamily {
     tool: CadFragment,
     source_member: BoundaryFeatureInstanceEvidence,
     members: Vec<BoundaryFeatureInstanceEvidence>,
+    /// False when feature IDs came from a kernel-generated intermediate STEP.
+    original_source_ids: bool,
 }
 
 #[derive(Debug)]
@@ -519,7 +521,7 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 /// through a supplied CAD kernel plus the independent analytic boundary proof.
 ///
 /// The parser-only [`recover_complete_ir_bytes`] path reports schema v10 and never
-/// invokes a CAD backend. This explicit kernel-backed path reports schema v14,
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v15,
 /// includes parser-neutral source-load evidence,
 /// records admitted kernel-owned topology-normalized composites and extrusion-core unions separately, and leaves any unsupported
 /// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per
@@ -538,8 +540,11 @@ pub fn recover_complete_ir_with_kernel_bytes<
         recover_complete_ir_build_state(&exchange, input, ReducedBrepMutationMode::KernelOwned)?;
     let source_load = kernel.inspect_source_step(input)?;
     let mut failures = apply_kernel_recovery(&mut build.recovery, |source| {
-        recover_kernel_topology_normalized_fragment(input, &exchange, source, &source_load, kernel)
+        recover_kernel_boundary_feature_fragment(input, source, &source_load, kernel)
     });
+    failures.extend(apply_kernel_recovery(&mut build.recovery, |source| {
+        recover_kernel_topology_normalized_fragment(input, &exchange, source, &source_load, kernel)
+    }));
     failures.extend(apply_kernel_recovery(&mut build.recovery, |source| {
         recover_auto_proven_extrusion_core_union_fragment(
             input,
@@ -549,6 +554,107 @@ pub fn recover_complete_ir_with_kernel_bytes<
         )
     }));
     Ok(build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, Some(source_load)))
+}
+
+/// Peel fully proven boundary-feature leaves on kernel-owned topology. The parser
+/// constructs tool/selection evidence, never a mutable recovery shape.
+fn recover_kernel_boundary_feature_fragment<
+    K: CadKernel + SourceStepLoadInspector + SourceTopologyEditor,
+>(
+    input: &[u8],
+    source: SourceEntity,
+    source_load: &KernelSourceLoadEvidence,
+    kernel: &K,
+) -> Result<Option<CadFragment>> {
+    let Some(load) = source_load.solids.iter().find(|item| item.source == source) else {
+        return Ok(None);
+    };
+    if load.failure.is_some() {
+        return Ok(None);
+    }
+    let Some(mut provenance) = load.topology_provenance.clone() else {
+        return Ok(None);
+    };
+    let mut current_step = None::<String>;
+    let mut current_source = source;
+    let mut replay = Vec::<RecoveredBoundaryFeatureFamily>::new();
+
+    for pass in 0..MAX_LOCAL_REDUCTION_ROUNDS {
+        let bytes = current_step.as_deref().map_or(input, str::as_bytes);
+        let exchange = crate::step_io::ParsedExchange::parse(bytes)?.exchange;
+        let section = exchange
+            .data
+            .get(current_source.data_section)
+            .ok_or_else(|| anyhow::anyhow!("kernel peel lost its current DATA section"))?;
+        let index = crate::step_graph::build_index(&section.entities);
+        let targets = LocalRecoveryTargets::from_solids(
+            &BTreeSet::from([current_source.id]),
+            &section.entities,
+            &index,
+        )?;
+        if targets.is_empty() {
+            break;
+        }
+
+        let reduction = SectionReductionState::new(&section.entities, &index);
+        let shells = targets.shell_ids();
+        let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
+            &section.entities,
+            &index,
+            &shells,
+        );
+        let selected = crate::planar_features::leaf_feature_family_indices(&report.families)
+            .into_iter()
+            .filter(|&i| {
+                targets
+                    .solid_for_shell(report.families[i].shell_id)
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            break;
+        }
+        let prepared = prepare_boundary_feature_reduction(
+            &reduction, &targets, &shells, &report, &selected, pass,
+        )?;
+        if prepared.family_indices.is_empty() {
+            break;
+        }
+        let patch = plan_source_boundary_feature_peel_patch(
+            bytes,
+            current_source,
+            &report,
+            &prepared.family_indices,
+            &provenance,
+        )?;
+        let healed = kernel.edit_source_topology(bytes, current_source, &[patch])?;
+        let Some((healed_source, healed_provenance)) =
+            inspect_single_loaded_source(kernel, healed.as_bytes())?
+        else {
+            return Ok(None);
+        };
+
+        // Only after a successful kernel transaction may semantic replay advance.
+        for (_, LocalReductionStep::BoundaryFeature(mut feature)) in prepared.steps {
+            feature.original_source_ids = pass == 0;
+            replay.push(feature);
+        }
+        current_source = healed_source;
+        provenance = healed_provenance;
+        current_step = Some(healed);
+        if pass + 1 == MAX_LOCAL_REDUCTION_ROUNDS {
+            bail!("kernel boundary-feature peeling did not reach a fixed point");
+        }
+    }
+    let Some(final_step) = current_step else {
+        return Ok(None);
+    };
+    let Some(mut host) = recognize_single_healed_host(&final_step)? else {
+        return Ok(None);
+    };
+    host.model.provenance.clear();
+    let fragment = compose_boundary_feature_fragment(source.id, &host, &replay)?;
+    kernel_replay_is_single_solid(kernel, &fragment).map(|accepted| accepted.then_some(fragment))
 }
 
 fn recover_kernel_topology_normalized_fragment<
@@ -901,6 +1007,9 @@ fn recover_boundary_feature_candidates(
     targets: &BTreeSet<SourceEntity>,
     mutation_mode: ReducedBrepMutationMode,
 ) -> Result<Vec<SourceCadFragment>> {
+    if mutation_mode == ReducedBrepMutationMode::KernelOwned {
+        return Ok(Vec::new());
+    }
     let mut candidates = Vec::new();
     for section in sections {
         let local_targets = section.local_target_ids(targets);
@@ -1267,6 +1376,7 @@ fn prepare_boundary_feature_reduction(
                 tool,
                 source_member,
                 members: family.members.clone(),
+                original_source_ids: true,
             }),
         ));
         peelable_family_indices.push(family_index);
@@ -1636,7 +1746,11 @@ fn compose_boundary_feature_fragment(
     for family in families.iter().rev() {
         let tool_offset = model.append_model(&family.tool.model)?;
         let tool_root = shifted_fragment_root(family.tool.root, tool_offset)?;
-        let exemplar_sources = feature_member_source_ids(source_solid_id, &family.source_member);
+        let exemplar_sources = if family.original_source_ids {
+            feature_member_source_ids(source_solid_id, &family.source_member)
+        } else {
+            vec![source_solid_id]
+        };
         for node_index in tool_offset..tool_offset + family.tool.model.nodes.len() {
             if let Some(provenance) = model.provenance.get_mut(&NodeId(node_index)) {
                 provenance.source_entity_ids.clone_from(&exemplar_sources);
@@ -1662,7 +1776,11 @@ fn compose_boundary_feature_fragment(
                 model.set_provenance(
                     transform,
                     Provenance {
-                        source_entity_ids: feature_member_source_ids(source_solid_id, member),
+                        source_entity_ids: if family.original_source_ids {
+                            feature_member_source_ids(source_solid_id, member)
+                        } else {
+                            vec![source_solid_id]
+                        },
                         proof: ProofStatus::StructurallyProven,
                         max_residual_mm: None,
                     },
@@ -1682,7 +1800,9 @@ fn compose_boundary_feature_fragment(
         current = model.add_node(CadNode::Boolean { op, children });
         let mut sources = vec![source_solid_id];
         for member in &family.members {
-            sources.extend(feature_member_source_ids(source_solid_id, member));
+            if family.original_source_ids {
+                sources.extend(feature_member_source_ids(source_solid_id, member));
+            }
         }
         sources.sort_unstable();
         sources.dedup();
