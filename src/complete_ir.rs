@@ -596,7 +596,9 @@ fn recover_kernel_boundary_feature_fragment<
             break;
         }
 
-        let reduction = SectionReductionState::new(&section.entities, &index);
+        // Kernel-owned peeling only reads the source for feature evidence.
+        // The sole mutable copy is temporary tool materialization, never a
+        // competing authoritative B-rep or parser-side replay state.
         let shells = targets.shell_ids();
         let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
             &section.entities,
@@ -615,7 +617,13 @@ fn recover_kernel_boundary_feature_fragment<
             break;
         }
         let prepared = prepare_boundary_feature_reduction(
-            &reduction, &targets, &shells, &report, &selected, pass,
+            &section.entities,
+            &index,
+            &targets,
+            &shells,
+            &report,
+            &selected,
+            pass,
         )?;
         if prepared.family_indices.is_empty() {
             break;
@@ -1289,7 +1297,8 @@ fn recover_boundary_feature_pass(
     }
 
     let prepared = prepare_boundary_feature_reduction(
-        reduction,
+        &reduction.working,
+        &reduction.index,
         targets,
         &target_shell_ids,
         &report,
@@ -1321,14 +1330,17 @@ fn recover_boundary_feature_pass(
 }
 
 fn prepare_boundary_feature_reduction(
-    reduction: &SectionReductionState,
+    source_entities: &[EntityInstance],
+    source_index: &HashMap<u64, usize>,
     targets: &LocalRecoveryTargets,
     target_shell_ids: &HashSet<u64>,
     report: &crate::planar_features::BoundaryFeatureDiagnostics,
     target_family_indices: &[usize],
     pass_index: usize,
 ) -> Result<PreparedBoundaryReduction> {
-    let mut tool_entities = reduction.working.clone();
+    // This clone is the disposable proof-only tool materialization. The source
+    // is immutable, and neither consumer receives a mutable topology owner.
+    let mut tool_entities = source_entities.to_vec();
     let (tool_report, materialized) =
         crate::planar_features::materialize_boundary_feature_tools_for_analysis_for_shells(
             &mut tool_entities,
@@ -1365,7 +1377,7 @@ fn prepare_boundary_feature_reduction(
             continue;
         }
         let mut tool = (*tool).clone();
-        if !regularize_boundary_feature_tool(&mut tool, family, reduction) {
+        if !regularize_boundary_feature_tool(&mut tool, family, source_entities, source_index) {
             continue;
         }
         pending_steps.push((
@@ -1390,16 +1402,15 @@ fn prepare_boundary_feature_reduction(
 fn regularize_boundary_feature_tool(
     tool: &mut CadFragment,
     family: &crate::planar_features::BoundaryFeatureFamilyEvidence,
-    reduction: &SectionReductionState,
+    source_entities: &[EntityInstance],
+    source_index: &HashMap<u64, usize>,
 ) -> bool {
     if !matches!(tool.source, CadFragmentSource::SolidExtrusion { .. }) {
         return true;
     }
-    let Some(host_outwards) = feature_host_outward_directions(
-        &family.host_face_ids,
-        &reduction.working,
-        &reduction.index,
-    ) else {
+    let Some(host_outwards) =
+        feature_host_outward_directions(&family.host_face_ids, source_entities, source_index)
+    else {
         return false;
     };
     regularize_boundary_tool_for_boolean(tool, family.polarity, &host_outwards).is_ok()
@@ -2495,9 +2506,9 @@ END-ISO-10303-21;
             &section.entities,
             &index,
         )?;
-        let reduction = SectionReductionState::new(&section.entities, &index);
         let prepared = prepare_boundary_feature_reduction(
-            &reduction,
+            &section.entities,
+            &index,
             &targets,
             &HashSet::from([shell]),
             &report,
