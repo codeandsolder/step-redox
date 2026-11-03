@@ -190,6 +190,235 @@ pub fn plan_source_coplanar_normalization_patch(
     plan_coplanar_normalization_patch(&solid, source.data_section, provenance)
 }
 
+/// Translate one already-proven boundary-feature peel into an authoritative kernel topology edit.
+///
+/// The feature proof stays in `planar_features`; this layer only translates the pure peel plan
+/// through retained source topology identity. Host faces are rebuilt from every surviving source
+/// `FACE_BOUND`, using the same bound-orientation × face-sense composition as the Monstertruck STEP
+/// importer. Interface edges are retired only when their complete source-face usage is proven to be
+/// contained in the retained host plus feature faces removed by this transaction.
+///
+/// # Errors
+/// Returns an error when source identity changes, a selected face/edge lacks unique kernel identity,
+/// a requested interface bound is not present on its host, a host would lose every boundary, or an
+/// interface edge has any surviving source-face user outside the planned peel.
+pub fn plan_source_boundary_feature_peel_patch(
+    input: &[u8],
+    source: SourceEntity,
+    report: &crate::planar_features::BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+) -> Result<KernelTopologyPatch> {
+    let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+    let section = exchange
+        .data
+        .get(source.data_section)
+        .ok_or_else(|| anyhow::anyhow!("missing DATA section {}", source.data_section))?;
+    let index = crate::step_graph::build_index(&section.entities);
+    let actual_source =
+        crate::step_document::StepSection::new(source.data_section, &section.entities, &index)
+            .entity(source.id)
+            .ok_or_else(|| anyhow::anyhow!("source solid #{} is missing", source.id))?
+            .source();
+    if actual_source != source {
+        bail!("source solid identity changed: requested {source:?}, found {actual_source:?}");
+    }
+
+    let peel = crate::planar_features::plan_boundary_feature_family_peel(
+        &section.entities,
+        &index,
+        report,
+        selected_indices,
+    )?;
+    boundary_feature_peel_patch(source, &section.entities, &index, &peel, provenance)
+}
+
+fn boundary_feature_peel_patch(
+    source: SourceEntity,
+    entities: &[ruststep::ast::EntityInstance],
+    index: &std::collections::HashMap<u64, usize>,
+    peel: &crate::planar_features::BoundaryFeaturePeelPlan,
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+) -> Result<KernelTopologyPatch> {
+    let source_faces = crate::brep::solid_face_ids(source.id, entities, index)
+        .with_context(|| {
+            format!(
+                "source solid #{} has no readable face membership",
+                source.id
+            )
+        })?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let removed_faces = peel
+        .shell_face_removals
+        .iter()
+        .flat_map(|removal| removal.face_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if !removed_faces.is_subset(&source_faces) {
+        bail!(
+            "boundary peel removes faces outside source solid #{}",
+            source.id
+        );
+    }
+
+    let edge_faces = source_edge_face_users(&source_faces, entities, index)?;
+    let mut patch = empty_topology_patch();
+    patch.remove_faces = removed_faces
+        .iter()
+        .copied()
+        .map(|face_id| topology_face(provenance, source.data_section, face_id))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut required_unused = BTreeSet::new();
+    for edit in &peel.host_bound_removals {
+        if !source_faces.contains(&edit.host_face_id) {
+            bail!(
+                "boundary peel host face #{} is outside source solid #{}",
+                edit.host_face_id,
+                source.id
+            );
+        }
+        if removed_faces.contains(&edit.host_face_id) {
+            bail!(
+                "boundary peel cannot remove and retain host face #{}",
+                edit.host_face_id
+            );
+        }
+        let loops =
+            crate::brep::face_loops(edit.host_face_id, entities, index).with_context(|| {
+                format!(
+                    "feature host face #{} has unreadable bounds",
+                    edit.host_face_id
+                )
+            })?;
+        let remove_bounds = edit.bound_ids.iter().copied().collect::<BTreeSet<_>>();
+        let actual_bounds = loops
+            .iter()
+            .map(|loop_| loop_.bound_id)
+            .collect::<BTreeSet<_>>();
+        if !remove_bounds.is_subset(&actual_bounds) {
+            bail!(
+                "feature host face #{} does not own every planned interface bound",
+                edit.host_face_id
+            );
+        }
+        let face_forward =
+            match crate::brep::face_sense(edit.host_face_id, entities, index).as_deref() {
+                Some("T") => true,
+                Some("F") => false,
+                _ => bail!(
+                    "feature host face #{} has invalid face sense",
+                    edit.host_face_id
+                ),
+            };
+        let boundaries = loops
+            .iter()
+            .filter(|loop_| !remove_bounds.contains(&loop_.bound_id))
+            .map(|loop_| {
+                source_loop_kernel_boundary(loop_, face_forward, source.data_section, provenance)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if boundaries.is_empty() {
+            bail!(
+                "boundary peel would leave host face #{} without a boundary",
+                edit.host_face_id
+            );
+        }
+        patch
+            .face_boundary_replacements
+            .push(KernelFaceBoundaryReplacement {
+                face: topology_face(provenance, source.data_section, edit.host_face_id)?,
+                boundaries,
+            });
+
+        for loop_ in loops
+            .iter()
+            .filter(|loop_| remove_bounds.contains(&loop_.bound_id))
+        {
+            for edge in &loop_.edges {
+                let Some(users) = edge_faces.get(&edge.edge_id) else {
+                    bail!("interface edge #{} has no source-face users", edge.edge_id);
+                };
+                if !users.contains(&edit.host_face_id)
+                    || !users.iter().any(|face| removed_faces.contains(face))
+                    || users
+                        .iter()
+                        .any(|face| *face != edit.host_face_id && !removed_faces.contains(face))
+                {
+                    bail!(
+                        "interface edge #{} has users outside retained host #{} and removed feature faces",
+                        edge.edge_id,
+                        edit.host_face_id
+                    );
+                }
+                required_unused.insert(topology_edge(
+                    provenance,
+                    source.data_section,
+                    edge.edge_id,
+                )?);
+            }
+        }
+    }
+    patch.require_unused_edges = required_unused.into_iter().collect();
+    Ok(patch)
+}
+
+fn source_loop_kernel_boundary(
+    loop_: &crate::brep::FaceLoop,
+    face_forward: bool,
+    data_section: usize,
+    provenance: &crate::kernel_source_load::KernelTopologyProvenance,
+) -> Result<Vec<KernelPatchEdgeUse>> {
+    let absolute_orientation = loop_.orientation == face_forward;
+    let mut boundary = loop_
+        .edges
+        .iter()
+        .map(|edge| {
+            let effective_forward = edge.parameter_forward == edge.curve_same_sense;
+            Ok(KernelPatchEdgeUse {
+                edge: KernelPatchEdgeRef::Existing(topology_edge(
+                    provenance,
+                    data_section,
+                    edge.edge_id,
+                )?),
+                orientation: effective_forward == absolute_orientation,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !absolute_orientation {
+        boundary.reverse();
+    }
+    Ok(boundary)
+}
+
+fn source_edge_face_users(
+    faces: &BTreeSet<u64>,
+    entities: &[ruststep::ast::EntityInstance],
+    index: &std::collections::HashMap<u64, usize>,
+) -> Result<BTreeMap<u64, BTreeSet<u64>>> {
+    let mut users = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for &face_id in faces {
+        let loops = crate::brep::face_loops(face_id, entities, index)
+            .with_context(|| format!("source face #{face_id} has unreadable bounds"))?;
+        for edge in loops.iter().flat_map(|loop_| &loop_.edges) {
+            users.entry(edge.edge_id).or_default().insert(face_id);
+        }
+    }
+    Ok(users)
+}
+
+fn empty_topology_patch() -> KernelTopologyPatch {
+    KernelTopologyPatch {
+        remove_faces: Vec::new(),
+        new_vertices: Vec::new(),
+        new_edges: Vec::new(),
+        rewrite_edges: Vec::new(),
+        face_splices: Vec::new(),
+        face_boundary_replacements: Vec::new(),
+        require_unused_edges: Vec::new(),
+    }
+}
+
 fn plan_coplanar_normalization_patch(
     solid: &crate::reduced_brep::ReducedSolid,
     data_section: usize,
@@ -200,15 +429,7 @@ fn plan_coplanar_normalization_patch(
         return Ok(None);
     }
 
-    let mut patch = KernelTopologyPatch {
-        remove_faces: Vec::new(),
-        new_vertices: Vec::new(),
-        new_edges: Vec::new(),
-        rewrite_edges: Vec::new(),
-        face_splices: Vec::new(),
-        face_boundary_replacements: Vec::new(),
-        require_unused_edges: Vec::new(),
-    };
+    let mut patch = empty_topology_patch();
     for plan in plans {
         patch.remove_faces.extend(
             plan.remove_face_ids

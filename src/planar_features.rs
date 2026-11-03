@@ -19,7 +19,7 @@ use crate::step_graph::{
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Parameter};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 mod mapped_emitter;
 pub use mapped_emitter::instance_boundary_features;
@@ -169,7 +169,7 @@ pub struct BoundaryFeatureToolMaterialization {
     pub interface_bound_ids: Vec<u64>,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct BoundaryFeaturePeelStats {
     pub families: usize,
     pub instances: usize,
@@ -177,6 +177,28 @@ pub struct BoundaryFeaturePeelStats {
     pub subtractive_instances: usize,
     pub faces_removed_from_shells: usize,
     pub interface_bounds_healed: usize,
+}
+
+/// One shell-membership edit proven by boundary-feature analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryFeatureShellFaceRemoval {
+    pub shell_id: u64,
+    pub face_ids: Vec<u64>,
+}
+
+/// Interface bounds to remove from one retained host face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryFeatureHostBoundRemoval {
+    pub host_face_id: u64,
+    pub bound_ids: Vec<u64>,
+}
+
+/// Pure, deterministic topology peel plan for one selected set of boundary-feature families.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BoundaryFeaturePeelPlan {
+    pub shell_face_removals: Vec<BoundaryFeatureShellFaceRemoval>,
+    pub host_bound_removals: Vec<BoundaryFeatureHostBoundRemoval>,
+    pub stats: BoundaryFeaturePeelStats,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -968,8 +990,28 @@ pub fn peel_boundary_feature_family_indices_with_index(
     report: &BoundaryFeatureDiagnostics,
     selected_indices: &[usize],
 ) -> Result<BoundaryFeaturePeelStats> {
+    let plan = plan_boundary_feature_family_peel(entities, index, report, selected_indices)?;
+    apply_boundary_feature_peel_plan(entities, index, &plan)?;
+    Ok(plan.stats)
+}
+
+/// Prove the exact source-topology edits needed to peel selected boundary-feature families.
+///
+/// This function is read-only. It validates family selection, ownership and overlap, then returns
+/// deterministic shell-face removals plus host-bound removals. Callers may execute the same proof
+/// either on parser-owned STEP entities or through an authoritative kernel topology transaction.
+///
+/// # Errors
+/// Returns an error if a selected family index is invalid, host bounds are unreadable or multiply
+/// owned, or selected families overlap in faces or interface bounds.
+pub fn plan_boundary_feature_family_peel(
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    report: &BoundaryFeatureDiagnostics,
+    selected_indices: &[usize],
+) -> Result<BoundaryFeaturePeelPlan> {
     if selected_indices.is_empty() {
-        return Ok(BoundaryFeaturePeelStats::default());
+        return Ok(BoundaryFeaturePeelPlan::default());
     }
     let selected = selected_indices
         .iter()
@@ -980,11 +1022,11 @@ pub fn peel_boundary_feature_family_indices_with_index(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut shell_remove = HashMap::<u64, HashSet<u64>>::new();
-    let mut host_remove = HashMap::<u64, HashSet<u64>>::new();
-    let mut bound_owner = HashMap::<u64, u64>::new();
-    let mut seen_faces = HashSet::<u64>::new();
-    let mut seen_bounds = HashSet::<u64>::new();
+    let mut shell_remove = BTreeMap::<u64, BTreeSet<u64>>::new();
+    let mut host_remove = BTreeMap::<u64, BTreeSet<u64>>::new();
+    let mut bound_owner = BTreeMap::<u64, u64>::new();
+    let mut seen_faces = BTreeSet::<u64>::new();
+    let mut seen_bounds = BTreeSet::<u64>::new();
     let mut stats = BoundaryFeaturePeelStats::default();
 
     for family in selected {
@@ -1030,26 +1072,59 @@ pub fn peel_boundary_feature_family_indices_with_index(
         }
     }
 
-    for (shell, faces) in &shell_remove {
-        let Some(&shell_index) = index.get(shell) else {
-            bail!("feature shell #{shell} is missing");
-        };
-        if !remove_refs_from_list_param(&mut entities[shell_index], 1, faces) {
-            bail!("failed to remove feature faces from shell #{shell}");
-        }
-    }
-    for (host, bounds) in &host_remove {
-        let Some(&host_index) = index.get(host) else {
-            bail!("feature host face #{host} is missing");
-        };
-        if !remove_refs_from_list_param(&mut entities[host_index], 1, bounds) {
-            bail!("failed to heal interface bounds on host face #{host}");
-        }
-    }
-
     stats.faces_removed_from_shells = seen_faces.len();
     stats.interface_bounds_healed = seen_bounds.len();
-    Ok(stats)
+    Ok(BoundaryFeaturePeelPlan {
+        shell_face_removals: shell_remove
+            .into_iter()
+            .map(|(shell_id, face_ids)| BoundaryFeatureShellFaceRemoval {
+                shell_id,
+                face_ids: face_ids.into_iter().collect(),
+            })
+            .collect(),
+        host_bound_removals: host_remove
+            .into_iter()
+            .map(
+                |(host_face_id, bound_ids)| BoundaryFeatureHostBoundRemoval {
+                    host_face_id,
+                    bound_ids: bound_ids.into_iter().collect(),
+                },
+            )
+            .collect(),
+        stats,
+    })
+}
+
+fn apply_boundary_feature_peel_plan(
+    entities: &mut [EntityInstance],
+    index: &HashMap<u64, usize>,
+    plan: &BoundaryFeaturePeelPlan,
+) -> Result<()> {
+    for removal in &plan.shell_face_removals {
+        let Some(&shell_index) = index.get(&removal.shell_id) else {
+            bail!("feature shell #{} is missing", removal.shell_id);
+        };
+        let faces = removal.face_ids.iter().copied().collect::<HashSet<_>>();
+        if !remove_refs_from_list_param(&mut entities[shell_index], 1, &faces) {
+            bail!(
+                "failed to remove feature faces from shell #{}",
+                removal.shell_id
+            );
+        }
+    }
+    for removal in &plan.host_bound_removals {
+        let Some(&host_index) = index.get(&removal.host_face_id) else {
+            bail!("feature host face #{} is missing", removal.host_face_id);
+        };
+        let bounds = removal.bound_ids.iter().copied().collect::<HashSet<_>>();
+        if !remove_refs_from_list_param(&mut entities[host_index], 1, &bounds) {
+            bail!(
+                "failed to heal interface bounds on host face #{}",
+                removal.host_face_id
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn diagnose_boundary_features(entities: &[EntityInstance]) -> BoundaryFeatureDiagnostics {
