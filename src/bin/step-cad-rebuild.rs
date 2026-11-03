@@ -20,7 +20,8 @@ fn main() -> Result<()> {
     }
 
     let bytes = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
-    let report = step_redox::complete_ir::recover_complete_ir_bytes(&bytes)?;
+    let kernel = MonstertruckKernel::project_standard();
+    let report = step_redox::complete_ir::recover_complete_ir_with_kernel_bytes(&bytes, &kernel)?;
     if report.body_count != 1 || report.constructively_recovered_solid_count != 1 {
         bail!(
             "expected exactly one constructively recovered body, got bodies={} constructive={}",
@@ -35,7 +36,11 @@ fn main() -> Result<()> {
         .chain(report.solid_revolutions)
         .chain(report.radial_slot_revolutions)
         .chain(report.solid_sweeps)
+        .chain(report.periodic_chains)
         .chain(report.boundary_feature_composites)
+        .chain(report.edge_treatment_composites)
+        .chain(report.coplanar_normalized_solids)
+        .chain(report.extrusion_core_unions)
         .map(|recovered| recovered.fragment)
         .collect::<Vec<_>>();
     if fragments.len() != 1 {
@@ -47,11 +52,10 @@ fn main() -> Result<()> {
     let fragment = fragments
         .pop()
         .context("selected fragment disappeared after cardinality check")?;
-    let kernel = MonstertruckKernel::project_standard();
     let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
     let summary = kernel.summarize(&evaluated);
-    if !summary.geometrically_consistent {
-        bail!("Monstertruck rebuilt a geometrically inconsistent solid");
+    if !summary.geometrically_consistent || summary.shells != 1 {
+        bail!("Monstertruck did not rebuild one geometrically consistent solid: {summary:?}");
     }
     std::fs::write(&output, kernel.to_step(&evaluated)?)
         .with_context(|| format!("write {}", output.display()))?;

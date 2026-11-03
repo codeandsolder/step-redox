@@ -1077,28 +1077,6 @@ pub fn normalized_points(points: &[[f64; 3]], center: [f64; 3], quarter: u8) -> 
 }
 
 #[cfg(test)]
-mod surface_curve_tests {
-    use super::*;
-
-    #[test]
-    fn surface_curve_signs_its_3d_locus_not_the_exporters_pcurves() -> anyhow::Result<()> {
-        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
-        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
-        let entities = &exchange.data[0].entities;
-        let index = crate::step_graph::build_index(entities);
-        let signature = |id| {
-            support_entity_signature(id, entities, &index, [0.0; 3], 0, &mut HashSet::new(), 0)
-                .ok_or_else(|| anyhow::anyhow!("missing support signature for #{id}"))
-        };
-        // The exporter emits SURFACE_CURVE #196 around LINE #197, with
-        // PCURVEs in unrelated local 2-D face parametrizations.
-        assert_eq!(signature(196)?, signature(197)?);
-        assert_ne!(signature(196)?, signature(225)?);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 pub fn canonical_z90_points(points: &[[f64; 3]], center: [f64; 3]) -> (Vec<[i64; 3]>, u8) {
     let mut best: Option<Vec<[i64; 3]>> = None;
     let mut best_rotation = 0u8;
@@ -1141,4 +1119,26 @@ pub fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
     }
     let n = ordered.len() as f64;
     [sum[0] / n, sum[1] / n, sum[2] / n]
+}
+
+#[cfg(test)]
+mod surface_curve_tests {
+    use super::*;
+
+    #[test]
+    fn surface_curve_signs_its_3d_locus_not_the_exporters_pcurves() -> anyhow::Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+        let entities = &exchange.data[0].entities;
+        let index = crate::step_graph::build_index(entities);
+        let signature = |id| {
+            support_entity_signature(id, entities, &index, [0.0; 3], 0, &mut HashSet::new(), 0)
+                .ok_or_else(|| anyhow::anyhow!("missing support signature for #{id}"))
+        };
+        // The exporter emits SURFACE_CURVE #196 around LINE #197, with
+        // PCURVEs in unrelated local 2-D face parametrizations.
+        assert_eq!(signature(196)?, signature(197)?);
+        assert_ne!(signature(196)?, signature(225)?);
+        Ok(())
+    }
 }
