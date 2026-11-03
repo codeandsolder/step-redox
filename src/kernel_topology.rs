@@ -233,6 +233,10 @@ pub fn plan_source_boundary_feature_peel_patch(
     boundary_feature_peel_patch(source, &section.entities, &index, &peel, provenance)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the boundary-peel preflight keeps all identity, shell, host-bound and edge-use checks sequential and fail-closed"
+)]
 fn boundary_feature_peel_patch(
     source: SourceEntity,
     entities: &[ruststep::ast::EntityInstance],
@@ -422,7 +426,7 @@ fn source_edge_face_users(
     Ok(users)
 }
 
-fn empty_topology_patch() -> KernelTopologyPatch {
+const fn empty_topology_patch() -> KernelTopologyPatch {
     KernelTopologyPatch {
         remove_faces: Vec::new(),
         new_vertices: Vec::new(),
