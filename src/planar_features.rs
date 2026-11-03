@@ -1985,6 +1985,79 @@ mod tests {
     }
 
     #[test]
+    fn boundary_feature_peel_plan_is_pure_and_deterministic() -> Result<()> {
+        use ruststep::ast::Record;
+
+        fn host_face(id: u64, bounds: &[u64]) -> EntityInstance {
+            EntityInstance::Simple {
+                id,
+                record: Record {
+                    name: "ADVANCED_FACE".to_owned(),
+                    parameter: Parameter::List(vec![
+                        Parameter::String(String::new()),
+                        Parameter::List(bounds.iter().copied().map(entity_ref).collect()),
+                        Parameter::Omitted,
+                        Parameter::Enumeration("T".to_owned()),
+                    ]),
+                },
+            }
+        }
+
+        let entities = vec![host_face(10, &[100, 101, 102])];
+        let index = build_index(&entities);
+        let family = |face_id: u64, bound_id: u64| BoundaryFeatureFamilyEvidence {
+            shell_id: 1,
+            polarity: FeaturePolarity::Additive,
+            host_face_ids: vec![10],
+            faces_per_instance: 1,
+            instances: 1,
+            signature: String::new(),
+            members: vec![BoundaryFeatureInstanceEvidence {
+                face_ids: vec![face_id],
+                center_mm: [0.0; 3],
+                normalized_quarter: 0,
+                interface_bound_ids: vec![bound_id],
+            }],
+            lattice: None,
+            motif_pattern: None,
+        };
+        let report = BoundaryFeatureDiagnostics {
+            families: vec![family(30, 102), family(20, 101)],
+            ..BoundaryFeatureDiagnostics::default()
+        };
+
+        let before = entities.clone();
+        let plan = plan_boundary_feature_family_peel(&entities, &index, &report, &[0, 1])?;
+        assert_eq!(entities, before);
+        assert_eq!(
+            plan.shell_face_removals,
+            vec![BoundaryFeatureShellFaceRemoval {
+                shell_id: 1,
+                face_ids: vec![20, 30],
+            }]
+        );
+        assert_eq!(
+            plan.host_bound_removals,
+            vec![BoundaryFeatureHostBoundRemoval {
+                host_face_id: 10,
+                bound_ids: vec![101, 102],
+            }]
+        );
+        assert_eq!(
+            plan.stats,
+            BoundaryFeaturePeelStats {
+                families: 2,
+                instances: 2,
+                additive_instances: 2,
+                subtractive_instances: 0,
+                faces_removed_from_shells: 2,
+                interface_bounds_healed: 2,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn quarter_turn_translation_maps_center() {
         let source = [2.0, 3.0, 4.0];
         let target = [10.0, -7.0, 8.0];

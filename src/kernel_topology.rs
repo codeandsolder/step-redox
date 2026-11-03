@@ -722,6 +722,52 @@ mod tests {
     }
 
     #[test]
+    fn source_loop_translation_matches_step_import_orientation_composition() -> Result<()> {
+        let provenance = crate::kernel_source_load::KernelTopologyProvenance {
+            vertices: Vec::new(),
+            edges: vec![
+                crate::kernel_source_load::KernelTopologyEntityProvenance {
+                    source: source_entity(11),
+                    topology_id: id(111),
+                },
+                crate::kernel_source_load::KernelTopologyEntityProvenance {
+                    source: source_entity(12),
+                    topology_id: id(112),
+                },
+            ],
+            faces: Vec::new(),
+        };
+        let loop_ = crate::brep::FaceLoop {
+            bound_id: 100,
+            loop_id: 101,
+            outer: true,
+            orientation: true,
+            edges: vec![
+                planar_edge(11, (1, 2), ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), true),
+                planar_edge(12, (2, 3), ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]), false),
+            ],
+        };
+
+        // FACE_BOUND=.T. on a same_sense=.F. face means absolute orientation is false:
+        // use orientations are composed with false and the entire wire order reverses.
+        let boundary = source_loop_kernel_boundary(&loop_, false, 0, &provenance)?;
+        assert_eq!(
+            boundary,
+            vec![
+                KernelPatchEdgeUse {
+                    edge: KernelPatchEdgeRef::Existing(id(112)),
+                    orientation: true,
+                },
+                KernelPatchEdgeUse {
+                    edge: KernelPatchEdgeRef::Existing(id(111)),
+                    orientation: false,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn merges_opposite_endpoint_rewrites_of_one_retained_line() -> Result<()> {
         let mut first = empty_patch();
         first.new_vertices.push([1.0, 0.0, 0.0]);
