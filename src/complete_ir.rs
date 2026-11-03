@@ -12,6 +12,7 @@ use crate::cad_recovery::{
     recover_solid_extrusion_fragments, recover_solid_revolution_fragments,
 };
 use crate::kernel_source_load::{KernelSourceLoadEvidence, SourceStepLoadInspector};
+use crate::kernel_topology::{SourceTopologyEditor, plan_source_edge_treatment_patches};
 use crate::patterns::InstancePattern;
 use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
 use crate::solid_revolutions::SolidSurfaceSignature;
@@ -21,8 +22,14 @@ use ruststep::ast::{EntityInstance, Exchange};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v9";
-pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v12";
+pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v10";
+pub const KERNEL_COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v13";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReducedBrepTreatmentMode {
+    ParserOwned,
+    KernelOwned,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SurfaceSignatureSummary {
@@ -96,6 +103,8 @@ pub struct CompleteIr {
     pub solid_sweeps: Vec<SourceCadFragment>,
     pub periodic_chains: Vec<SourceCadFragment>,
     pub boundary_feature_composites: Vec<SourceCadFragment>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_treatment_composites: Vec<SourceCadFragment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extrusion_core_unions: Vec<SourceCadFragment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -446,6 +455,9 @@ impl CompleteIrBuildState {
             boundary_feature_composites: selected_category(&selected, |source| {
                 matches!(source, CadFragmentSource::BoundaryFeatureComposite { .. })
             }),
+            edge_treatment_composites: selected_category(&selected, |source| {
+                matches!(source, CadFragmentSource::EdgeTreatmentComposite { .. })
+            }),
             extrusion_core_unions: selected_category(&selected, |source| {
                 matches!(source, CadFragmentSource::ExtrusionCoreUnion { .. })
             }),
@@ -463,8 +475,11 @@ impl CompleteIrBuildState {
     }
 }
 
-type WholeSolidCandidateProvider =
-    for<'a> fn(&[RecoverySection<'a>], &BTreeSet<SourceEntity>) -> Result<Vec<SourceCadFragment>>;
+type WholeSolidCandidateProvider = for<'a> fn(
+    &[RecoverySection<'a>],
+    &BTreeSet<SourceEntity>,
+    ReducedBrepTreatmentMode,
+) -> Result<Vec<SourceCadFragment>>;
 
 const WHOLE_SOLID_CANDIDATE_PROVIDERS: [WholeSolidCandidateProvider; 2] = [
     recover_boundary_feature_candidates,
@@ -493,31 +508,163 @@ pub fn recover_complete_ir_bytes(input: &[u8]) -> Result<CompleteIr> {
 /// Build Complete IR and opportunistically recover otherwise-unrecovered solids
 /// through a supplied CAD kernel plus the independent analytic boundary proof.
 ///
-/// The parser-only [`recover_complete_ir_bytes`] path reports schema v9 and never
-/// invokes a CAD backend. This explicit kernel-backed path reports schema v12,
+/// The parser-only [`recover_complete_ir_bytes`] path reports schema v10 and never
+/// invokes a CAD backend. This explicit kernel-backed path reports schema v13,
 /// includes parser-neutral source-load evidence,
-/// records admitted extrusion-core unions separately, and leaves any unsupported
+/// records admitted kernel-owned treatment composites and extrusion-core unions separately, and leaves any unsupported
 /// or unproven body in `unrecovered_solids`. Backend failures are diagnostic per
 /// solid rather than aborting the rest of the report.
 ///
 /// # Errors
 /// Returns an error if STEP parsing/Complete IR construction fails or if the selected kernel cannot inspect the original STEP source.
-pub fn recover_complete_ir_with_kernel_bytes<K: CadKernel + SourceStepLoadInspector>(
+pub fn recover_complete_ir_with_kernel_bytes<
+    K: CadKernel + SourceStepLoadInspector + SourceTopologyEditor,
+>(
     input: &[u8],
     kernel: &K,
 ) -> Result<CompleteIr> {
     let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
-    let mut build = recover_complete_ir_build_state(&exchange, input)?;
+    let mut build =
+        recover_complete_ir_build_state(&exchange, input, ReducedBrepTreatmentMode::KernelOwned)?;
     let source_load = kernel.inspect_source_step(input)?;
-    let failures = apply_kernel_recovery(&mut build.recovery, |source| {
+    let mut failures = apply_kernel_recovery(&mut build.recovery, |source| {
+        recover_kernel_edge_treatment_fragment(input, &exchange, source, &source_load, kernel)
+    });
+    failures.extend(apply_kernel_recovery(&mut build.recovery, |source| {
         recover_auto_proven_extrusion_core_union_fragment(
             input,
             source.data_section,
             source.id,
             kernel,
         )
-    });
+    }));
     Ok(build.finish(KERNEL_COMPLETE_IR_SCHEMA, failures, Some(source_load)))
+}
+
+fn recover_kernel_edge_treatment_fragment<K: CadKernel + SourceTopologyEditor>(
+    input: &[u8],
+    exchange: &Exchange,
+    source: SourceEntity,
+    source_load: &KernelSourceLoadEvidence,
+    kernel: &K,
+) -> Result<Option<CadFragment>> {
+    let Some(load) = source_load
+        .solids
+        .iter()
+        .find(|solid| solid.source == source)
+    else {
+        return Ok(None);
+    };
+    if load.failure.is_some() {
+        return Ok(None);
+    }
+    let Some(provenance) = load.topology_provenance.as_ref() else {
+        return Ok(None);
+    };
+    let evidence = replayable_source_treatments(exchange, source)?;
+    if evidence.is_empty() {
+        return Ok(None);
+    }
+
+    let patch = plan_source_edge_treatment_patches(input, source, &evidence, provenance)?;
+    let healed_step = kernel.edit_source_topology(input, source, &[patch])?;
+    let Some(mut host) = recognize_single_healed_host(&healed_step)? else {
+        return Ok(None);
+    };
+    // The healed exchange is an internal kernel handoff. Its regenerated STEP entity IDs are not
+    // source provenance, so discard them before attaching the original treatment evidence.
+    host.model.provenance.clear();
+    let replay = evidence
+        .iter()
+        .filter_map(|item| {
+            replayable_edge_treatment(item).map(|(profile, edge)| (item, profile, edge))
+        })
+        .collect::<Vec<_>>();
+    if replay.len() != evidence.len() {
+        return Ok(None);
+    }
+    let fragment = replay_edge_treatments(host, source.id, replay)?;
+    kernel_replay_is_single_solid(kernel, &fragment).map(|accepted| accepted.then_some(fragment))
+}
+
+fn replayable_source_treatments(
+    exchange: &Exchange,
+    source: SourceEntity,
+) -> Result<Vec<crate::edge_treatments::EdgeTreatmentEvidence>> {
+    let section = exchange
+        .data
+        .get(source.data_section)
+        .ok_or_else(|| anyhow::anyhow!("missing DATA section {}", source.data_section))?;
+    let index = crate::step_graph::build_index(&section.entities);
+    let target = HashSet::from([source.id]);
+    let mut evidence =
+        crate::edge_treatments::detect_edge_treatment_evidence_for_solids_with_index(
+            &section.entities,
+            &index,
+            &target,
+        )
+        .into_iter()
+        .filter(|item| replayable_edge_treatment(item).is_some())
+        .collect::<Vec<_>>();
+    evidence.sort_by_key(|item| item.treatment_face_id);
+    evidence.dedup_by_key(|item| item.treatment_face_id);
+    Ok(evidence)
+}
+
+fn recognize_single_healed_host(healed_step: &str) -> Result<Option<CadFragment>> {
+    let healed = crate::step_io::ParsedExchange::parse(healed_step.as_bytes())?.exchange;
+    let [section] = healed.data.as_slice() else {
+        return Ok(None);
+    };
+    let index = crate::step_graph::build_index(&section.entities);
+    let solid_ids = section
+        .entities
+        .iter()
+        .filter_map(|entity| {
+            let record = crate::step_graph::simple_record(entity)?;
+            (record.name == "MANIFOLD_SOLID_BREP").then(|| crate::step_graph::entity_id(entity))
+        })
+        .collect::<Vec<_>>();
+    let [solid_id] = solid_ids.as_slice() else {
+        return Ok(None);
+    };
+    let targets = BTreeSet::from([*solid_id]);
+    let mut candidates =
+        recover_constructive_fragments_from_entities_with_index(&section.entities, &index)?;
+    candidates.extend(recover_reduced_brep_fragments(
+        &section.entities,
+        &index,
+        Some(&targets),
+        ReducedBrepTreatmentMode::KernelOwned,
+    )?);
+    let refs = candidates.iter().collect::<Vec<_>>();
+    let selected = select_cheapest_whole_solid_fragments(&refs)?;
+    Ok(selected
+        .get(solid_id)
+        .filter(|host| is_constructive_source(&host.source))
+        .map(|host| (*host).clone()))
+}
+
+fn kernel_replay_is_single_solid<K: CadKernel>(kernel: &K, fragment: &CadFragment) -> Result<bool> {
+    let evaluated = kernel.evaluate(&fragment.model, fragment.root)?;
+    let summary = kernel.summarize(&evaluated);
+    if !summary.geometrically_consistent || summary.shells != 1 {
+        return Ok(false);
+    }
+    let rebuilt = kernel.to_step(&evaluated)?;
+    let exchange = crate::step_io::ParsedExchange::parse(rebuilt.as_bytes())?.exchange;
+    if exchange.data.len() != 1 {
+        return Ok(false);
+    }
+    Ok(exchange.data[0]
+        .entities
+        .iter()
+        .filter(|entity| {
+            crate::step_graph::simple_record(entity)
+                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+        })
+        .count()
+        == 1)
 }
 
 fn apply_kernel_recovery<F>(
@@ -564,16 +711,16 @@ pub(crate) fn recover_complete_ir_exchange(
     exchange: &Exchange,
     input: &[u8],
 ) -> Result<CompleteIr> {
-    Ok(recover_complete_ir_build_state(exchange, input)?.finish(
-        COMPLETE_IR_SCHEMA,
-        Vec::new(),
-        None,
-    ))
+    Ok(
+        recover_complete_ir_build_state(exchange, input, ReducedBrepTreatmentMode::ParserOwned)?
+            .finish(COMPLETE_IR_SCHEMA, Vec::new(), None),
+    )
 }
 
 fn recover_complete_ir_build_state(
     exchange: &Exchange,
     input: &[u8],
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<CompleteIrBuildState> {
     let mut signatures = Vec::new();
     let mut patterns = Vec::new();
@@ -635,7 +782,12 @@ fn recover_complete_ir_build_state(
 
     let surface_signature_summaries = signatures;
     let instance_pattern_diagnostics = patterns;
-    let recovery = recover_whole_solids(&recovery_sections, &body_scan, direct_candidates)?;
+    let recovery = recover_whole_solids(
+        &recovery_sections,
+        &body_scan,
+        direct_candidates,
+        treatment_mode,
+    )?;
 
     let second = crate::clean_bytes(input, &Options::for_profile(OutputProfile::Compact))?;
     Ok(CompleteIrBuildState {
@@ -652,6 +804,7 @@ fn recover_whole_solids(
     sections: &[RecoverySection<'_>],
     body_scan: &[SourceSolidSummary],
     direct_candidates: Vec<SourceCadFragment>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<WholeSolidRecoveryState> {
     let mut recovery = WholeSolidRecoveryState::new(body_scan);
     recovery.add_candidates(direct_candidates)?;
@@ -661,7 +814,7 @@ fn recover_whole_solids(
         if targets.is_empty() {
             break;
         }
-        recovery.add_candidates(provider(sections, &targets)?)?;
+        recovery.add_candidates(provider(sections, &targets, treatment_mode)?)?;
     }
     Ok(recovery)
 }
@@ -669,6 +822,7 @@ fn recover_whole_solids(
 fn recover_boundary_feature_candidates(
     sections: &[RecoverySection<'_>],
     targets: &BTreeSet<SourceEntity>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<Vec<SourceCadFragment>> {
     let mut candidates = Vec::new();
     for section in sections {
@@ -677,7 +831,11 @@ fn recover_boundary_feature_candidates(
             continue;
         }
         candidates.extend(section.qualify_fragments(
-            recover_boundary_feature_composites_for_section(section, &local_targets)?,
+            recover_boundary_feature_composites_for_section(
+                section,
+                &local_targets,
+                treatment_mode,
+            )?,
         )?);
     }
     Ok(candidates)
@@ -686,6 +844,7 @@ fn recover_boundary_feature_candidates(
 fn recover_reduced_brep_candidates(
     sections: &[RecoverySection<'_>],
     targets: &BTreeSet<SourceEntity>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<Vec<SourceCadFragment>> {
     let mut candidates = Vec::new();
     for section in sections {
@@ -697,6 +856,7 @@ fn recover_reduced_brep_candidates(
             section.entities,
             &section.index,
             Some(&local_targets),
+            treatment_mode,
         )?)?);
     }
     Ok(candidates)
@@ -705,6 +865,7 @@ fn recover_reduced_brep_candidates(
 fn recover_boundary_feature_composites_for_section(
     section: &RecoverySection<'_>,
     target_solid_ids: &BTreeSet<u64>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<Vec<CadFragment>> {
     let entities = section.entities;
     let initial_index = &section.index;
@@ -739,7 +900,11 @@ fn recover_boundary_feature_composites_for_section(
     }
 
     let mut reduction = SectionReductionState::new(entities, initial_index);
-    let recovered = recover_local_reductions_to_fixed_point(&mut reduction, &mut active_targets)?;
+    let recovered = recover_local_reductions_to_fixed_point(
+        &mut reduction,
+        &mut active_targets,
+        treatment_mode,
+    )?;
     let out = recovered.into_values().collect::<Vec<_>>();
 
     let mut expanded = Vec::new();
@@ -768,6 +933,7 @@ fn recover_boundary_feature_composites_for_section(
 fn recover_local_reductions_to_fixed_point(
     reduction: &mut SectionReductionState,
     active_targets: &mut LocalRecoveryTargets,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<BTreeMap<u64, CadFragment>> {
     let mut recovered = BTreeMap::new();
     for _ in 0..MAX_LOCAL_REDUCTION_ROUNDS {
@@ -781,7 +947,11 @@ fn recover_local_reductions_to_fixed_point(
                 bail!("local reducer reported progress without advancing reduction state");
             }
 
-            for fragment in recover_replayed_boundary_hosts(reduction, &active_targets.solid_ids)? {
+            for fragment in recover_replayed_boundary_hosts(
+                reduction,
+                &active_targets.solid_ids,
+                treatment_mode,
+            )? {
                 recovered.insert(source_solid_id(&fragment.source), fragment);
             }
             active_targets.retain_unrecovered(&recovered);
@@ -800,6 +970,7 @@ fn recover_local_reductions_to_fixed_point(
 fn recover_replayed_boundary_hosts(
     reduction: &SectionReductionState,
     target_solid_ids: &BTreeSet<u64>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<Vec<CadFragment>> {
     if target_solid_ids.is_empty() {
         return Ok(Vec::new());
@@ -812,6 +983,7 @@ fn recover_replayed_boundary_hosts(
         &reduction.working,
         &reduction.index,
         Some(target_solid_ids),
+        treatment_mode,
     )?);
     let host_refs = host_candidates.iter().collect::<Vec<_>>();
     let selected_hosts = select_cheapest_whole_solid_fragments(&host_refs)?;
@@ -1081,6 +1253,7 @@ fn recover_reduced_brep_fragments(
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
     target_solid_ids: Option<&BTreeSet<u64>>,
+    treatment_mode: ReducedBrepTreatmentMode,
 ) -> Result<Vec<CadFragment>> {
     let candidate_solid_ids = entities
         .iter()
@@ -1116,6 +1289,9 @@ fn recover_reduced_brep_fragments(
         let mut replay = Vec::new();
         if let Some(items) = by_solid.get_mut(&solid_id) {
             items.sort_by_key(|item| item.treatment_face_id);
+            if treatment_mode == ReducedBrepTreatmentMode::KernelOwned && !items.is_empty() {
+                continue;
+            }
             for item in items.iter().copied() {
                 let Some((profile, edge)) = replayable_edge_treatment(item) else {
                     continue;
@@ -1156,6 +1332,10 @@ fn replay_edge_treatments(
     )>,
 ) -> Result<CadFragment> {
     replay.sort_by_key(|(item, _, _)| item.treatment_face_id);
+    let treatment_face_ids = replay
+        .iter()
+        .map(|(item, _, _)| item.treatment_face_id)
+        .collect::<Vec<_>>();
     fragment.model.roots.clear();
     let mut root = fragment.root;
     for (item, profile, edge) in replay {
@@ -1175,6 +1355,12 @@ fn replay_edge_treatments(
     }
     fragment.model.add_root(root)?;
     fragment.root = root;
+    if !treatment_face_ids.is_empty() {
+        fragment.source = CadFragmentSource::EdgeTreatmentComposite {
+            solid_id,
+            treatment_face_ids,
+        };
+    }
     fragment.model.validate()?;
     Ok(fragment)
 }
@@ -1545,7 +1731,8 @@ const fn source_solid_id(source: &CadFragmentSource) -> u64 {
         | CadFragmentSource::RevolvedRoundTail { solid_id, .. }
         | CadFragmentSource::PeriodicChain { solid_id, .. }
         | CadFragmentSource::ExtrusionCoreUnion { solid_id, .. }
-        | CadFragmentSource::BoundaryFeatureComposite { solid_id, .. } => *solid_id,
+        | CadFragmentSource::BoundaryFeatureComposite { solid_id, .. }
+        | CadFragmentSource::EdgeTreatmentComposite { solid_id, .. } => *solid_id,
     }
 }
 
@@ -1664,6 +1851,7 @@ mod tests {
             solid_sweeps: Vec::new(),
             periodic_chains: Vec::new(),
             boundary_feature_composites: Vec::new(),
+            edge_treatment_composites: Vec::new(),
             extrusion_core_unions: Vec::new(),
             kernel_recovery_failures: Vec::new(),
             kernel_source_load: None,
@@ -1726,6 +1914,82 @@ mod tests {
             model,
             root,
         })
+    }
+
+    fn test_treatment_evidence(
+        solid_id: u64,
+        treatment_face_id: u64,
+    ) -> crate::edge_treatments::EdgeTreatmentEvidence {
+        use crate::edge_treatments::{
+            EdgeTreatmentCarrier, EdgeTreatmentEvidence, EdgeTreatmentEvidenceStrength,
+            EdgeTreatmentKind, EdgeTreatmentVirtualEdge,
+        };
+        EdgeTreatmentEvidence {
+            solid_id,
+            treatment_face_id,
+            kind: EdgeTreatmentKind::PlanarChamfer,
+            strength: EdgeTreatmentEvidenceStrength::AnalyticTangency,
+            carrier_pair_unique: true,
+            treatment_support: "plane".to_owned(),
+            carriers: [
+                EdgeTreatmentCarrier {
+                    face_id: treatment_face_id + 1,
+                    support: "plane".to_owned(),
+                    shared_edge_ids: vec![treatment_face_id + 10],
+                },
+                EdgeTreatmentCarrier {
+                    face_id: treatment_face_id + 2,
+                    support: "plane".to_owned(),
+                    shared_edge_ids: vec![treatment_face_id + 11],
+                },
+            ],
+            inferred_radius_mm: None,
+            inferred_setbacks_mm: Some([0.5, 0.5]),
+            inferred_angle_rad: Some(std::f64::consts::FRAC_PI_4),
+            carrier_angle_rad: std::f64::consts::FRAC_PI_2,
+            virtual_edge: EdgeTreatmentVirtualEdge::Segment {
+                start_mm: [0.0, 0.0, 0.0],
+                end_mm: [0.0, 0.0, 1.0],
+            },
+            max_boundary_residual_mm: 1.0e-8,
+        }
+    }
+
+    #[test]
+    fn replayed_edge_treatments_are_first_class_composites() -> Result<()> {
+        let solid_id = 42;
+        let evidence = test_treatment_evidence(solid_id, 77);
+        let fragment = replay_edge_treatments(
+            constructive_fragment(solid_id, 1)?,
+            solid_id,
+            vec![(
+                &evidence,
+                EdgeTreatmentProfile::Chamfer,
+                EdgeTreatmentEdge {
+                    selector: EdgeSelector::Segment {
+                        start_mm: [0.0, 0.0, 0.0],
+                        end_mm: [0.0, 0.0, 1.0],
+                    },
+                    radius_mm: 0.5,
+                },
+            )],
+        )?;
+        assert_eq!(
+            fragment.source,
+            CadFragmentSource::EdgeTreatmentComposite {
+                solid_id,
+                treatment_face_ids: vec![77],
+            }
+        );
+        assert!(matches!(
+            fragment.model.node(fragment.root)?,
+            CadNode::EdgeTreatment { .. }
+        ));
+        assert_eq!(
+            fragment.model.provenance[&fragment.root].source_entity_ids,
+            vec![solid_id, 77]
+        );
+        Ok(())
     }
 
     fn boundary_reduction_step(solid_id: u64) -> Result<(u64, LocalReductionStep)> {
@@ -1977,7 +2241,7 @@ END-ISO-10303-21;
         let evidence = report
             .kernel_source_load
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted source-load evidence"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v13 omitted source-load evidence"))?;
         assert_eq!(evidence.sections.len(), 2);
         assert_eq!(evidence.solids.len(), 2);
         assert_eq!(
@@ -1993,7 +2257,7 @@ END-ISO-10303-21;
 
     #[cfg(feature = "cad-kernel-monstertruck")]
     #[test]
-    fn kernel_complete_ir_v12_attaches_parser_neutral_topology_provenance() -> Result<()> {
+    fn kernel_complete_ir_v13_attaches_parser_neutral_topology_provenance() -> Result<()> {
         let input = include_bytes!("../validation/fixtures/production_radial_slot.step");
         let parser_only = recover_complete_ir_bytes(input)?;
         assert_eq!(parser_only.schema, COMPLETE_IR_SCHEMA);
@@ -2010,7 +2274,7 @@ END-ISO-10303-21;
         let evidence = kernel_report
             .kernel_source_load
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted source-load evidence"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v13 omitted source-load evidence"))?;
         assert_eq!(evidence.sections.len(), 1);
         let solid = evidence
             .solids
@@ -2026,7 +2290,7 @@ END-ISO-10303-21;
         let provenance = solid
             .topology_provenance
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kernel v12 omitted topology provenance"))?;
+            .ok_or_else(|| anyhow::anyhow!("kernel v13 omitted topology provenance"))?;
         assert_ne!(provenance.vertices.len(), 0);
         assert_ne!(provenance.edges.len(), 0);
         assert_ne!(provenance.faces.len(), 0);

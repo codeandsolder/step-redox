@@ -67,6 +67,10 @@ pub enum CadFragmentSource {
         feature_families: usize,
         feature_instances: usize,
     },
+    EdgeTreatmentComposite {
+        solid_id: u64,
+        treatment_face_ids: Vec<u64>,
+    },
 }
 
 /// Compose two or more already-recovered CAD fragments into a union model.
