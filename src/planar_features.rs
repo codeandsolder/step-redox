@@ -1113,11 +1113,69 @@ pub fn plan_boundary_feature_family_peel(
     })
 }
 
+/// Materialize a temporary recognition view from immutable STEP input and an
+/// ordered, already proven deletion plans. This is not an authoritative topology edit:
+/// callers discard the view after inverse-feature analysis. Source entity IDs
+/// and index offsets remain unchanged because no entities are inserted or
+/// removed; only shell face references and host-bound references are filtered.
+///
+/// # Errors
+/// Returns an error if any planned face or bound removal cannot be applied.
+pub(crate) fn materialize_boundary_feature_peel_plans(
+    source: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+    plans: &[BoundaryFeaturePeelPlan],
+) -> Result<Vec<EntityInstance>> {
+    let mut projected = source.to_vec();
+    for plan in plans {
+        apply_boundary_feature_peel_plan(&mut projected, index, plan)?;
+    }
+    Ok(projected)
+}
+
 fn apply_boundary_feature_peel_plan(
     entities: &mut [EntityInstance],
     index: &HashMap<u64, usize>,
     plan: &BoundaryFeaturePeelPlan,
 ) -> Result<()> {
+    // Complete preflight before touching even the disposable projected STEP
+    // slice. Partial or duplicate removals must not silently succeed.
+    let mut seen_faces = HashSet::new();
+    for removal in &plan.shell_face_removals {
+        let existing = ref_list_param(removal.shell_id, 1, entities, index)
+            .ok_or_else(|| anyhow::anyhow!("feature shell #{} is unreadable", removal.shell_id))?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if removal.face_ids.is_empty()
+            || removal.face_ids.iter().any(|&face| {
+                !existing.contains(&face) || !seen_faces.insert((removal.shell_id, face))
+            })
+        {
+            bail!(
+                "feature shell #{} has missing or duplicate face removals",
+                removal.shell_id
+            );
+        }
+    }
+    let mut seen_bounds = HashSet::new();
+    for removal in &plan.host_bound_removals {
+        let existing = ref_list_param(removal.host_face_id, 1, entities, index)
+            .ok_or_else(|| {
+                anyhow::anyhow!("feature host face #{} is unreadable", removal.host_face_id)
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if removal.bound_ids.is_empty()
+            || removal.bound_ids.iter().any(|&bound| {
+                !existing.contains(&bound) || !seen_bounds.insert((removal.host_face_id, bound))
+            })
+        {
+            bail!(
+                "feature host face #{} has missing or duplicate bound removals",
+                removal.host_face_id
+            );
+        }
+    }
     for removal in &plan.shell_face_removals {
         let Some(&shell_index) = index.get(&removal.shell_id) else {
             bail!("feature shell #{} is missing", removal.shell_id);

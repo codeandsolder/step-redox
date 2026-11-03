@@ -19,12 +19,15 @@ use crate::kernel_topology::{
     plan_source_coplanar_normalization_patch, plan_source_edge_treatment_patches,
 };
 use crate::patterns::InstancePattern;
-use crate::planar_features::{BoundaryFeatureInstanceEvidence, FeaturePolarity};
+use crate::planar_features::{
+    BoundaryFeatureInstanceEvidence, BoundaryFeaturePeelPlan, FeaturePolarity,
+};
 use crate::solid_revolutions::SolidSurfaceSignature;
 use crate::{Options, OutputProfile, Stats};
 use anyhow::{Result, bail};
 use ruststep::ast::{EntityInstance, Exchange};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const COMPLETE_IR_SCHEMA: &str = "step-redox-complete-ir-v10";
@@ -240,41 +243,63 @@ enum LocalReductionStep {
     BoundaryFeature(RecoveredBoundaryFeatureFamily),
 }
 
-#[derive(Debug)]
-struct SectionReductionState {
-    working: Vec<EntityInstance>,
-    index: HashMap<u64, usize>,
+/// Parser-only semantic peel journal. The original Part 21 graph remains immutable;
+/// a sequence of proven deletion plans projects a temporary entity view for the
+/// existing recognizers, and is never mistaken for a separately owned B-rep.
+/// The kernel path does not construct this journal.
+#[derive(Debug, Default)]
+struct ParserPeelJournal {
+    plans: Vec<BoundaryFeaturePeelPlan>,
     replay: BTreeMap<u64, Vec<LocalReductionStep>>,
-    revision: usize,
 }
 
-impl SectionReductionState {
-    fn new(entities: &[EntityInstance], index: &HashMap<u64, usize>) -> Self {
-        Self {
-            working: entities.to_vec(),
-            index: index.clone(),
-            replay: BTreeMap::new(),
-            revision: 0,
+impl ParserPeelJournal {
+    fn view<'a>(
+        &self,
+        source: &'a [EntityInstance],
+        index: &HashMap<u64, usize>,
+    ) -> Result<Cow<'a, [EntityInstance]>> {
+        if self.plans.is_empty() {
+            return Ok(Cow::Borrowed(source));
         }
+        Ok(Cow::Owned(
+            crate::planar_features::materialize_boundary_feature_peel_plans(
+                source,
+                index,
+                &self.plans,
+            )?,
+        ))
     }
 
-    fn apply<F>(&mut self, steps: Vec<(u64, LocalReductionStep)>, mutate: F) -> Result<bool>
-    where
-        F: FnOnce(&mut [EntityInstance]) -> Result<bool>,
-    {
+    fn commit(
+        &mut self,
+        steps: Vec<(u64, LocalReductionStep)>,
+        plan: BoundaryFeaturePeelPlan,
+        current: &[EntityInstance],
+        index: &HashMap<u64, usize>,
+    ) -> Result<bool> {
         if steps.is_empty() {
             return Ok(false);
         }
-        let mut candidate = self.working.clone();
-        if !mutate(&mut candidate)? {
-            return Ok(false);
+        if steps.len() != plan.stats.families || plan.stats.families == 0 {
+            bail!(
+                "parser peel journal has {} replay steps but {} proven families",
+                steps.len(),
+                plan.stats.families
+            );
         }
-        self.index = crate::step_graph::build_index(&candidate);
-        self.working = candidate;
+        // Prove that the next projection is actually materializable before
+        // committing either topology removals or semantic replay. A failed
+        // transaction leaves the journal (and original input) unchanged.
+        let _ = crate::planar_features::materialize_boundary_feature_peel_plans(
+            current,
+            index,
+            std::slice::from_ref(&plan),
+        )?;
+        self.plans.push(plan);
         for (solid_id, step) in steps {
             self.replay.entry(solid_id).or_default().push(step);
         }
-        self.revision += 1;
         Ok(true)
     }
 
@@ -497,9 +522,6 @@ const WHOLE_SOLID_CANDIDATE_PROVIDERS: [WholeSolidCandidateProvider; 2] = [
     recover_boundary_feature_candidates,
     recover_reduced_brep_candidates,
 ];
-type LocalReducer = fn(&mut SectionReductionState, &LocalRecoveryTargets) -> Result<bool>;
-
-const LOCAL_REDUCERS: [LocalReducer; 1] = [recover_boundary_feature_pass];
 const MAX_LOCAL_REDUCTION_ROUNDS: usize = 32;
 
 /// Build the compact complete semantic IR for a normalized STEP exchange.
@@ -1093,9 +1115,11 @@ fn recover_boundary_feature_composites_for_section(
         return Ok(Vec::new());
     }
 
-    let mut reduction = SectionReductionState::new(entities, initial_index);
+    let mut journal = ParserPeelJournal::default();
     let recovered = recover_local_reductions_to_fixed_point(
-        &mut reduction,
+        &mut journal,
+        entities,
+        initial_index,
         &mut active_targets,
         mutation_mode,
     )?;
@@ -1125,57 +1149,51 @@ fn recover_boundary_feature_composites_for_section(
 }
 
 fn recover_local_reductions_to_fixed_point(
-    reduction: &mut SectionReductionState,
+    journal: &mut ParserPeelJournal,
+    source: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     active_targets: &mut LocalRecoveryTargets,
     mutation_mode: ReducedBrepMutationMode,
 ) -> Result<BTreeMap<u64, CadFragment>> {
     let mut recovered = BTreeMap::new();
     for _ in 0..MAX_LOCAL_REDUCTION_ROUNDS {
-        let round_revision = reduction.revision;
-        for reducer in LOCAL_REDUCERS {
-            let reducer_revision = reduction.revision;
-            if !reducer(reduction, active_targets)? {
-                continue;
-            }
-            if reduction.revision == reducer_revision {
-                bail!("local reducer reported progress without advancing reduction state");
-            }
-
-            for fragment in recover_replayed_boundary_hosts(
-                reduction,
-                &active_targets.solid_ids,
-                mutation_mode,
-            )? {
-                recovered.insert(source_solid_id(&fragment.source), fragment);
-            }
-            active_targets.retain_unrecovered(&recovered);
-            if active_targets.is_empty() {
-                return Ok(recovered);
-            }
+        let view = journal.view(source, index)?;
+        if !recover_boundary_feature_pass(journal, view.as_ref(), index, active_targets)? {
+            return Ok(recovered);
         }
-        if reduction.revision == round_revision {
+        let healed = journal.view(source, index)?;
+        for fragment in recover_replayed_boundary_hosts(
+            journal,
+            healed.as_ref(),
+            index,
+            &active_targets.solid_ids,
+            mutation_mode,
+        )? {
+            recovered.insert(source_solid_id(&fragment.source), fragment);
+        }
+        active_targets.retain_unrecovered(&recovered);
+        if active_targets.is_empty() {
             return Ok(recovered);
         }
     }
-
     bail!("local recovery did not reach a fixed point after {MAX_LOCAL_REDUCTION_ROUNDS} rounds")
 }
 
 fn recover_replayed_boundary_hosts(
-    reduction: &SectionReductionState,
+    journal: &ParserPeelJournal,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     target_solid_ids: &BTreeSet<u64>,
     mutation_mode: ReducedBrepMutationMode,
 ) -> Result<Vec<CadFragment>> {
     if target_solid_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut host_candidates = recover_constructive_fragments_from_entities_with_index(
-        &reduction.working,
-        &reduction.index,
-    )?;
+    let mut host_candidates =
+        recover_constructive_fragments_from_entities_with_index(entities, index)?;
     host_candidates.extend(recover_reduced_brep_fragments(
-        &reduction.working,
-        &reduction.index,
+        entities,
+        index,
         Some(target_solid_ids),
         mutation_mode,
     )?);
@@ -1183,7 +1201,7 @@ fn recover_replayed_boundary_hosts(
     let selected_hosts = select_cheapest_whole_solid_fragments(&host_refs)?;
     let mut out = Vec::new();
     for &solid_id in target_solid_ids {
-        let families = reduction.boundary_features(solid_id);
+        let families = journal.boundary_features(solid_id);
         if families.is_empty() {
             continue;
         }
@@ -1273,23 +1291,25 @@ fn relative_quarter_translation(
 }
 
 fn recover_boundary_feature_pass(
-    reduction: &mut SectionReductionState,
+    journal: &mut ParserPeelJournal,
+    current: &[EntityInstance],
+    index: &HashMap<u64, usize>,
     targets: &LocalRecoveryTargets,
 ) -> Result<bool> {
-    let pass_index = reduction.next_boundary_pass_index();
+    let pass_index = journal.next_boundary_pass_index();
     let target_shell_ids = targets.shell_ids();
     let report = crate::planar_features::diagnose_boundary_features_for_shells_with_index(
-        &reduction.working,
-        &reduction.index,
+        current,
+        index,
         &target_shell_ids,
     );
     let target_family_indices =
         crate::planar_features::leaf_feature_family_indices(&report.families)
             .into_iter()
-            .filter(|&index| {
+            .filter(|&candidate| {
                 targets
                     .shell_to_solid
-                    .contains_key(&report.families[index].shell_id)
+                    .contains_key(&report.families[candidate].shell_id)
             })
             .collect::<Vec<_>>();
     if target_family_indices.is_empty() {
@@ -1297,36 +1317,24 @@ fn recover_boundary_feature_pass(
     }
 
     let prepared = prepare_boundary_feature_reduction(
-        &reduction.working,
-        &reduction.index,
+        current,
+        index,
         targets,
         &target_shell_ids,
         &report,
         &target_family_indices,
         pass_index,
     )?;
-
     if prepared.family_indices.is_empty() {
         return Ok(false);
     }
-    let working_index = reduction.index.clone();
-    let peelable_family_indices = prepared.family_indices;
-    reduction.apply(prepared.steps, |working| {
-        let stats = crate::planar_features::peel_boundary_feature_family_indices_with_index(
-            working,
-            &working_index,
-            &report,
-            &peelable_family_indices,
-        )?;
-        if stats.families != peelable_family_indices.len() {
-            bail!(
-                "boundary-feature reduction peeled {} of {} selected families",
-                stats.families,
-                peelable_family_indices.len()
-            );
-        }
-        Ok(stats.families != 0)
-    })
+    let plan = crate::planar_features::plan_boundary_feature_family_peel(
+        current,
+        index,
+        &report,
+        &prepared.family_indices,
+    )?;
+    journal.commit(prepared.steps, plan, current, index)
 }
 
 fn prepare_boundary_feature_reduction(
@@ -2264,23 +2272,121 @@ mod tests {
     }
 
     #[test]
-    fn section_reduction_commits_working_state_and_replay_atomically() -> Result<()> {
-        let mut state = SectionReductionState::new(&[], &HashMap::new());
+    fn parser_only_boss_still_recovers_the_constructive_feature_composite() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let report = recover_complete_ir_bytes(input)?;
+        assert_eq!(report.schema, COMPLETE_IR_SCHEMA);
+        assert_eq!(report.body_count, 1);
+        assert_eq!(report.constructively_recovered_solid_count, 1);
+        assert_eq!(report.semantically_recovered_solid_count, 1);
+        assert_eq!(report.unrecovered_solid_count, 0);
+        let [composite] = report.boundary_feature_composites.as_slice() else {
+            bail!("parser-only recovery lost its proven boss feature");
+        };
+        assert!(matches!(
+            composite.fragment.source,
+            CadFragmentSource::BoundaryFeatureComposite {
+                passes: 1,
+                feature_families: 1,
+                feature_instances: 1,
+                ..
+            }
+        ));
+        composite.fragment.model.validate()?;
+        Ok(())
+    }
 
-        assert!(!state.apply(vec![boundary_reduction_step(7)?], |_| Ok(false))?);
-        assert_eq!(state.revision, 0);
-        assert!(state.replay.is_empty());
+    #[test]
+    fn parser_only_nested_boss_preserves_two_proven_fixed_point_passes() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_nested.step");
+        let report = recover_complete_ir_bytes(input)?;
+        assert_eq!(report.schema, COMPLETE_IR_SCHEMA);
+        assert_eq!(report.body_count, 1);
+        assert_eq!(report.constructively_recovered_solid_count, 1);
+        assert_eq!(report.unrecovered_solid_count, 0);
+        let [composite] = report.boundary_feature_composites.as_slice() else {
+            bail!("nested boss lost its parser-only boundary composite");
+        };
+        assert!(matches!(
+            composite.fragment.source,
+            CadFragmentSource::BoundaryFeatureComposite {
+                passes: 2,
+                feature_families: 2,
+                feature_instances: 2,
+                ..
+            }
+        ));
+        composite.fragment.model.validate()?;
+        Ok(())
+    }
 
-        let failed = state.apply(vec![boundary_reduction_step(7)?], |_| {
-            bail!("synthetic reduction failure")
-        });
-        assert!(failed.is_err());
-        assert_eq!(state.revision, 0);
-        assert!(state.replay.is_empty());
+    #[test]
+    fn parser_peel_journal_is_atomic_and_keeps_original_step_immutable() -> Result<()> {
+        let input = include_bytes!("../validation/fixtures/boundary_boss_extrusion.step");
+        let exchange = crate::step_io::ParsedExchange::parse(input)?.exchange;
+        let entities = &exchange.data[0].entities;
+        let original = entities.clone();
+        let index = crate::step_graph::build_index(entities);
+        let report = crate::planar_features::diagnose_boundary_features(entities);
+        let selected = crate::planar_features::leaf_feature_family_indices(&report.families);
+        assert_eq!(selected.len(), 1);
+        let plan = crate::planar_features::plan_boundary_feature_family_peel(
+            entities, &index, &report, &selected,
+        )?;
+        assert_eq!(plan.stats.families, 1);
+        assert_eq!(plan.stats.faces_removed_from_shells, 5);
+        assert_eq!(plan.stats.interface_bounds_healed, 1);
 
-        assert!(state.apply(vec![boundary_reduction_step(7)?], |_| Ok(true))?);
-        assert_eq!(state.revision, 1);
-        assert_eq!(state.boundary_features(7).len(), 1);
+        let mut journal = ParserPeelJournal::default();
+        assert!(matches!(journal.view(entities, &index)?, Cow::Borrowed(_)));
+        assert!(!journal.commit(Vec::new(), plan.clone(), entities, &index)?);
+
+        let mut invalid = plan.clone();
+        invalid.host_bound_removals[0].bound_ids.push(u64::MAX);
+        assert!(
+            journal
+                .commit(vec![boundary_reduction_step(7)?], invalid, entities, &index)
+                .is_err()
+        );
+        assert!(journal.plans.is_empty());
+        assert!(journal.replay.is_empty());
+
+        assert!(journal.commit(
+            vec![boundary_reduction_step(7)?],
+            plan.clone(),
+            entities,
+            &index
+        )?);
+        assert_eq!(journal.boundary_features(7).len(), 1);
+        assert_eq!(journal.next_boundary_pass_index(), 1);
+        let projected = journal.view(entities, &index)?;
+        assert!(matches!(projected, Cow::Owned(_)));
+        assert_eq!(entities, &original);
+        let shell = plan.shell_face_removals[0].shell_id;
+        let host = plan.host_bound_removals[0].host_face_id;
+        let refs = crate::brep::ref_list_param;
+        let original_shell = refs(shell, 1, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("source shell unreadable"))?;
+        let projected_shell = refs(shell, 1, projected.as_ref(), &index)
+            .ok_or_else(|| anyhow::anyhow!("projected shell unreadable"))?;
+        let original_host = refs(host, 1, entities, &index)
+            .ok_or_else(|| anyhow::anyhow!("source host unreadable"))?;
+        let projected_host = refs(host, 1, projected.as_ref(), &index)
+            .ok_or_else(|| anyhow::anyhow!("projected host unreadable"))?;
+        assert_eq!(original_shell.len(), projected_shell.len() + 5);
+        assert_eq!(original_host.len(), projected_host.len() + 1);
+        assert!(
+            journal
+                .commit(
+                    vec![boundary_reduction_step(7)?],
+                    plan,
+                    projected.as_ref(),
+                    &index
+                )
+                .is_err()
+        );
+        assert_eq!(journal.plans.len(), 1);
+        assert_eq!(journal.boundary_features(7).len(), 1);
         Ok(())
     }
 
