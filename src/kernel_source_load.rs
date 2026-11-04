@@ -97,11 +97,40 @@ pub struct KernelTopologyProvenance {
     pub faces: Vec<KernelFaceTopologyProvenance>,
 }
 
+/// Distinguish absence from conflicting retained topology identities.
+///
+/// These states are not interchangeable: an ambiguous shell-member mapping must
+/// never trigger fallback to the underlying face's source identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UniqueTopologyLookup {
+    Missing,
+    Unique(KernelTopologyId),
+    Ambiguous,
+}
+
+impl UniqueTopologyLookup {
+    const fn into_unique(self) -> Option<KernelTopologyId> {
+        match self {
+            Self::Unique(id) => Some(id),
+            Self::Missing | Self::Ambiguous => None,
+        }
+    }
+}
+
 impl KernelTopologyProvenance {
-    fn unique_id(ids: impl Iterator<Item = KernelTopologyId>) -> Option<KernelTopologyId> {
-        let mut ids = ids.collect::<std::collections::BTreeSet<_>>().into_iter();
-        let first = ids.next()?;
-        ids.next().is_none().then_some(first)
+    fn unique_id(ids: impl Iterator<Item = KernelTopologyId>) -> UniqueTopologyLookup {
+        let mut first = None;
+        for id in ids {
+            match first {
+                None => first = Some(id),
+                Some(existing) if existing == id => {}
+                Some(_) => return UniqueTopologyLookup::Ambiguous,
+            }
+        }
+        match first {
+            Some(id) => UniqueTopologyLookup::Unique(id),
+            None => UniqueTopologyLookup::Missing,
+        }
     }
 
     pub(crate) fn vertex_for_source_id(
@@ -117,6 +146,7 @@ impl KernelTopologyProvenance {
                 })
                 .map(|entry| entry.topology_id),
         )
+        .into_unique()
     }
 
     pub(crate) fn edge_for_source_id(
@@ -132,6 +162,7 @@ impl KernelTopologyProvenance {
                 })
                 .map(|entry| entry.topology_id),
         )
+        .into_unique()
     }
 
     pub(crate) fn face_for_source_id(
@@ -149,8 +180,10 @@ impl KernelTopologyProvenance {
                 })
                 .map(|entry| entry.topology_id),
         );
-        shell_member.or_else(|| {
-            Self::unique_id(
+        match shell_member {
+            UniqueTopologyLookup::Unique(id) => Some(id),
+            UniqueTopologyLookup::Ambiguous => None,
+            UniqueTopologyLookup::Missing => Self::unique_id(
                 self.faces
                     .iter()
                     .filter(|entry| {
@@ -160,7 +193,8 @@ impl KernelTopologyProvenance {
                     })
                     .map(|entry| entry.topology_id),
             )
-        })
+            .into_unique(),
+        }
     }
 }
 
@@ -820,5 +854,115 @@ mod monstertruck_adapter {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod provenance_lookup_tests {
+    use super::*;
+
+    const fn source(data_section: usize, id: u64) -> SourceEntity {
+        SourceEntity {
+            data_section,
+            ordinal: 0,
+            id,
+        }
+    }
+
+    const fn face(
+        source_id: Option<SourceEntity>,
+        shell_member: Option<SourceEntity>,
+        kernel_id: u64,
+    ) -> KernelFaceTopologyProvenance {
+        KernelFaceTopologyProvenance {
+            source: source_id,
+            shell_member,
+            topology_id: KernelTopologyId::from_raw(kernel_id),
+        }
+    }
+
+    fn provenance(faces: Vec<KernelFaceTopologyProvenance>) -> KernelTopologyProvenance {
+        KernelTopologyProvenance {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            faces,
+        }
+    }
+
+    #[test]
+    fn unique_shell_membership_has_priority_over_underlying_face() {
+        let journal = provenance(vec![
+            face(Some(source(0, 41)), Some(source(0, 9)), 100),
+            face(Some(source(0, 9)), None, 200),
+        ]);
+        assert_eq!(
+            journal.face_for_source_id(0, 9),
+            Some(KernelTopologyId::from_raw(100)),
+        );
+    }
+
+    #[test]
+    fn underlying_face_lookup_is_used_only_when_shell_membership_is_absent() {
+        let journal = provenance(vec![
+            face(Some(source(0, 9)), None, 200),
+            face(Some(source(1, 9)), Some(source(1, 9)), 300),
+        ]);
+        assert_eq!(
+            journal.face_for_source_id(0, 9),
+            Some(KernelTopologyId::from_raw(200)),
+        );
+        assert_eq!(
+            journal.face_for_source_id(1, 9),
+            Some(KernelTopologyId::from_raw(300)),
+        );
+        assert_eq!(journal.face_for_source_id(2, 9), None);
+    }
+
+    #[test]
+    fn conflicting_shell_membership_never_falls_back_to_a_unique_underlying_face() {
+        // In the old Option-based lookup, the two shell members became None,
+        // and the distinct underlying face silently became an editable target.
+        let journal = provenance(vec![
+            face(None, Some(source(0, 9)), 100),
+            face(None, Some(source(0, 9)), 101),
+            face(Some(source(0, 9)), None, 200),
+        ]);
+        assert_eq!(journal.face_for_source_id(0, 9), None);
+    }
+
+    #[test]
+    fn repeated_same_kernel_identity_is_unique_but_distinct_fallbacks_are_not() {
+        let repeated = provenance(vec![
+            face(None, Some(source(0, 9)), 100),
+            face(None, Some(source(0, 9)), 100),
+        ]);
+        assert_eq!(
+            repeated.face_for_source_id(0, 9),
+            Some(KernelTopologyId::from_raw(100)),
+        );
+        let ambiguous_fallback = provenance(vec![
+            face(Some(source(0, 9)), None, 100),
+            face(Some(source(0, 9)), None, 101),
+        ]);
+        assert_eq!(ambiguous_fallback.face_for_source_id(0, 9), None);
+    }
+
+    #[test]
+    fn vertices_and_edges_remain_fail_closed_on_conflicting_kernel_ids() {
+        let mut journal = provenance(Vec::new());
+        journal.vertices = vec![
+            KernelTopologyEntityProvenance {
+                source: source(0, 9),
+                topology_id: KernelTopologyId::from_raw(100),
+            },
+            KernelTopologyEntityProvenance {
+                source: source(0, 9),
+                topology_id: KernelTopologyId::from_raw(101),
+            },
+        ];
+        journal.edges = journal.vertices.clone();
+        assert_eq!(journal.vertex_for_source_id(0, 9), None);
+        assert_eq!(journal.edge_for_source_id(0, 9), None);
+        assert_eq!(journal.vertex_for_source_id(1, 9), None);
     }
 }
