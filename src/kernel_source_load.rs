@@ -127,10 +127,7 @@ impl KernelTopologyProvenance {
                 Some(_) => return UniqueTopologyLookup::Ambiguous,
             }
         }
-        match first {
-            Some(id) => UniqueTopologyLookup::Unique(id),
-            None => UniqueTopologyLookup::Missing,
-        }
+        first.map_or(UniqueTopologyLookup::Missing, UniqueTopologyLookup::Unique)
     }
 
     pub(crate) fn vertex_for_source_id(
