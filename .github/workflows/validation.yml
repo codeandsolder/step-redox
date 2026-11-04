@@ -22,9 +22,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: fuzz
+      - name: Setup canonical sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@18397eb8f0bd8a76f90010a66a8519011f7992ca # main
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -38,12 +37,16 @@ jobs:
       - name: Fuzz solid revolution recovery
         run: cargo +nightly fuzz run solid_revolutions -- -runs=10000 -dict=fuzz/step.dict
 
+      - name: Finalize canonical sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@18397eb8f0bd8a76f90010a66a8519011f7992ca # main
+
   shared-sccache:
     name: Rust build/test (shared sccache)
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@9be344b41c4c7e53f451d7ab1f66d7d9e7a9a6f4 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@18397eb8f0bd8a76f90010a66a8519011f7992ca # main
     with:
       command: |
         cargo +1.99.1 test --lib --release --locked
@@ -75,7 +78,8 @@ jobs:
         with:
           components: clippy,rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Setup canonical sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@18397eb8f0bd8a76f90010a66a8519011f7992ca # main
 
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -150,3 +154,7 @@ jobs:
           name: step-validation
           path: validation/out
           if-no-files-found: warn
+
+      - name: Finalize canonical sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@18397eb8f0bd8a76f90010a66a8519011f7992ca # main
