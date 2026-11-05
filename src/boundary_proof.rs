@@ -273,7 +273,7 @@ fn analytic_boundary_signature(
     Ok(AnalyticBoundarySignature { supports, chains })
 }
 
-/// An EDGE_LOOP is ordered. Consecutive ORIENTED_EDGE uses must meet at
+/// An `EDGE_LOOP` is ordered. Consecutive `ORIENTED_EDGE` uses must meet at
 /// the *same topological vertex*, including the closing last-to-first pair.
 /// Coincident coordinates do not repair disconnected vertex identities.
 fn validate_face_loop_vertices(face_id: u64, boundary: &brep::FaceLoop) -> Result<(), String> {
@@ -1450,7 +1450,8 @@ mod tests {
             vec![edge(1, 100, 101), edge(2, 101, 999)],
         ] {
             let error = validate_face_loop_vertices(7, &boundary(malformed))
-                .expect_err("disconnected wire cannot certify a closed face");
+                .err()
+                .unwrap_or_default();
             assert!(error.contains("face #7"));
             assert!(error.contains("disconnects"));
         }
@@ -1539,7 +1540,8 @@ mod tests {
         // allowing non-manifold coedges into a semantic equality signature.
         for uses in [vec![0, 0, 0], vec![0, 1, 0], vec![0, 1, 0, 1]] {
             let error = merge_support_components(&graph_for(uses))
-                .expect_err("extra uses must be rejected");
+                .err()
+                .unwrap_or_default();
             assert!(error.contains("edge #42"));
             assert!(error.contains("exactly two"));
         }
