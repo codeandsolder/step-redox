@@ -282,15 +282,27 @@ fn merge_support_components(
     graph: &BoundaryGraph,
 ) -> Result<(UnionFind, HashMap<usize, OrientedSupportKey>), String> {
     let mut union_find = UnionFind::new(graph.faces.len());
-    for attached in graph.edge_faces.values() {
-        let unique = attached.iter().copied().collect::<BTreeSet<_>>();
-        if unique.len() > 2 {
-            return Err("non-manifold edge has more than two attached faces".to_owned());
+    // A closed, orientable B-rep has precisely two COEDGE occurrences per
+    // topological edge, including seams used twice by the same face. Checking
+    // merely the number of distinct incident faces misses duplicate coedges
+    // (e.g. [face0, face1, face0]), which can spuriously preserve a boundary
+    // signature despite non-manifold topology. Check raw use multiplicity.
+    // Sort by STEP edge id so malformed models get stable diagnostics.
+    let mut edge_uses = graph.edge_faces.iter().collect::<Vec<_>>();
+    edge_uses.sort_unstable_by_key(|(edge_id, _)| **edge_id);
+    for (edge_id, attached) in edge_uses {
+        if attached.len() != 2 {
+            return Err(format!(
+                "edge #{edge_id} has {} uses; a closed boundary needs exactly two",
+                attached.len()
+            ));
         }
-        if let [first, second] = unique.iter().copied().collect::<Vec<_>>().as_slice()
-            && graph.faces[*first].support == graph.faces[*second].support
-        {
-            union_find.union(*first, *second);
+        let [first, second] = [attached[0], attached[1]];
+        if first >= graph.faces.len() || second >= graph.faces.len() {
+            return Err(format!("edge #{edge_id} references a missing face"));
+        }
+        if first != second && graph.faces[first].support == graph.faces[second].support {
+            union_find.union(first, second);
         }
     }
 
@@ -1312,6 +1324,37 @@ mod tests {
         );
         assert!(first.is_ok());
         assert_eq!(first, split);
+    }
+
+    #[test]
+    fn boundary_proof_rejects_extra_coedge_uses_even_when_faces_are_not_distinct() {
+        let graph_for = |uses: Vec<usize>| BoundaryGraph {
+            faces: vec![
+                FaceInfo {
+                    support: plane(0, true),
+                },
+                FaceInfo {
+                    support: plane(10_000_000, true),
+                },
+            ],
+            edge_faces: HashMap::from([(42, uses)]),
+            edge_geometry: HashMap::new(),
+        };
+
+        // A valid seam may appear twice on the same face.
+        assert!(merge_support_components(&graph_for(vec![0, 0])).is_ok());
+        // A regular edge may have exactly two distinct incident faces.
+        assert!(merge_support_components(&graph_for(vec![0, 1])).is_ok());
+
+        // Distinct-face cardinality alone would previously accept both,
+        // allowing non-manifold coedges into a semantic equality signature.
+        for uses in [vec![0, 0, 0], vec![0, 1, 0], vec![0, 1, 0, 1]] {
+            let error = merge_support_components(&graph_for(uses))
+                .expect_err("extra uses must be rejected");
+            assert!(error.contains("edge #42"));
+            assert!(error.contains("exactly two"));
+        }
+        assert!(merge_support_components(&graph_for(vec![0])).is_err());
     }
 
     #[test]
