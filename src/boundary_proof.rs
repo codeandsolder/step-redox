@@ -93,9 +93,9 @@ struct EdgeGeometry {
     support: CurveSupport,
 }
 
-/// One topological edge traversal, after applying FACE_BOUND.orientation.
+/// One topological edge traversal, after applying `FACE_BOUND.orientation`.
 ///
-/// The underlying EDGE_CURVE.same_sense relates its parameter direction to
+/// The underlying `EDGE_CURVE.same_sense` relates its parameter direction to
 /// the topological edge; it does not change this face-incidence direction.
 #[derive(Debug, Clone, Copy)]
 struct CoedgeUse {
@@ -1638,18 +1638,24 @@ mod tests {
         assert!(merge_support_components(&graph_for(vec![0])).is_err());
 
         let mut same_direction = graph_for(vec![0, 1]);
-        same_direction.edge_uses.get_mut(&42).unwrap()[1].effective_forward = true;
+        let uses = same_direction.edge_uses.entry(42).or_default();
+        assert_eq!(uses.len(), 2);
+        uses[1].effective_forward = true;
         assert!(
             merge_support_components(&same_direction)
-                .expect_err("shared edge cannot be used twice in the same face direction")
+                .err()
+                .unwrap_or_default()
                 .contains("same effective orientation")
         );
 
         let mut same_oriented_edge_id = graph_for(vec![0, 1]);
-        same_oriented_edge_id.edge_uses.get_mut(&42).unwrap()[1].oriented_edge_id = 100;
+        let uses = same_oriented_edge_id.edge_uses.entry(42).or_default();
+        assert_eq!(uses.len(), 2);
+        uses[1].oriented_edge_id = 100;
         assert!(
             merge_support_components(&same_oriented_edge_id)
-                .expect_err("an ORIENTED_EDGE instance is only one use")
+                .err()
+                .unwrap_or_default()
                 .contains("reuses ORIENTED_EDGE")
         );
     }
