@@ -243,8 +243,7 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
         return Ok(None);
     };
 
-    let mut fragments = Vec::with_capacity(canonical_pairs.len());
-    let mut axes = Vec::with_capacity(canonical_pairs.len());
+    let mut recovered_cores = Vec::with_capacity(canonical_pairs.len());
     let mut max_residual_mm = crate::boundary_proof::ANALYTIC_BOUNDARY_PROOF_TOL_MM;
     for &pair in &canonical_pairs {
         let Some(core) = crate::solid_extrusions::recover_extrusion_core_from_cap_faces_with_index(
@@ -253,68 +252,124 @@ pub fn recover_proven_extrusion_core_union_fragment<K: CadKernel>(
             return Ok(None);
         };
         max_residual_mm = max_residual_mm.max(core.max_residual_mm);
-        axes.push(core.z_axis);
-        fragments.push(recover_solid_extrusion_fragment(&core)?);
+        recovered_cores.push((
+            core.profile_curves.len(),
+            core.z_axis,
+            recover_solid_extrusion_fragment(&core)?,
+        ));
     }
 
-    let (mut model, root) = compose_extrusion_core_union_model(&fragments, &axes)?;
-    let evaluated = kernel.evaluate(&model, root)?;
-    let summary = kernel.summarize(&evaluated);
-    if !summary.geometrically_consistent || summary.shells != 1 {
-        return Ok(None);
+    // The kernel evaluates multiway Boolean unions left to right. A valid
+    // whole-solid union can still fail when its early intermediate components
+    // are detached or meet on a poorly conditioned contact. Preserve the
+    // source order first, then retry with one source-derived carrier-first
+    // schedule: the richest profile is the initial carrier and less complex
+    // attachments are joined before the remaining detailed members.
+    //
+    // This is an evaluation schedule, not a semantic claim: every schedule
+    // must independently reconstruct and match the entire source boundary.
+    let canonical_order = (0..recovered_cores.len()).collect::<Vec<_>>();
+    let mut secondary_order = canonical_order.clone();
+    secondary_order.sort_by_key(|&index| {
+        (
+            std::cmp::Reverse(recovered_cores[index].0),
+            canonical_pairs[index],
+        )
+    });
+    let dominant = secondary_order.remove(0);
+    secondary_order.sort_by_key(|&index| (recovered_cores[index].0, canonical_pairs[index]));
+    secondary_order.insert(0, dominant);
+    let mut schedules = vec![canonical_order];
+    if secondary_order != schedules[0] {
+        schedules.push(secondary_order);
     }
 
-    let rebuilt_step = kernel.to_step(&evaluated)?;
-    let rebuilt = ParsedExchange::parse(rebuilt_step.as_bytes())?.exchange;
-    if rebuilt.data.len() != 1 {
-        return Ok(None);
-    }
-    let rebuilt_entities = &rebuilt.data[0].entities;
-    let rebuilt_solid_ids = rebuilt_entities
-        .iter()
-        .filter_map(|entity| {
-            simple_record(entity)
-                .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
-                .then_some(entity_id(entity))
-        })
-        .collect::<Vec<_>>();
-    let [rebuilt_solid_id] = rebuilt_solid_ids.as_slice() else {
-        return Ok(None);
-    };
+    let mut first_error = None;
+    for order in schedules {
+        let axes = order
+            .iter()
+            .map(|&index| recovered_cores[index].1)
+            .collect::<Vec<_>>();
+        let fragments = order
+            .iter()
+            .map(|&index| recovered_cores[index].2.clone())
+            .collect::<Vec<_>>();
+        let (mut model, root) = compose_extrusion_core_union_model(&fragments, &axes)?;
+        let evaluated = match kernel.evaluate(&model, root) {
+            Ok(evaluated) => evaluated,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        let summary = kernel.summarize(&evaluated);
+        if !summary.geometrically_consistent || summary.shells != 1 {
+            continue;
+        }
 
-    let comparison = crate::boundary_proof::compare_analytic_boundaries(
-        solid_id,
-        entities,
-        *rebuilt_solid_id,
-        rebuilt_entities,
-    );
-    if !comparison.equivalent {
-        return Ok(None);
-    }
+        let rebuilt_step = match kernel.to_step(&evaluated) {
+            Ok(step) => step,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        let rebuilt = ParsedExchange::parse(rebuilt_step.as_bytes())?.exchange;
+        if rebuilt.data.len() != 1 {
+            continue;
+        }
+        let rebuilt_entities = &rebuilt.data[0].entities;
+        let rebuilt_solid_ids = rebuilt_entities
+            .iter()
+            .filter_map(|entity| {
+                simple_record(entity)
+                    .is_some_and(|record| record.name == "MANIFOLD_SOLID_BREP")
+                    .then_some(entity_id(entity))
+            })
+            .collect::<Vec<_>>();
+        let [rebuilt_solid_id] = rebuilt_solid_ids.as_slice() else {
+            continue;
+        };
 
-    let mut source_entity_ids = Vec::with_capacity(source_face_ids.len() + 1);
-    source_entity_ids.push(solid_id);
-    source_entity_ids.extend(source_face_ids);
-    source_entity_ids.sort_unstable();
-    source_entity_ids.dedup();
-    model.set_provenance(
-        root,
-        Provenance {
-            source_entity_ids,
-            proof: ProofStatus::WithinTolerance,
-            max_residual_mm: Some(max_residual_mm),
-        },
-    )?;
-    model.validate()?;
-
-    Ok(Some(CadFragment {
-        source: CadFragmentSource::ExtrusionCoreUnion {
+        let comparison = crate::boundary_proof::compare_analytic_boundaries(
             solid_id,
-            cap_face_ids: canonical_pairs,
-        },
-        model,
-        root,
-    }))
+            entities,
+            *rebuilt_solid_id,
+            rebuilt_entities,
+        );
+        if !comparison.equivalent {
+            continue;
+        }
+
+        let mut source_entity_ids = Vec::with_capacity(source_face_ids.len() + 1);
+        source_entity_ids.push(solid_id);
+        source_entity_ids.extend(source_face_ids.iter().copied());
+        source_entity_ids.sort_unstable();
+        source_entity_ids.dedup();
+        model.set_provenance(
+            root,
+            Provenance {
+                source_entity_ids,
+                proof: ProofStatus::WithinTolerance,
+                max_residual_mm: Some(max_residual_mm),
+            },
+        )?;
+        model.validate()?;
+
+        return Ok(Some(CadFragment {
+            source: CadFragmentSource::ExtrusionCoreUnion {
+                solid_id,
+                cap_face_ids: canonical_pairs,
+            },
+            model,
+            root,
+        }));
+    }
+    return first_error.map_or(Ok(None), Err);
 }
 
 /// Detect and admit one exact union of strict extrusion-core candidates.
