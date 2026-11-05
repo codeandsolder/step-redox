@@ -182,16 +182,73 @@ pub fn analytic_boundary_diagnostic(
     }
 }
 
+/// The broad shape-inspection helper intentionally skips unknown shell
+/// entries. A semantic boundary proof cannot do that: the shell's *entire*
+/// member list must be a unique, supported set of faces, not a subset obtained
+/// by silently ignoring foreign references or duplicate face instances.
+fn strict_closed_shell_faces(
+    solid_id: u64,
+    entities: &[EntityInstance],
+    index: &HashMap<u64, usize>,
+) -> Result<Vec<u64>, String> {
+    let record = index
+        .get(&solid_id)
+        .and_then(|&position| simple_record(&entities[position]))
+        .ok_or_else(|| format!("solid #{solid_id} has no MANIFOLD_SOLID_BREP record"))?;
+    if record.name != "MANIFOLD_SOLID_BREP" {
+        return Err(format!("solid #{solid_id} is not a MANIFOLD_SOLID_BREP"));
+    }
+    let Parameter::List(params) = &record.parameter else {
+        return Err(format!("solid #{solid_id} has malformed parameters"));
+    };
+    let shell_id = params
+        .get(1)
+        .and_then(entity_ref_value)
+        .ok_or_else(|| format!("solid #{solid_id} has no referenced shell"))?;
+    let shell = index
+        .get(&shell_id)
+        .and_then(|&position| simple_record(&entities[position]))
+        .ok_or_else(|| format!("shell #{shell_id} has no supported record"))?;
+    if shell.name != "CLOSED_SHELL" {
+        return Err(format!("shell #{shell_id} is not a CLOSED_SHELL"));
+    }
+    let Parameter::List(shell_params) = &shell.parameter else {
+        return Err(format!("shell #{shell_id} has malformed parameters"));
+    };
+    let Some(Parameter::List(members)) = shell_params.get(1) else {
+        return Err(format!("shell #{shell_id} has no face member list"));
+    };
+    if members.is_empty() {
+        return Err(format!("shell #{shell_id} is empty"));
+    }
+    let mut faces = Vec::with_capacity(members.len());
+    let mut seen = BTreeSet::new();
+    for member in members {
+        let face_id = entity_ref_value(member)
+            .ok_or_else(|| format!("shell #{shell_id} has a non-reference member"))?;
+        let face = index
+            .get(&face_id)
+            .and_then(|&position| simple_record(&entities[position]))
+            .ok_or_else(|| format!("shell #{shell_id} references absent face #{face_id}"))?;
+        if !matches!(face.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE") {
+            return Err(format!(
+                "shell #{shell_id} references non-face member #{face_id}"
+            ));
+        }
+        if !seen.insert(face_id) {
+            return Err(format!("shell #{shell_id} repeats face #{face_id}"));
+        }
+        faces.push(face_id);
+    }
+    Ok(faces)
+}
+
 fn analytic_boundary_signature(
     solid_id: u64,
     entities: &[EntityInstance],
 ) -> Result<AnalyticBoundarySignature, String> {
     let index = build_index(entities);
-    let face_ids = brep::solid_face_ids(solid_id, entities, &index)
-        .ok_or_else(|| "solid has no supported manifold face list".to_owned())?;
-    if face_ids.is_empty() {
-        return Err("solid has no faces".to_owned());
-    }
+    let face_ids = strict_closed_shell_faces(solid_id, entities, &index)?;
 
     let graph = collect_boundary_graph(&face_ids, entities, &index)?;
     let (mut union_find, component_support) = merge_support_components(&graph)?;
@@ -216,6 +273,29 @@ fn analytic_boundary_signature(
     Ok(AnalyticBoundarySignature { supports, chains })
 }
 
+/// An EDGE_LOOP is ordered. Consecutive ORIENTED_EDGE uses must meet at
+/// the *same topological vertex*, including the closing last-to-first pair.
+/// Coincident coordinates do not repair disconnected vertex identities.
+fn validate_face_loop_vertices(face_id: u64, boundary: &brep::FaceLoop) -> Result<(), String> {
+    let edges = &boundary.edges;
+    if edges.is_empty() {
+        return Err(format!(
+            "face #{face_id} boundary #{} is an empty EDGE_LOOP",
+            boundary.bound_id
+        ));
+    }
+    for (index, edge) in edges.iter().enumerate() {
+        let next = &edges[(index + 1) % edges.len()];
+        if edge.end_vertex != next.start_vertex {
+            return Err(format!(
+                "face #{face_id} boundary #{} disconnects between edges #{} and #{}",
+                boundary.bound_id, edge.oriented_edge_id, next.oriented_edge_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn collect_boundary_graph(
     face_ids: &[u64],
     entities: &[EntityInstance],
@@ -234,6 +314,9 @@ fn collect_boundary_graph(
             return Err(format!("face #{face_id} has no boundary loops"));
         }
 
+        for boundary in &loops {
+            validate_face_loop_vertices(face_id, boundary)?;
+        }
         for edge in loops.iter().flat_map(|loop_| &loop_.edges) {
             edge_faces.entry(edge.edge_id).or_default().push(face_index);
             let geometry = EdgeGeometry {
@@ -1324,6 +1407,112 @@ mod tests {
         );
         assert!(first.is_ok());
         assert_eq!(first, split);
+    }
+
+    #[test]
+    fn strict_boundary_proof_requires_connected_closed_oriented_edge_loops() {
+        let edge = |id, start_vertex, end_vertex| brep::OrientedEdgeUse {
+            oriented_edge_id: id,
+            edge_id: id,
+            curve_id: id,
+            curve_same_sense: true,
+            parameter_forward: true,
+            start_vertex,
+            end_vertex,
+            start_mm: [0.0, 0.0, 0.0],
+            end_mm: [0.0, 0.0, 0.0],
+            support: CurveSupport::Other { entity_id: id },
+        };
+        let boundary = |edges: Vec<brep::OrientedEdgeUse>| brep::FaceLoop {
+            bound_id: 42,
+            loop_id: 43,
+            outer: true,
+            orientation: false,
+            edges,
+        };
+        assert!(
+            validate_face_loop_vertices(
+                7,
+                &boundary(vec![
+                    edge(1, 100, 101),
+                    edge(2, 101, 102),
+                    edge(3, 102, 100)
+                ])
+            )
+            .is_ok()
+        );
+
+        // Same geometric coordinate is insufficient when the STEP VERTEX_POINT
+        // identity is different. Any disconnected hop or unclosed final
+        // vertex invalidates the topological loop.
+        for malformed in [
+            vec![edge(1, 100, 101), edge(2, 999, 100)],
+            vec![edge(1, 100, 101), edge(2, 101, 999)],
+        ] {
+            let error = validate_face_loop_vertices(7, &boundary(malformed))
+                .expect_err("disconnected wire cannot certify a closed face");
+            assert!(error.contains("face #7"));
+            assert!(error.contains("disconnects"));
+        }
+        assert!(validate_face_loop_vertices(7, &boundary(Vec::new())).is_err());
+        // A valid closed circular topology may use a single edge whose
+        // start and end identify the same vertex.
+        assert!(validate_face_loop_vertices(7, &boundary(vec![edge(1, 100, 100)])).is_ok());
+    }
+
+    #[test]
+    fn strict_boundary_proof_rejects_foreign_and_duplicate_shell_members() {
+        use ruststep::ast::{Name, Record};
+        let entity = |id, name: &str, params| EntityInstance::Simple {
+            id,
+            record: Record {
+                name: name.to_owned(),
+                parameter: Parameter::List(params),
+            },
+        };
+        let reference = |id| Parameter::Ref(Name::Entity(id));
+        let base = |members: Vec<Parameter>| {
+            vec![
+                entity(
+                    1,
+                    "MANIFOLD_SOLID_BREP",
+                    vec![Parameter::String(String::new()), reference(2)],
+                ),
+                entity(
+                    2,
+                    "CLOSED_SHELL",
+                    vec![Parameter::String(String::new()), Parameter::List(members)],
+                ),
+                entity(3, "ADVANCED_FACE", vec![]),
+                entity(4, "FACE_SURFACE", vec![]),
+                entity(5, "DIRECTION", vec![]),
+            ]
+        };
+        let check = |members| {
+            let entities = base(members);
+            strict_closed_shell_faces(1, &entities, &build_index(&entities))
+        };
+        assert_eq!(check(vec![reference(3), reference(4)]), Ok(vec![3, 4]));
+        let foreign = check(vec![reference(3), reference(5)]);
+        assert!(
+            foreign
+                .as_ref()
+                .is_err_and(|reason| reason.contains("non-face"))
+        );
+        let missing = check(vec![reference(3), reference(999)]);
+        assert!(
+            missing
+                .as_ref()
+                .is_err_and(|reason| reason.contains("absent face"))
+        );
+        let repeated = check(vec![reference(3), reference(3)]);
+        assert!(
+            repeated
+                .as_ref()
+                .is_err_and(|reason| reason.contains("repeats face"))
+        );
+        assert!(check(vec![reference(3), Parameter::String(String::new())]).is_err());
+        assert!(check(vec![]).is_err());
     }
 
     #[test]
