@@ -93,10 +93,21 @@ struct EdgeGeometry {
     support: CurveSupport,
 }
 
+/// One topological edge traversal, after applying FACE_BOUND.orientation.
+///
+/// The underlying EDGE_CURVE.same_sense relates its parameter direction to
+/// the topological edge; it does not change this face-incidence direction.
+#[derive(Debug, Clone, Copy)]
+struct CoedgeUse {
+    face_index: usize,
+    oriented_edge_id: u64,
+    effective_forward: bool,
+}
+
 #[derive(Debug)]
 struct BoundaryGraph {
     faces: Vec<FaceInfo>,
-    edge_faces: HashMap<u64, Vec<usize>>,
+    edge_uses: HashMap<u64, Vec<CoedgeUse>>,
     edge_geometry: HashMap<u64, EdgeGeometry>,
 }
 
@@ -296,13 +307,25 @@ fn validate_face_loop_vertices(face_id: u64, boundary: &brep::FaceLoop) -> Resul
     Ok(())
 }
 
+// parameter_forward indicates agreement (XNOR) between the
+// ORIENTED_EDGE orientation and EDGE_CURVE.same_sense. Recover the topological edge use,
+// then apply the FACE_BOUND flag, which reverses its implicit oriented edges
+// when false (ISO 10303-42, face_bound). Face_surface.same_sense sets the
+// face's geometric normal; it does not independently reverse this traversal.
+const fn effective_coedge_forward(edge: &brep::OrientedEdgeUse, bound_orientation: bool) -> bool {
+    (edge.parameter_forward == edge.curve_same_sense) == bound_orientation
+}
+
 fn collect_boundary_graph(
     face_ids: &[u64],
     entities: &[EntityInstance],
     index: &HashMap<u64, usize>,
 ) -> Result<BoundaryGraph, String> {
     let mut faces = Vec::with_capacity(face_ids.len());
-    let mut edge_faces = HashMap::<u64, Vec<usize>>::new();
+    let mut edge_uses = HashMap::<u64, Vec<CoedgeUse>>::new();
+    // An ORIENTED_EDGE instance is a use, and may occur only once in an
+    // oriented CLOSED_SHELL, even when both uses refer to the same edge.
+    let mut seen_oriented_edges = BTreeSet::<u64>::new();
     let mut edge_geometry = HashMap::<u64, EdgeGeometry>::new();
 
     for (face_index, face_id) in face_ids.iter().copied().enumerate() {
@@ -317,24 +340,36 @@ fn collect_boundary_graph(
         for boundary in &loops {
             validate_face_loop_vertices(face_id, boundary)?;
         }
-        for edge in loops.iter().flat_map(|loop_| &loop_.edges) {
-            edge_faces.entry(edge.edge_id).or_default().push(face_index);
-            let geometry = EdgeGeometry {
-                start: point_key(edge.start_mm)
-                    .ok_or_else(|| format!("edge #{} has non-finite start", edge.edge_id))?,
-                end: point_key(edge.end_mm)
-                    .ok_or_else(|| format!("edge #{} has non-finite end", edge.edge_id))?,
-                curve_id: edge.curve_id,
-                support: edge.support.clone(),
-            };
-            validate_or_insert_edge_geometry(edge.edge_id, geometry, &mut edge_geometry)?;
+        for boundary in &loops {
+            for edge in &boundary.edges {
+                if !seen_oriented_edges.insert(edge.oriented_edge_id) {
+                    return Err(format!(
+                        "ORIENTED_EDGE #{} is reused in the shell",
+                        edge.oriented_edge_id
+                    ));
+                }
+                edge_uses.entry(edge.edge_id).or_default().push(CoedgeUse {
+                    face_index,
+                    oriented_edge_id: edge.oriented_edge_id,
+                    effective_forward: effective_coedge_forward(edge, boundary.orientation),
+                });
+                let geometry = EdgeGeometry {
+                    start: point_key(edge.start_mm)
+                        .ok_or_else(|| format!("edge #{} has non-finite start", edge.edge_id))?,
+                    end: point_key(edge.end_mm)
+                        .ok_or_else(|| format!("edge #{} has non-finite end", edge.edge_id))?,
+                    curve_id: edge.curve_id,
+                    support: edge.support.clone(),
+                };
+                validate_or_insert_edge_geometry(edge.edge_id, geometry, &mut edge_geometry)?;
+            }
         }
         faces.push(FaceInfo { support });
     }
 
     Ok(BoundaryGraph {
         faces,
-        edge_faces,
+        edge_uses,
         edge_geometry,
     })
 }
@@ -371,7 +406,7 @@ fn merge_support_components(
     // (e.g. [face0, face1, face0]), which can spuriously preserve a boundary
     // signature despite non-manifold topology. Check raw use multiplicity.
     // Sort by STEP edge id so malformed models get stable diagnostics.
-    let mut edge_uses = graph.edge_faces.iter().collect::<Vec<_>>();
+    let mut edge_uses = graph.edge_uses.iter().collect::<Vec<_>>();
     edge_uses.sort_unstable_by_key(|(edge_id, _)| **edge_id);
     for (edge_id, attached) in edge_uses {
         if attached.len() != 2 {
@@ -381,11 +416,24 @@ fn merge_support_components(
             ));
         }
         let [first, second] = [attached[0], attached[1]];
-        if first >= graph.faces.len() || second >= graph.faces.len() {
+        if first.face_index >= graph.faces.len() || second.face_index >= graph.faces.len() {
             return Err(format!("edge #{edge_id} references a missing face"));
         }
-        if first != second && graph.faces[first].support == graph.faces[second].support {
-            union_find.union(first, second);
+        if first.oriented_edge_id == second.oriented_edge_id {
+            return Err(format!(
+                "edge #{edge_id} reuses ORIENTED_EDGE #{}",
+                first.oriented_edge_id
+            ));
+        }
+        if first.effective_forward == second.effective_forward {
+            return Err(format!(
+                "edge #{edge_id} has two coedges with the same effective orientation"
+            ));
+        }
+        if first.face_index != second.face_index
+            && graph.faces[first.face_index].support == graph.faces[second.face_index].support
+        {
+            union_find.union(first.face_index, second.face_index);
         }
     }
 
@@ -411,8 +459,11 @@ fn group_physical_boundaries(
     index: &HashMap<u64, usize>,
 ) -> Result<GroupedBoundarySegments, String> {
     let mut grouped_segments = BTreeMap::new();
-    for (edge_id, attached) in &graph.edge_faces {
-        let unique_faces = attached.iter().copied().collect::<BTreeSet<_>>();
+    for (edge_id, attached) in &graph.edge_uses {
+        let unique_faces = attached
+            .iter()
+            .map(|edge_use| edge_use.face_index)
+            .collect::<BTreeSet<_>>();
         let roots = unique_faces
             .iter()
             .copied()
@@ -1517,6 +1568,35 @@ mod tests {
     }
 
     #[test]
+    fn effective_coedge_orientation_uses_bound_flag_not_curve_parameter_sense() {
+        let edge = |parameter_forward, curve_same_sense| brep::OrientedEdgeUse {
+            oriented_edge_id: 101,
+            edge_id: 10,
+            curve_id: 20,
+            curve_same_sense,
+            parameter_forward,
+            start_vertex: 1,
+            end_vertex: 2,
+            start_mm: [0.0; 3],
+            end_mm: [1.0; 3],
+            support: CurveSupport::Other { entity_id: 20 },
+        };
+        // The intrinsic curve parameterization cancels out. Reversing the
+        // FACE_BOUND flips effective topological incidence, but a matching
+        // change in EDGE_CURVE.same_sense and parameter_forward does not.
+        for (parameter_forward, curve_same_sense) in [(true, true), (false, false)] {
+            let edge = edge(parameter_forward, curve_same_sense);
+            assert!(effective_coedge_forward(&edge, true));
+            assert!(!effective_coedge_forward(&edge, false));
+        }
+        for (parameter_forward, curve_same_sense) in [(true, false), (false, true)] {
+            let edge = edge(parameter_forward, curve_same_sense);
+            assert!(!effective_coedge_forward(&edge, true));
+            assert!(effective_coedge_forward(&edge, false));
+        }
+    }
+
+    #[test]
     fn boundary_proof_rejects_extra_coedge_uses_even_when_faces_are_not_distinct() {
         let graph_for = |uses: Vec<usize>| BoundaryGraph {
             faces: vec![
@@ -1527,7 +1607,17 @@ mod tests {
                     support: plane(10_000_000, true),
                 },
             ],
-            edge_faces: HashMap::from([(42, uses)]),
+            edge_uses: HashMap::from([(
+                42,
+                uses.into_iter()
+                    .enumerate()
+                    .map(|(i, face_index)| CoedgeUse {
+                        face_index,
+                        oriented_edge_id: 100 + i as u64,
+                        effective_forward: i % 2 == 0,
+                    })
+                    .collect(),
+            )]),
             edge_geometry: HashMap::new(),
         };
 
@@ -1546,6 +1636,22 @@ mod tests {
             assert!(error.contains("exactly two"));
         }
         assert!(merge_support_components(&graph_for(vec![0])).is_err());
+
+        let mut same_direction = graph_for(vec![0, 1]);
+        same_direction.edge_uses.get_mut(&42).unwrap()[1].effective_forward = true;
+        assert!(
+            merge_support_components(&same_direction)
+                .expect_err("shared edge cannot be used twice in the same face direction")
+                .contains("same effective orientation")
+        );
+
+        let mut same_oriented_edge_id = graph_for(vec![0, 1]);
+        same_oriented_edge_id.edge_uses.get_mut(&42).unwrap()[1].oriented_edge_id = 100;
+        assert!(
+            merge_support_components(&same_oriented_edge_id)
+                .expect_err("an ORIENTED_EDGE instance is only one use")
+                .contains("reuses ORIENTED_EDGE")
+        );
     }
 
     #[test]
