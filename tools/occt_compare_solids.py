@@ -1,4 +1,4 @@
-# ruff: file-ignore[missing-type-function-argument, missing-return-type-undocumented-public-function]
+# ruff: file-ignore[missing-type-function-argument, missing-return-type-public-function]
 # Dynamic CAD/prototype boundary: ty still checks soundness; exhaustive annotations would be mostly opaque external types.
 import argparse
 import json
